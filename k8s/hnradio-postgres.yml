@@ -1,0 +1,89 @@
+# In-cluster Postgres for hnradio's episode store (replaces the JSON file).
+# Single small instance in the sleeperhitlist namespace. The DATABASE_URL is
+# created out-of-band into the `hnradio-db` secret (kept out of git):
+#
+#   kubectl -n sleeperhitlist create secret generic hnradio-db \
+#     --from-literal=POSTGRES_PASSWORD=<pw> \
+#     --from-literal=DATABASE_URL=postgresql://hnradio:<pw>@hnradio-postgres:5432/hnradio
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hnradio-pg-data
+  namespace: sleeperhitlist
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hnradio-postgres
+  namespace: sleeperhitlist
+  labels:
+    app: hnradio-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: hnradio-postgres
+  template:
+    metadata:
+      labels:
+        app: hnradio-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: hnradio
+            - name: POSTGRES_USER
+              value: hnradio
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: hnradio-db
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "hnradio", "-d", "hnradio"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: hnradio-pg-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hnradio-postgres
+  namespace: sleeperhitlist
+spec:
+  type: ClusterIP
+  selector:
+    app: hnradio-postgres
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432

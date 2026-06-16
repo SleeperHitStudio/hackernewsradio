@@ -1,0 +1,7 @@
+node_modules
+dist
+web/dist
+data/dramas.json
+.env
+*.log
+.DS_Store

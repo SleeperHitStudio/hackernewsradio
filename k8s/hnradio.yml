@@ -1,0 +1,172 @@
+# hackernewsradio — Kubernetes manifests for the Sleeper Hit Studio cluster.
+#
+# Deployed into the existing `sleeperhitlist` namespace to reuse:
+#   - the Docker Hub pull secret `sleeperhitlistcreds`
+#   - the Traefik ingress class + the `letsencrypt-prod-http` cert-manager Issuer
+#
+# The app talks to Sleeper Hit over the in-cluster service (no public round-trip)
+# using its OWN dedicated API key, held in the `hnradio-secrets` Secret. That
+# secret is created out-of-band (kept out of git):
+#
+#   kubectl -n sleeperhitlist create secret generic hnradio-secrets \
+#     --from-literal=SLEEPERHIT_API_KEY=sh_xxx
+#
+# Image tag is substituted at deploy time (IMAGE_TAG).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hnradio-data
+  namespace: sleeperhitlist
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hnradio
+  namespace: sleeperhitlist
+  labels:
+    app: hnradio
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: hnradio
+  template:
+    metadata:
+      labels:
+        app: hnradio
+    spec:
+      containers:
+        - name: hnradio
+          image: timheckel/hnradio:IMAGE_TAG
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "8080"
+            # Talk to Sleeper Hit over the in-cluster service (same namespace).
+            - name: SLEEPERHIT_API_BASE
+              value: "http://sleeperhitlist-prod-service"
+            - name: SLEEPERHIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hnradio-secrets
+                  key: SLEEPERHIT_API_KEY
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: hnradio-db
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hnradio-data
+      imagePullSecrets:
+        - name: sleeperhitlistcreds
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hnradio-service
+  namespace: sleeperhitlist
+  labels:
+    app: hnradio-service
+spec:
+  type: ClusterIP
+  selector:
+    app: hnradio
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hnradio-ingress
+  namespace: sleeperhitlist
+  annotations:
+    cert-manager.io/issuer: "letsencrypt-prod-http"
+    external-dns.alpha.kubernetes.io/hostname: "hnradio.net,www.hnradio.net"
+    external-dns.alpha.kubernetes.io/target: "5.78.160.190"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - hnradio.net
+        - www.hnradio.net
+      secretName: hnradio-tls-cert
+  rules:
+    - host: hnradio.net
+      http:
+        paths:
+          - pathType: Prefix
+            path: "/"
+            backend:
+              service:
+                name: hnradio-service
+                port:
+                  number: 80
+    - host: www.hnradio.net
+      http:
+        paths:
+          - pathType: Prefix
+            path: "/"
+            backend:
+              service:
+                name: hnradio-service
+                port:
+                  number: 80
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: hnradio-tls-cert
+  namespace: sleeperhitlist
+spec:
+  secretName: hnradio-tls-cert
+  issuerRef:
+    name: letsencrypt-prod-http
+    kind: Issuer
+  commonName: hnradio.net
+  dnsNames:
+    - hnradio.net
+    - www.hnradio.net
+  renewBefore: 720h
