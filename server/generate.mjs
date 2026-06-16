@@ -42,9 +42,12 @@ const SHARED_MUST_KNOW = [
 
 const SHARED_AUDIO = {
   musicStyle:
-    'Music plays ONLY at the very start (a short intro bed/sting under the cold open) and the very end (a closing ' +
-    'outro). There is NO music at all under the middle of the show — the discussion runs clean, voices only. ' +
-    'Think: theme in, talk with no score, theme out.',
+    'Sonic identity: dark, tech-forward electronic. Brooding analog synths, pulsing arpeggiated sequencers, ' +
+    'industrial textures, a propulsive synth-bass low end, and cold, precise, slightly ominous machine-driven ' +
+    'atmosphere — cinematic and a little glitchy, like the score to a near-future digital world. Moody and ' +
+    'electronic, never orchestral, never cheerful jingle. PLACEMENT: music plays ONLY at the very start (a short ' +
+    'intro bed/sting under the cold open) and the very end (a closing outro). There is NO music at all under the ' +
+    'middle of the show — the discussion runs clean, voices only. Think: theme in, talk with no score, theme out.',
   sfxPolicy:
     'Use discrete sound effects to punctuate the show — notification dings, keyboard clatter, phone buzzes, UI clicks, ' +
     'a door, ambient room tone, light transitions between segments. Keep them grounded and purposeful rather than ' +
