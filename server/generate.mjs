@@ -42,11 +42,12 @@ const SHARED_MUST_KNOW = [
 
 const SHARED_AUDIO = {
   musicStyle:
-    'Sonic identity: dark, tech-forward electronic. Brooding analog synths, pulsing arpeggiated sequencers, ' +
-    'industrial textures, a propulsive synth-bass low end, and cold, precise, slightly ominous machine-driven ' +
-    'atmosphere — cinematic and a little glitchy, like the score to a near-future digital world. Moody and ' +
-    'electronic, never orchestral, never cheerful jingle. PLACEMENT: music plays ONLY at the very start (a short ' +
-    'intro bed/sting under the cold open) and the very end (a closing outro). There is NO music at all under the ' +
+    'Sonic palette: modern, electronic, tech-forward — synth-driven and contemporary, never orchestral and never a ' +
+    'cheerful jingle. But the MOOD is ADAPTIVE: let the actual content and emotional tenor of THIS thread set it. A ' +
+    'tense, high-stakes debate wants darker, driving, more ominous synths; a playful or absurd thread wants something ' +
+    'brighter and wrier; a reflective or wistful thread wants something cooler and more spacious. Read the room of the ' +
+    'comments and score to it — do not default to one fixed theme. PLACEMENT: music plays ONLY at the very start (a ' +
+    'short intro bed/sting under the cold open) and the very end (a closing outro). There is NO music at all under the ' +
     'middle of the show — the discussion runs clean, voices only. Think: theme in, talk with no score, theme out.',
   sfxPolicy:
     'Use discrete sound effects to punctuate the show — notification dings, keyboard clatter, phone buzzes, UI clicks, ' +
@@ -87,7 +88,9 @@ function podcastBrief(thread, pageTarget) {
         'tropes and clichés: no zany sound-effect comedy, no forced banter or catchphrases, no "and we\'re back", no ' +
         'trying too hard. NO narrator and NO announcer — a host opens the show themselves and goes straight in. ' +
         'Structure it like a real episode: a tight cold-open hook, the main discussion in a couple of segments, and a ' +
-        'clean host sign-off. Quote real comments verbatim and react to them by handle.',
+        'clean host sign-off that simply wraps up THIS conversation — NO fake next-episode teases, NO "like and ' +
+        'subscribe", NO "see you next time", no invented show branding. Quote real comments verbatim and react to ' +
+        'them by handle.',
       pageTarget,
       castNotes:
         'NO MORE THAN 6 voices, ALL of them HOSTS or guests — 2–4 recurring HOSTS who feel like real, specific people ' +
@@ -104,6 +107,8 @@ function podcastBrief(thread, pageTarget) {
         'Stay irreverent and opinionated, but AVOID tropes, clichés, and stock podcast moves.',
         'NO narrator/announcer — a HOST opens the show in character and the hosts sign off themselves.',
         'Open cold on the hosts and END with a clean host sign-off — wrap up fully, do not trail off mid-sentence.',
+        'The outro is just a genuine wrap-up of THIS discussion. Do NOT invent a next episode, tease future shows, ' +
+        'ask listeners to like/subscribe/follow/rate, or use any podcast-outro CTA clichés.',
       ],
     },
     styleConstraints: SHARED_STYLE_CONSTRAINTS,
