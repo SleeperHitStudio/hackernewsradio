@@ -42,13 +42,11 @@ const SHARED_MUST_KNOW = [
 
 const SHARED_AUDIO = {
   musicStyle:
-    'Sonic palette: modern, electronic, tech-forward — synth-driven and contemporary, never orchestral and never a ' +
-    'cheerful jingle. But the MOOD is ADAPTIVE: let the actual content and emotional tenor of THIS thread set it. A ' +
-    'tense, high-stakes debate wants darker, driving, more ominous synths; a playful or absurd thread wants something ' +
-    'brighter and wrier; a reflective or wistful thread wants something cooler and more spacious. Read the room of the ' +
-    'comments and score to it — do not default to one fixed theme. PLACEMENT: music plays ONLY at the very start (a ' +
-    'short intro bed/sting under the cold open) and the very end (a closing outro). There is NO music at all under the ' +
-    'middle of the show — the discussion runs clean, voices only. Think: theme in, talk with no score, theme out.',
+    'Sonic palette: modern, electronic, tech-forward — synth-driven, never orchestral or a cheerful jingle. But the ' +
+    "MOOD is ADAPTIVE: let THIS thread's content and tenor set it — a tense debate wants darker, driving synths; a " +
+    'playful thread something brighter; a reflective one cooler and more spacious. PLACEMENT: music ONLY at the very ' +
+    'start (a short intro bed under the cold open) and the very end (a closing outro). NO music under the middle — ' +
+    'voices only. Theme in, talk, theme out.',
   sfxPolicy:
     'Use discrete sound effects to punctuate the show — notification dings, keyboard clatter, phone buzzes, UI clicks, ' +
     'a door, ambient room tone, light transitions between segments. Keep them grounded and purposeful rather than ' +
@@ -80,17 +78,14 @@ function podcastBrief(thread, pageTarget) {
       installmentLabel: thread.title.slice(0, 150),
       genre: 'smart, irreverent tech panel podcast',
       audience: 'Fans of Hacker News and tech culture',
+      // Kept under the Story API's 600-char writingStyle cap; the trope/outro/
+      // narrator constraints are reinforced in mustKnowBeforeWriting below.
       writingStyle:
         'A smart, engaging tech-panel PODCAST. 2–4 hosts with genuinely distinct, believable points of view read and ' +
-        'react to the ACTUAL comments — they dig into what is actually interesting, disagree honestly, and find the dry ' +
-        'humor in the thread without performing it. Wry, understated, curious; the wit lives in the observations and the ' +
-        'timing, not in bits or punch-up. Engaging comes first — funny is the seasoning, not the meal. Avoid podcast ' +
-        'tropes and clichés: no zany sound-effect comedy, no forced banter or catchphrases, no "and we\'re back", no ' +
-        'trying too hard. NO narrator and NO announcer — a host opens the show themselves and goes straight in. ' +
-        'Structure it like a real episode: a tight cold-open hook, the main discussion in a couple of segments, and a ' +
-        'clean host sign-off that simply wraps up THIS conversation — NO fake next-episode teases, NO "like and ' +
-        'subscribe", NO "see you next time", no invented show branding. Quote real comments verbatim and react to ' +
-        'them by handle.',
+        'react to the ACTUAL comments — digging into what is interesting, disagreeing honestly, and finding the DRY ' +
+        'humor without performing it. Wry, understated, curious; the wit is in the observations and the timing, not ' +
+        'in bits. Engaging first — funny is the seasoning, not the meal. NO narrator or announcer: a host opens cold ' +
+        'and the hosts sign off themselves. Quote real comments verbatim and react to them by handle.',
       pageTarget,
       castNotes:
         'NO MORE THAN 6 voices, ALL of them HOSTS or guests — 2–4 recurring HOSTS who feel like real, specific people ' +
