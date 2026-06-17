@@ -167,6 +167,22 @@ export class SleeperHit {
     return res.music ?? res
   }
 
+  /** Wait until the job's baseline defined clips have finished rendering (so we
+   *  don't mistake a still-rendering bed for a missing one). */
+  async waitForMusicSettled(artifactId, { onProgress } = {}) {
+    let last
+    for (let i = 0; i < 50; i++) {
+      last = await this.getMusic(artifactId)
+      if (last.musicMode !== 'defined_clips') return last
+      const clips = last.definedClips ?? []
+      const inFlight = clips.some((c) => c.status === 'pending' || c.status === 'rendering')
+      onProgress?.(`music: clips ${clips.filter((c) => c.status === 'ready').length}/${clips.length} ready`)
+      if (!inFlight && (clips.length > 0 || last.status === 'none')) return last
+      await sleep(3000)
+    }
+    return last
+  }
+
   /** Mutate a single scene's defined clip (e.g. { disabled: true } to mute it). */
   async setDefinedClip(artifactId, sceneIndex, clip) {
     await this.request(`/artifacts/${artifactId}/music`, {

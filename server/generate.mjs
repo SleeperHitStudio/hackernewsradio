@@ -255,37 +255,31 @@ async function runPipeline(id, thread) {
 }
 
 /**
- * Reduce the read's music to a bookend: keep a bed on the first (intro) and last
- * (outro) scene, mute every scene in between. The Story API's defined-clips mode
- * beds ~50% of scenes by default (opening + largest), which is far too musical
- * for a talk podcast — this leaves the middle voices-only. Generates the outro
- * bed if the default coverage skipped that scene. Best-effort by design.
+ * Reduce the read's music to a bookend. The Story API's defined-clips mode beds
+ * ~50% of scenes by default (opening + largest scenes), which is far too musical
+ * for a talk podcast. We wait for those baseline beds to finish rendering, then
+ * keep only the FIRST and LAST rendered beds (the open and the close) and mute
+ * everything in between — leaving the middle of the show voices-only. We mute
+ * existing beds rather than render new ones, so there's no slow/flaky Lyria
+ * round-trip on the hot path. Best-effort: any hiccup just finalizes as-is.
  */
 async function shapeMusicToBookends(sh, artifactId, onProgress) {
-  const music = await sh.getMusic(artifactId)
+  const music = await sh.waitForMusicSettled(artifactId, { onProgress })
   if (music?.musicMode !== 'defined_clips') return // realtime mode: nothing to mute
-  const total = Number(music.totalScenes) || 0
-  if (total <= 1) return // single scene — leave its one bed alone
 
-  const introIndex = 0
-  const outroIndex = total - 1
-  const keep = new Set([introIndex, outroIndex])
-  const clips = Array.isArray(music.definedClips) ? music.definedClips : []
-  const hasClip = (i) => clips.some((c) => c.sceneIndex === i)
+  const clips = (Array.isArray(music.definedClips) ? music.definedClips : [])
+    .filter((c) => c.status === 'ready')
+  if (clips.length <= 2) return // already a bookend (or sparser) — leave it
 
-  // The intro always has a bed (opening is always covered); the outro often does
-  // not — render it so the show closes on music, not silence.
-  const missing = [...keep].filter((i) => !hasClip(i))
-  if (missing.length) await sh.regenerateMusicScenes(artifactId, missing, { onProgress })
+  const indexes = clips.map((c) => c.sceneIndex).sort((a, b) => a - b)
+  const keep = new Set([indexes[0], indexes[indexes.length - 1]]) // first + last beds
 
-  // Mute every non-bookend bed.
-  const after = missing.length ? await sh.getMusic(artifactId) : music
   let muted = 0
-  for (const c of (after.definedClips ?? [])) {
+  for (const c of clips) {
     if (!keep.has(c.sceneIndex) && !c.disabled) {
       await sh.setDefinedClip(artifactId, c.sceneIndex, { disabled: true })
       muted++
     }
   }
-  onProgress?.(`music: bookended — intro + outro kept, ${muted} middle bed${muted === 1 ? '' : 's'} muted`)
+  onProgress?.(`music: bookended — kept scenes [${[...keep].sort((a, b) => a - b).join(', ')}], muted ${muted} middle bed${muted === 1 ? '' : 's'}`)
 }
