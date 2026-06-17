@@ -42,11 +42,11 @@ const SHARED_MUST_KNOW = [
 
 const SHARED_AUDIO = {
   musicStyle:
-    'Sonic palette: modern, electronic, tech-forward — synth-driven, never orchestral or a cheerful jingle. But the ' +
-    "MOOD is ADAPTIVE: let THIS thread's content and tenor set it — a tense debate wants darker, driving synths; a " +
-    'playful thread something brighter; a reflective one cooler and more spacious. PLACEMENT: music ONLY at the very ' +
-    'start (a short intro bed under the cold open) and the very end (a closing outro). NO music under the middle — ' +
-    'voices only. Theme in, talk, theme out.',
+    'Sonic palette: modern, electronic, tech-forward — synth-driven, never orchestral or a cheerful jingle; MOOD ' +
+    'adapts to THIS thread (tense = darker/driving, playful = brighter, reflective = cooler). TIMING is strict and ' +
+    'sparse: a ~30–40s intro bed under the cold open, a ~30–40s outro bed at the close, and AT MOST one or two brief ' +
+    '~10s stings to punctuate a mid-show transition. Everything else is VOICES ONLY — the large majority of the ' +
+    'episode has NO music. Bookend in, talk dry, bookend out.',
   sfxPolicy:
     'Use discrete sound effects to punctuate the show — notification dings, keyboard clatter, phone buzzes, UI clicks, ' +
     'a door, ambient room tone, light transitions between segments. Keep them grounded and purposeful rather than ' +
@@ -58,8 +58,9 @@ const SHARED_AUDIO = {
 // voicePreference biases the cast toward Cartesia (reliable live API).
 const SHARED_STYLE_CONSTRAINTS = {
   musicPolicy:
-    'Music ONLY at the intro and the outro — a short opening bed and a closing bed. NO music whatsoever under the ' +
-    'middle dialogue. SFX should be plentiful throughout, but music is strictly bookend-only.',
+    'Music is bookend-only and sparse: ~30–40s under the intro, ~30–40s under the outro, plus AT MOST one or two ' +
+    '~10s punctuation stings mid-show. The vast majority of runtime is voices-only with NO music. SFX stay plentiful ' +
+    'throughout; music does not.',
   voicePreference: 'Prefer Cartesia voices for the cast; avoid leaning on a single provider.',
 }
 
@@ -100,6 +101,8 @@ function podcastBrief(thread, pageTarget) {
         'Be DRYLY funny — wry, understated, smart. Do NOT try too hard to be funny; let the humor come from real ' +
         'reactions and good timing, never from forced jokes, bits, or catchphrases.',
         'Stay irreverent and opinionated, but AVOID tropes, clichés, and stock podcast moves.',
+        'MUSIC IS SPARSE: a ~30–40s intro bed, a ~30–40s outro bed, and at most one or two ~10s mid-show stings — ' +
+        'otherwise VOICES ONLY. Most of the episode has no music at all; do not run a continuous score under the talk.',
         'NO narrator/announcer — a HOST opens the show in character and the hosts sign off themselves.',
         'Open cold on the hosts and END with a clean host sign-off — wrap up fully, do not trail off mid-sentence.',
         'The outro is just a genuine wrap-up of THIS discussion. Do NOT invent a next episode, tease future shows, ' +
@@ -234,9 +237,55 @@ async function runPipeline(id, thread) {
   }
   await patchDrama(id, { artifactId })
 
+  // The Story API beds ~50% of scenes with music by default — far too much for a
+  // talk podcast. Shape it to a sparse bookend (intro + outro only) before the
+  // mix. Non-fatal: if shaping hiccups, we still finalize with whatever exists.
+  try {
+    await note(id, 'Shaping music to a sparse bookend…')
+    await shapeMusicToBookends(sh, artifactId, onProgress)
+  } catch (err) {
+    await note(id, `Music shaping skipped (${err?.message || err})`)
+  }
+
   await note(id, 'Mixing the durable MP3 (voices + music + SFX)…')
   const audioUrl = await sh.finalizeAudio(artifactId, { onProgress })
 
   await patchDrama(id, { status: 'ready', audioUrl, error: null })
   await note(id, `Done — your ${label} is ready.`)
+}
+
+/**
+ * Reduce the read's music to a bookend: keep a bed on the first (intro) and last
+ * (outro) scene, mute every scene in between. The Story API's defined-clips mode
+ * beds ~50% of scenes by default (opening + largest), which is far too musical
+ * for a talk podcast — this leaves the middle voices-only. Generates the outro
+ * bed if the default coverage skipped that scene. Best-effort by design.
+ */
+async function shapeMusicToBookends(sh, artifactId, onProgress) {
+  const music = await sh.getMusic(artifactId)
+  if (music?.musicMode !== 'defined_clips') return // realtime mode: nothing to mute
+  const total = Number(music.totalScenes) || 0
+  if (total <= 1) return // single scene — leave its one bed alone
+
+  const introIndex = 0
+  const outroIndex = total - 1
+  const keep = new Set([introIndex, outroIndex])
+  const clips = Array.isArray(music.definedClips) ? music.definedClips : []
+  const hasClip = (i) => clips.some((c) => c.sceneIndex === i)
+
+  // The intro always has a bed (opening is always covered); the outro often does
+  // not — render it so the show closes on music, not silence.
+  const missing = [...keep].filter((i) => !hasClip(i))
+  if (missing.length) await sh.regenerateMusicScenes(artifactId, missing, { onProgress })
+
+  // Mute every non-bookend bed.
+  const after = missing.length ? await sh.getMusic(artifactId) : music
+  let muted = 0
+  for (const c of (after.definedClips ?? [])) {
+    if (!keep.has(c.sceneIndex) && !c.disabled) {
+      await sh.setDefinedClip(artifactId, c.sceneIndex, { disabled: true })
+      muted++
+    }
+  }
+  onProgress?.(`music: bookended — intro + outro kept, ${muted} middle bed${muted === 1 ? '' : 's'} muted`)
 }

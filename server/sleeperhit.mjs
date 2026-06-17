@@ -156,6 +156,43 @@ export class SleeperHit {
     throw new SleeperHitError('Table read generation timed out.')
   }
 
+  // ── Defined-clip music shaping (musicMode 'defined_clips') ─────────────────
+  // The Story API beds ~50% of the read's scenes with music by default; for the
+  // podcast we want a sparse, bookended feel, so after the job we keep only the
+  // intro + outro scenes and mute the rest (see shapeMusicToBookends).
+
+  /** Read the artifact's adaptive-soundtrack state ({ musicMode, totalScenes, definedClips[] }). */
+  async getMusic(artifactId) {
+    const res = await this.request(`/artifacts/${artifactId}/music`)
+    return res.music ?? res
+  }
+
+  /** Mutate a single scene's defined clip (e.g. { disabled: true } to mute it). */
+  async setDefinedClip(artifactId, sceneIndex, clip) {
+    await this.request(`/artifacts/${artifactId}/music`, {
+      method: 'POST', idempotencyKey: true, body: { sceneIndex, clip },
+    })
+  }
+
+  /** Render a music bed for explicit scenes (bypasses coverage), then poll until ready. */
+  async regenerateMusicScenes(artifactId, sceneIndexes, { onProgress } = {}) {
+    if (!sceneIndexes.length) return
+    await this.request(`/artifacts/${artifactId}/music`, {
+      method: 'POST', idempotencyKey: true, body: { regenerateScenes: sceneIndexes },
+    })
+    const want = new Set(sceneIndexes)
+    for (let i = 0; i < 60; i++) {
+      await sleep(3000)
+      const music = await this.getMusic(artifactId)
+      const clips = (music.definedClips ?? []).filter((c) => want.has(c.sceneIndex))
+      const ready = clips.filter((c) => c.status === 'ready').length
+      onProgress?.(`music: rendering bookend beds (${ready}/${want.size})`)
+      if (clips.length >= want.size && clips.every((c) => c.status === 'ready')) return
+      if (clips.some((c) => c.status === 'failed')) throw new SleeperHitError('Bookend music render failed.')
+    }
+    throw new SleeperHitError('Bookend music render timed out.')
+  }
+
   /** Finalize the durable full-mix MP3 (voices + Lyria music + SFX), then poll until rendered. */
   async finalizeAudio(artifactId, { onProgress } = {}) {
     const first = await this.request(`/artifacts/${artifactId}/finalize`, {
