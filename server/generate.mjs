@@ -118,6 +118,7 @@ function buildBrief(thread) {
 }
 
 const stamp = () => new Date().toISOString()
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /**
  * Kick off a generation. Returns the drama record immediately (status 'queued')
@@ -267,19 +268,26 @@ async function shapeMusicToBookends(sh, artifactId, onProgress) {
   const music = await sh.waitForMusicSettled(artifactId, { onProgress })
   if (music?.musicMode !== 'defined_clips') return // realtime mode: nothing to mute
 
-  const clips = (Array.isArray(music.definedClips) ? music.definedClips : [])
+  const ready = (Array.isArray(music.definedClips) ? music.definedClips : [])
     .filter((c) => c.status === 'ready')
-  if (clips.length <= 2) return // already a bookend (or sparser) — leave it
+  if (ready.length <= 2) return // already a bookend (or sparser) — leave it
 
-  const indexes = clips.map((c) => c.sceneIndex).sort((a, b) => a - b)
+  const indexes = ready.map((c) => c.sceneIndex).sort((a, b) => a - b)
   const keep = new Set([indexes[0], indexes[indexes.length - 1]]) // first + last beds
 
-  let muted = 0
-  for (const c of clips) {
-    if (!keep.has(c.sceneIndex) && !c.disabled) {
-      await sh.setDefinedClip(artifactId, c.sceneIndex, { disabled: true })
-      muted++
-    }
+  // Disable every non-bookend bed, then VERIFY — a late worker write can
+  // re-materialise a muted bed, so re-disable any offenders across a few passes
+  // until the only audible beds are the bookends.
+  let lastMuted = 0
+  for (let pass = 0; pass < 4; pass++) {
+    const state = await sh.getMusic(artifactId)
+    const offenders = (state.definedClips ?? []).filter(
+      (c) => c.status === 'ready' && !keep.has(c.sceneIndex) && !c.disabled,
+    )
+    if (offenders.length === 0) break
+    for (const c of offenders) await sh.setDefinedClip(artifactId, c.sceneIndex, { disabled: true })
+    lastMuted += offenders.length
+    await sleep(4000) // let any in-flight worker write land, then re-verify
   }
-  onProgress?.(`music: bookended — kept scenes [${[...keep].sort((a, b) => a - b).join(', ')}], muted ${muted} middle bed${muted === 1 ? '' : 's'}`)
+  onProgress?.(`music: bookended — kept scenes [${[...keep].sort((a, b) => a - b).join(', ')}], muted ${lastMuted} middle bed${lastMuted === 1 ? '' : 's'}`)
 }

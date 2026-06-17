@@ -167,21 +167,31 @@ export class SleeperHit {
     return res.music ?? res
   }
 
-  /** Wait until the job's baseline defined clips have finished rendering. They
-   *  enqueue async during the job and can still be rendering at/after READY, so
-   *  we must wait for them to APPEAR and settle — an early empty read (no clips
-   *  yet) is NOT "done", it just means the worker hasn't written them. Only the
-   *  generous timeout concludes "this read genuinely has no music." */
+  /** Wait until the music-clips worker is fully DONE writing beds. The beds
+   *  enqueue async and stream in one by one, so "no clip in-flight right now"
+   *  is not enough — between two renders the set looks momentarily quiet. We
+   *  require the bed set (count + all-ready) to be STABLE across several polls
+   *  before declaring the worker finished, so our later disables don't race a
+   *  worker write that would clobber them. */
   async waitForMusicSettled(artifactId, { onProgress } = {}) {
     let last
-    for (let i = 0; i < 90; i++) {
+    let prevSig = ''
+    let stable = 0
+    for (let i = 0; i < 100; i++) {
       last = await this.getMusic(artifactId)
       if (last.musicMode !== 'defined_clips') return last
       const clips = last.definedClips ?? []
+      const ready = clips.filter((c) => c.status === 'ready').length
       const inFlight = clips.some((c) => c.status === 'pending' || c.status === 'rendering')
-      onProgress?.(`music: clips ${clips.filter((c) => c.status === 'ready').length}/${clips.length} ready`)
-      // Settle only once at least one bed exists and none are still rendering.
-      if (clips.length > 0 && !inFlight) return last
+      const sig = `${clips.length}:${ready}:${inFlight}`
+      onProgress?.(`music: clips ${ready}/${clips.length} ready`)
+      if (clips.length > 0 && !inFlight) {
+        stable = sig === prevSig ? stable + 1 : 1
+        if (stable >= 3) return last // unchanged for ~9s → worker has stopped
+      } else {
+        stable = 0
+      }
+      prevSig = sig
       await sleep(3000)
     }
     return last
