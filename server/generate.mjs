@@ -268,16 +268,38 @@ async function shapeMusicToBookends(sh, artifactId, onProgress) {
   const music = await sh.waitForMusicSettled(artifactId, { onProgress })
   if (music?.musicMode !== 'defined_clips') return // realtime mode: nothing to mute
 
-  const ready = (Array.isArray(music.definedClips) ? music.definedClips : [])
-    .filter((c) => c.status === 'ready')
-  if (ready.length <= 2) return // already a bookend (or sparser) — leave it
+  const total = Number(music.totalScenes) || 0
+  if (total <= 1) return // single scene — its one bed is fine
 
-  const indexes = ready.map((c) => c.sceneIndex).sort((a, b) => a - b)
-  const keep = new Set([indexes[0], indexes[indexes.length - 1]]) // first + last beds
+  // Anchor the bookends to the ACTUAL ends of the show: scene 0 (intro) and the
+  // FINAL scene (outro). The old keep-first/last-EXISTING-bed logic kept whatever
+  // the 50% coverage happened to score last — often a mid-scene bed — and left
+  // the real ending dry. (Beds play once at ~30-40s via the Story API, so a kept
+  // bed is a bookend, not a full-scene wash.)
+  const introIndex = 0
+  const outroIndex = total - 1
+  const keep = new Set([introIndex, outroIndex])
+
+  // Make sure both bookend scenes actually have a rendered bed — generate any
+  // the coverage skipped (the outro scene usually needs this). Best-effort.
+  const readyIdx = new Set(
+    (Array.isArray(music.definedClips) ? music.definedClips : [])
+      .filter((c) => c.status === 'ready')
+      .map((c) => c.sceneIndex),
+  )
+  const missing = [...keep].filter((i) => !readyIdx.has(i))
+  if (missing.length) {
+    try {
+      onProgress?.(`music: rendering bookend bed(s) for scene(s) [${missing.join(', ')}]`)
+      await sh.regenerateMusicScenes(artifactId, missing, { onProgress })
+    } catch (err) {
+      onProgress?.(`music: bookend bed render skipped (${err?.message || err})`)
+    }
+  }
 
   // Disable every non-bookend bed, then VERIFY — a late worker write can
   // re-materialise a muted bed, so re-disable any offenders across a few passes
-  // until the only audible beds are the bookends.
+  // until only the intro + outro beds remain audible.
   let lastMuted = 0
   for (let pass = 0; pass < 4; pass++) {
     const state = await sh.getMusic(artifactId)
@@ -289,5 +311,5 @@ async function shapeMusicToBookends(sh, artifactId, onProgress) {
     lastMuted += offenders.length
     await sleep(4000) // let any in-flight worker write land, then re-verify
   }
-  onProgress?.(`music: bookended — kept scenes [${[...keep].sort((a, b) => a - b).join(', ')}], muted ${lastMuted} middle bed${lastMuted === 1 ? '' : 's'}`)
+  onProgress?.(`music: bookended — intro(scene ${introIndex}) + outro(scene ${outroIndex}), muted ${lastMuted} middle bed${lastMuted === 1 ? '' : 's'}`)
 }
