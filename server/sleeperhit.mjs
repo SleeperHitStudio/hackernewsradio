@@ -167,17 +167,21 @@ export class SleeperHit {
     return res.music ?? res
   }
 
-  /** Wait until the job's baseline defined clips have finished rendering (so we
-   *  don't mistake a still-rendering bed for a missing one). */
+  /** Wait until the job's baseline defined clips have finished rendering. They
+   *  enqueue async during the job and can still be rendering at/after READY, so
+   *  we must wait for them to APPEAR and settle — an early empty read (no clips
+   *  yet) is NOT "done", it just means the worker hasn't written them. Only the
+   *  generous timeout concludes "this read genuinely has no music." */
   async waitForMusicSettled(artifactId, { onProgress } = {}) {
     let last
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 90; i++) {
       last = await this.getMusic(artifactId)
       if (last.musicMode !== 'defined_clips') return last
       const clips = last.definedClips ?? []
       const inFlight = clips.some((c) => c.status === 'pending' || c.status === 'rendering')
       onProgress?.(`music: clips ${clips.filter((c) => c.status === 'ready').length}/${clips.length} ready`)
-      if (!inFlight && (clips.length > 0 || last.status === 'none')) return last
+      // Settle only once at least one bed exists and none are still rendering.
+      if (clips.length > 0 && !inFlight) return last
       await sleep(3000)
     }
     return last
