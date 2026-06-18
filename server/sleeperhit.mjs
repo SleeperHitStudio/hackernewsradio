@@ -137,7 +137,9 @@ export class SleeperHit {
   }
 
   async pollJobReady(jobId, { onProgress } = {}) {
-    for (let i = 0; i < 240; i++) {
+    // 330 × 4s = 22 min — matches the Story API's PERFORMABLE_POLL_TIMEOUT_MS so
+    // hnradio doesn't give up before the server's own budget.
+    for (let i = 0; i < 330; i++) {
       const res = await this.request(`/story-jobs/${jobId}`)
       const job = res.job
       const status = job?.status
