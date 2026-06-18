@@ -13,6 +13,10 @@ export const config = {
   // are fully wired. Override with SLEEPERHIT_API_BASE for stage or localhost.
   apiBase: process.env.SLEEPERHIT_API_BASE || 'https://sleeperhit.studio',
   apiKey: process.env.SLEEPERHIT_API_KEY || '',
+  // Consolidate every run under ONE Sleeper Hit project ("HNRadio") instead of a
+  // new project per thread. When set, each drama becomes another script/episode
+  // under this project so they all live in one feed. Unset → a project per thread.
+  hnRadioProjectId: process.env.HNRADIO_PROJECT_ID || '',
   port: Number(process.env.PORT || 5780),
   // Postgres connection (in-cluster). Falls back to a local dev DB.
   databaseUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@127.0.0.1:5432/hnradio',

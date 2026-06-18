@@ -179,8 +179,16 @@ async function runPipeline(id, thread) {
 
   await patchDrama(id, { status: 'running' })
 
-  await note(id, 'Creating project…')
-  const projectId = await sh.createProject({ name: `HN ${label} — ${thread.title}`.slice(0, 120) })
+  // Reuse the one "HNRadio" project (config.hnRadioProjectId) so every drama is a
+  // script/episode under a single project + feed. Fall back to a per-thread
+  // project only when no HNRadio project is configured.
+  let projectId = config.hnRadioProjectId
+  if (projectId) {
+    await note(id, 'Adding this episode to HNRadio…')
+  } else {
+    await note(id, 'Creating project…')
+    projectId = await sh.createProject({ name: `HN ${label} — ${thread.title}`.slice(0, 120) })
+  }
   await patchDrama(id, { projectId })
 
   await note(id, 'Adding the thread as source…')
