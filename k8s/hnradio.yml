@@ -58,6 +58,10 @@ spec:
               value: "production"
             - name: PORT
               value: "8080"
+            # Consolidate every run under the one "HNRadio" project (one feed)
+            # instead of a new project per thread.
+            - name: HNRADIO_PROJECT_ID
+              value: "cmqk1338t0001n0li6yxo5lbs"
             # Talk to Sleeper Hit over the in-cluster service (same namespace).
             - name: SLEEPERHIT_API_BASE
               value: "http://sleeperhitlist-prod-service"
