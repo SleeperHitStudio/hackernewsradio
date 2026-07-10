@@ -120,7 +120,16 @@ export default function App() {
   }, [query, refresh])
 
   return (
-    <div className="app">
+    <>
+      <img
+        className="hero"
+        src="/hero.webp"
+        alt="The HNR hosts — Gary, Maeve, Obi, and Gruner — live on air around the studio table"
+        width="1672"
+        height="941"
+        fetchpriority="high"
+      />
+      <div className="app">
       <header className="masthead">
         <h1>📻 Hacker News Radio</h1>
         <p>Turn Hacker News comment threads into high-quality podcasts.</p>
@@ -162,6 +171,7 @@ export default function App() {
       <footer className="foot">
         Powered by <a href="https://sleeperhit.studio" target="_blank" rel="noopener noreferrer">Sleeper Hit Studio</a>
       </footer>
-    </div>
+      </div>
+    </>
   )
 }

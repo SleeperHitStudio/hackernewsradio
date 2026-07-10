@@ -27,6 +27,17 @@ body {
   padding: 48px 20px 80px;
 }
 
+.hero {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 78vh;
+  object-fit: cover;
+  object-position: top; /* never crop the HNR neon sign; the crop comes out of the desk/cables */
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
 .masthead h1 {
   font-size: 2.1rem;
   margin: 0 0 8px;
