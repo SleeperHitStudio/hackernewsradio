@@ -334,7 +334,23 @@ async function runPipeline(id, thread) {
   }
   try {
     await note(id, 'Autotuning Gruner (the alien)…')
-    await autotuneAlien(sh, artifactId, onProgress)
+    const tuned = await autotuneAlien(sh, artifactId, onProgress)
+    if (tuned) {
+      // The renders are async — wait for them, then re-assert the pinned cast.
+      // The re-assert is a deliberate cache-buster: the platform's finalize
+      // reuses the voice track rendered at job time, and (as deployed) the
+      // voice-mod worker does NOT invalidate that track — but the CAST route
+      // does. Re-asserting identical voices forces the finalize to rebuild the
+      // track, which is when the tuned clips get projected in.
+      await sh.waitForVoiceModsSettled(artifactId, { onProgress })
+      const pinned = (await getSetting('pinnedVoices')) || {}
+      const cast = await sh.getCast(artifactId)
+      const reassert = cast
+        .filter((e) => hostForCharacter(e.character) && pinned[hostForCharacter(e.character).name]?.voiceId)
+        .map((e) => ({ character: e.character, ...pinned[hostForCharacter(e.character).name] }))
+      if (reassert.length) await sh.updateCast(artifactId, reassert)
+      onProgress?.('autotune: settled — cast re-asserted so the mix rebuilds with the tuned takes')
+    }
   } catch (err) {
     await note(id, `Alien autotune skipped (${err?.message || err})`)
   }
@@ -425,7 +441,8 @@ async function autotuneAlien(sh, artifactId, onProgress) {
     else runs.push({ start: i, end: i })
   }
   for (const r of runs) await sh.applyAutotune(artifactId, r.start, r.end)
-  onProgress?.(`autotune: ${alien.character} tuned — ${indexes.length} line(s) across ${runs.length} range(s)`)
+  onProgress?.(`autotune: ${alien.character} queued — ${indexes.length} line(s) across ${runs.length} range(s)`)
+  return runs.length
 }
 
 /**

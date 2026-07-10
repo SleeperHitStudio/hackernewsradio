@@ -200,6 +200,35 @@ export class SleeperHit {
     })
   }
 
+  /** Wait until every voice modification on the artifact settles (newest record
+   *  per entry-range is 'ready' or 'failed'). The renders are async + queued;
+   *  finalizing before they land would mix the clean takes. Returns
+   *  { ready, failed } counts; a timeout just returns the current tally. */
+  async waitForVoiceModsSettled(artifactId, { onProgress } = {}) {
+    let tally = { ready: 0, failed: 0 }
+    for (let i = 0; i < 120; i++) {
+      const res = await this.request(`/artifacts/${artifactId}`)
+      const mods = res.artifact?.manifest?.audio?.modifications ?? []
+      const newest = new Map()
+      for (const m of mods) {
+        const k = `${m.startEntryIndex}-${m.endEntryIndex}`
+        const prev = newest.get(k)
+        if (!prev || Date.parse(m.updatedAt || 0) > Date.parse(prev.updatedAt || 0)) newest.set(k, m)
+      }
+      const v = [...newest.values()]
+      tally = {
+        ready: v.filter((m) => m.status === 'ready').length,
+        failed: v.filter((m) => m.status === 'failed').length,
+      }
+      const pending = v.length - tally.ready - tally.failed
+      onProgress?.(`autotune: ${tally.ready}/${v.length} rendered${pending ? ` (${pending} in flight)` : ''}`)
+      if (v.length > 0 && pending === 0) return tally
+      if (v.length === 0) return tally
+      await sleep(5000)
+    }
+    return tally
+  }
+
   // ── Defined-clip music shaping (musicMode 'defined_clips') ─────────────────
   // The Story API beds ~50% of the read's scenes with music by default; for the
   // podcast we want a sparse, bookended feel, so after the job we keep only the
