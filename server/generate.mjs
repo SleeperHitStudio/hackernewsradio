@@ -1,20 +1,21 @@
 /**
- * The orchestrator. One HN URL + a mode in → a finalized MP3 out, driven
- * entirely through the Sleeper Hit Story API (the same pipeline the UI/CLI/MCP
- * use). We are a thin conductor: we hand the thread to Sleeper Hit's craft
- * engine with a tight, mode-specific creative brief and let it write, cast,
- * score, and mix.
+ * The orchestrator. One HN URL in → a finalized MP3 out, driven entirely
+ * through the Sleeper Hit Story API (the same pipeline the UI/CLI/MCP use).
+ * We are a thin conductor: we hand the thread to Sleeper Hit's craft engine
+ * with a tight creative brief and let it write, cast, score, and mix.
  *
- * Two modes:
- *   - drama   → an original short audio STORY, re-enacting the thread's tension
- *               as lived events, with an arc and a real ending.
- *   - podcast → a smart, engaging, dryly funny panel discussion of the thread.
+ * The show is an off-center panel podcast with a FIXED recurring cast (HOSTS
+ * below). The brief pins the cast by name; after each performance we pin the
+ * VOICES too — the first episode adopts whatever voices the planner cast and
+ * saves them (store key 'pinnedVoices'), and every later episode recasts to
+ * that saved set so the hosts sound the same forever. Gruner (the alien) gets
+ * his lines autotuned via the Story API's voice-modification effect.
  */
 import { randomUUID } from 'node:crypto'
 import { SleeperHit } from './sleeperhit.mjs'
 import { config } from './config.mjs'
 import { fetchThread, threadToTranscript } from './hn.mjs'
-import { upsertDrama, patchDrama, findByHnIdAndMode } from './store.mjs'
+import { upsertDrama, patchDrama, findByHnIdAndMode, getSetting, setSetting } from './store.mjs'
 
 const client = () => new SleeperHit({ baseUrl: config.apiBase, apiKey: config.apiKey })
 
@@ -33,6 +34,37 @@ export function normalizeMode() {
  */
 function pageTargetFor(commentCount) {
   return Math.max(4, Math.min(9, Math.ceil(commentCount / 18)))
+}
+
+/**
+ * The fixed, recurring cast. The planner is briefed to cast EXACTLY these four
+ * by name every episode; pinHostVoices() then keeps their voices identical
+ * across episodes, and autotuneAlien() gives the alien his signature sound.
+ */
+const HOSTS = [
+  {
+    name: 'GARY',
+    bio: 'human man, 40s; ex-founder still quietly processing the pen-plotter startup that ruined him; deadpan, kind, faintly haunted; opens every show',
+  },
+  {
+    name: 'MAEVE',
+    bio: 'human woman; ex-security-researcher energy; surgically precise and unsettlingly calm; says devastating things politely',
+  },
+  {
+    name: 'OBI',
+    bio: 'Lagos-born infrastructure engineer; grounded, allergic to hype; openly MEAN to Gary — cutting, relentless dry contempt; civil to everyone else',
+  },
+  {
+    name: 'GRUNER',
+    bio: 'an ALIEN field researcher; his implanted voicebox converter mapped his native tongue closest to German — he speaks English with a HEAVY German accent; polite, formal, slightly wrong about idioms',
+    alien: true,
+  },
+]
+
+/** Match a script/cast character label ("GARY", "Gary (host)") back to a host. */
+function hostForCharacter(character) {
+  const c = String(character || '').toUpperCase()
+  return HOSTS.find((h) => c === h.name || new RegExp(`\\b${h.name}\\b`).test(c))
 }
 
 const SHARED_MUST_KNOW = [
@@ -64,47 +96,58 @@ const SHARED_STYLE_CONSTRAINTS = {
   voicePreference: 'Prefer Cartesia voices for the cast; avoid leaning on a single provider.',
 }
 
-/** The podcast: a sharp panel show riffing on the thread. */
+/** The podcast: an off-center panel show with a fixed recurring cast. */
 function podcastBrief(thread, pageTarget) {
   return {
     title: thread.title.slice(0, 150),
     target: {
-      audience: 'Smart tech-podcast listeners who want a genuinely engaging show — not a laugh track',
-      objective: 'Turn a real Hacker News thread into a sharp, engaging PODCAST episode worth listening to end-to-end',
-      outcome: 'The listener is hooked the whole way, actually understands the debate, and is amused by the hosts\' dry wit',
-      tone: 'smart, engaging, dryly funny, irreverent — wry and understated, never trying too hard',
+      audience: 'Tech-podcast listeners who want an unhinged, filthy, genuinely hilarious show — not a polished panel',
+      objective: 'Turn a real Hacker News thread into a profane, ridiculous, weirdly awkward PODCAST episode hosted by the show\'s fixed four-host cast',
+      outcome: 'The listener knows the four hosts by name, actually understands the debate, and is laughing at how weird, awkward, and committed the show is',
+      tone: 'profane, irreverent, rapid-fire, ridiculous, weird, awkward, hilarious — unhinged, played completely straight',
     },
     creativeBrief: {
       projectFormat: 'audio_series',
       installmentLabel: thread.title.slice(0, 150),
-      genre: 'smart, irreverent tech panel podcast',
+      genre: 'profane, ridiculous, off-center tech panel podcast with a fixed recurring cast',
       audience: 'Fans of Hacker News and tech culture',
-      // Kept under the Story API's 600-char writingStyle cap; the trope/outro/
-      // narrator constraints are reinforced in mustKnowBeforeWriting below.
+      // Kept under the Story API's 600-char writingStyle cap; the cast/ritual/
+      // outro constraints are reinforced in castNotes + mustKnowBeforeWriting.
       writingStyle:
-        'A smart, engaging tech-panel PODCAST. 2–4 hosts with genuinely distinct, believable points of view read and ' +
-        'react to the ACTUAL comments — digging into what is interesting, disagreeing honestly, and finding the DRY ' +
-        'humor without performing it. Wry, understated, curious; the wit is in the observations and the timing, not ' +
-        'in bits. Engaging first — funny is the seasoning, not the meal. NO narrator or announcer: a host opens cold ' +
-        'and the hosts sign off themselves. Quote real comments verbatim and react to them by handle.',
+        'A profane, ridiculous, off-center tech-panel PODCAST with a FIXED four-host cast (see castNotes). The hosts ' +
+        'swear constantly and casually. The comedy is RAPID-FIRE, absurd, and awkward — overlapping exchanges, ' +
+        'interruptions, insane tangents, painful silences — played dead straight. Every episode opens with the ' +
+        'same ritual: each host introduces themselves by name in one line, then straight into the thread. They read ' +
+        'and react to the ACTUAL comments — quote them verbatim by handle — and derail into weird arguments. NO ' +
+        'narrator or announcer: Gary opens cold and the hosts sign off themselves.',
       pageTarget,
       castNotes:
-        'NO MORE THAN 6 voices, ALL of them HOSTS or guests — 2–4 recurring HOSTS who feel like real, specific people ' +
-        'with their own genuine takes. Do NOT use stock archetypes or trope personas (no "the cynic", "the hype beast", ' +
-        '"the greybeard") — give each host a particular, believable perspective instead. Optionally a guest voicing the ' +
-        'thread\'s most notable commenter. DO NOT create a NARRATOR or ANNOUNCER — the hosts carry everything, ' +
-        'including the intro and outro.',
+        'EXACTLY these FOUR recurring hosts, every episode, cast by NAME — plus at most ONE optional guest voicing ' +
+        'the thread\'s most notable commenter. ' +
+        HOSTS.map((h, i) => `${i + 1}) ${h.name} — ${h.bio}.`).join(' ') +
+        ' Voices must be clearly distinct: Gary and Obi obviously different male voices; Gruner a German-accented ' +
+        'English voice. Do NOT rename, merge, or replace them. NO NARRATOR or ANNOUNCER.',
       ...SHARED_AUDIO,
       mustKnowBeforeWriting: [
         ...SHARED_MUST_KNOW,
-        'ENGAGING FIRST: the episode must be genuinely interesting and a pleasure to listen to all the way through.',
-        'Be DRYLY funny — wry, understated, smart. Do NOT try too hard to be funny; let the humor come from real ' +
-        'reactions and good timing, never from forced jokes, bits, or catchphrases.',
-        'Stay irreverent and opinionated, but AVOID tropes, clichés, and stock podcast moves.',
+        'The cast is FIXED and recurring: GARY, MAEVE, OBI, and GRUNER host EVERY episode. Use exactly these four ' +
+        'names as the speakers; do not rename, merge, or replace them.',
+        'COLD-OPEN RITUAL: every episode opens the same way — each host introduces themselves by name in one line, ' +
+        'in order (Gary, Maeve, Obi, Gruner), then straight into the thread. It should be slightly awkward every time.',
+        'OBI IS MEAN TO GARY — cutting, personal, relentless, profane; Gary mostly absorbs it, wounded but polite. ' +
+        'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
+        'GRUNER speaks English through his voicebox converter: HEAVY German accent, German-inflected word order, and ' +
+        'he SWEARS IN GERMAN (Scheiße, verdammt, ach du lieber Gott). He never explains or acknowledges any of this.',
+        'SWEAR CONSTANTLY, with AMPLE F-BOMBS: fuck, fucking, shit, goddamn — like punctuation, never bleeped, ' +
+        'never apologized for. Maeve swears with surgical precision; Gary swears mid-existential-spiral.',
+        'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
+        'tangents, sudden painful silences, non sequiturs — irreverent all the way down, played completely straight.',
+        'ENGAGING FIRST: under the chaos the episode must be genuinely interesting — the listener should actually ' +
+        'understand the thread\'s debate by the end, and be hooked the whole way through.',
         'MUSIC IS SPARSE: a ~30–40s intro bed, a ~30–40s outro bed, and at most one or two ~10s mid-show stings — ' +
         'otherwise VOICES ONLY. Most of the episode has no music at all; do not run a continuous score under the talk.',
-        'NO narrator/announcer — a HOST opens the show in character and the hosts sign off themselves.',
-        'Open cold on the hosts and END with a clean host sign-off — wrap up fully, do not trail off mid-sentence.',
+        'NO narrator/announcer — Gary opens the show cold, in character, and END with a clean host sign-off: wrap ' +
+        'up fully, do not trail off mid-sentence.',
         'The outro is just a genuine wrap-up of THIS discussion. Do NOT invent a next episode, tease future shows, ' +
         'ask listeners to like/subscribe/follow/rate, or use any podcast-outro CTA clichés.',
       ],
@@ -246,6 +289,23 @@ async function runPipeline(id, thread) {
   }
   await patchDrama(id, { artifactId })
 
+  // Pin the recurring cast to the same voices every episode (adopting them on
+  // the first run), THEN autotune the alien — tuned renders are built from the
+  // character's current voice, so the recast has to land first. Both steps are
+  // best-effort: a hiccup shouldn't kill the episode.
+  try {
+    await note(id, 'Pinning the recurring host voices…')
+    await pinHostVoices(sh, artifactId, onProgress)
+  } catch (err) {
+    await note(id, `Voice pinning skipped (${err?.message || err})`)
+  }
+  try {
+    await note(id, 'Autotuning Gruner (the alien)…')
+    await autotuneAlien(sh, artifactId, onProgress)
+  } catch (err) {
+    await note(id, `Alien autotune skipped (${err?.message || err})`)
+  }
+
   // The Story API beds ~50% of scenes with music by default — far too much for a
   // talk podcast. Shape it to a sparse bookend (intro + outro only) before the
   // mix. Non-fatal: if shaping hiccups, we still finalize with whatever exists.
@@ -261,6 +321,78 @@ async function runPipeline(id, thread) {
 
   await patchDrama(id, { status: 'ready', audioUrl, error: null })
   await note(id, `Done — your ${label} is ready.`)
+}
+
+/**
+ * Keep the hosts' voices identical across episodes. The Story API can't pin
+ * voices at plan time (castNotes is free text), but it CAN recast a finished
+ * read in place — so the FIRST episode adopts whatever voices the planner cast
+ * for the four hosts (saved under the 'pinnedVoices' setting), and every later
+ * episode batch-recasts its hosts back to that saved set. To re-roll the cast,
+ * delete the 'pinnedVoices' row and the next episode adopts fresh voices.
+ */
+async function pinHostVoices(sh, artifactId, onProgress) {
+  const cast = await sh.getCast(artifactId)
+  const pinned = (await getSetting('pinnedVoices')) || {}
+  const updates = []
+  let adopted = 0
+  for (const entry of cast) {
+    const host = hostForCharacter(entry.character)
+    if (!host) continue
+    const want = pinned[host.name]
+    if (!want?.voiceId) {
+      pinned[host.name] = {
+        voiceId: entry.voiceId,
+        voiceName: entry.voiceName,
+        ...(entry.gender ? { gender: entry.gender } : {}),
+        ...(entry.provider ? { provider: entry.provider } : {}),
+      }
+      adopted++
+    } else if (want.voiceId !== entry.voiceId) {
+      updates.push({ character: entry.character, ...want })
+    }
+  }
+  if (adopted) await setSetting('pinnedVoices', pinned)
+  if (updates.length) {
+    await sh.updateCast(artifactId, updates)
+    onProgress?.(`cast: repinned ${updates.map((u) => u.character).join(', ')} to the recurring voices`)
+  } else {
+    onProgress?.(adopted
+      ? `cast: adopted ${adopted} host voice(s) as the pinned set`
+      : 'cast: already on the pinned voices')
+  }
+}
+
+/**
+ * Gruner's signature: every one of the alien's lines runs through the Story
+ * API's autotune voice effect (the proven default recipe — key D, minor
+ * pentatonic, chapel reverb) — the voicebox-converter sound, on top of the
+ * German-accented voice the cast pins. The endpoint takes one CONTIGUOUS entry
+ * range per call, so his scattered lines are grouped into runs. Renders are
+ * async and queued; the music-shaping wait + finalize polling downstream give
+ * them time to project onto the read before the mix.
+ */
+async function autotuneAlien(sh, artifactId, onProgress) {
+  const cast = await sh.getCast(artifactId)
+  const alien = cast.find((c) => hostForCharacter(c.character)?.alien)
+  if (!alien) {
+    onProgress?.('autotune: no alien in the cast')
+    return
+  }
+  const entries = await sh.getCharacterEntries(artifactId, alien.character)
+  const indexes = [...new Set(entries.map((e) => e.entryIndex))].sort((a, b) => a - b)
+  if (!indexes.length) {
+    onProgress?.(`autotune: no lines found for ${alien.character}`)
+    return
+  }
+  const runs = []
+  for (const i of indexes) {
+    const last = runs[runs.length - 1]
+    if (last && i === last.end + 1) last.end = i
+    else runs.push({ start: i, end: i })
+  }
+  for (const r of runs) await sh.applyAutotune(artifactId, r.start, r.end)
+  onProgress?.(`autotune: ${alien.character} tuned — ${indexes.length} line(s) across ${runs.length} range(s)`)
 }
 
 /**

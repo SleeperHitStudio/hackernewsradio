@@ -33,6 +33,11 @@ async function init() {
     );
     CREATE INDEX IF NOT EXISTS episodes_hn_mode_idx ON episodes (hn_id, mode);
     CREATE INDEX IF NOT EXISTS episodes_created_idx ON episodes (created_at DESC);
+    CREATE TABLE IF NOT EXISTS settings (
+      key         text PRIMARY KEY,
+      value       jsonb NOT NULL,
+      updated_at  timestamptz NOT NULL DEFAULT now()
+    );
   `)
   await migrateLegacyJsonIfEmpty(db)
 }
@@ -127,6 +132,22 @@ export async function patchDrama(id, patch) {
   const next = { ...current, ...patch }
   await upsertDrama(next)
   return next
+}
+
+/** Small JSON key-value settings (e.g. 'pinnedVoices' — the recurring cast's voice map). */
+export async function getSetting(key) {
+  await ensureReady()
+  const { rows } = await getPool().query('SELECT value FROM settings WHERE key = $1', [key])
+  return rows[0] ? rows[0].value : null
+}
+
+export async function setSetting(key, value) {
+  await ensureReady()
+  await getPool().query(
+    `INSERT INTO settings (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [key, JSON.stringify(value)],
+  )
 }
 
 /** Delete episodes (used for admin cleanup). */

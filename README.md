@@ -1,25 +1,43 @@
 # 📻 Hacker News Radio
 
-Turn any Hacker News comment thread into a full **radio drama** — cast, original
-score, and sound effects — performed from the actual argument. One URL in, a
-durable MP3 out.
+Turn any Hacker News comment thread into an episode of a **profane, ridiculous,
+off-center panel podcast** — a fixed recurring cast reads and argues the actual
+thread, swearing constantly, derailing into absurd tangents, and playing it all
+completely straight. Sparse music, grounded SFX. One URL in, a durable MP3 out.
+
+The hosts are pinned, every episode:
+
+- **Gary** — human man, 40s; ex-founder still quietly processing the pen-plotter
+  startup that ruined him; opens every show.
+- **Maeve** — human woman; ex-security-researcher energy; surgically precise,
+  unsettlingly calm, politely devastating.
+- **Obi** — Lagos-born infrastructure engineer; grounded, allergic to hype —
+  and openly, relentlessly mean to Gary (dry contempt, never shouty).
+- **Gruner** — an alien field researcher whose implanted voicebox converter
+  mapped his native tongue closest to German: he speaks heavily German-accented
+  English, and his lines are **autotuned** (the Story API's voice-modification
+  effect) — the converter's signature sound.
 
 It's a thin conductor over the [Sleeper Hit Studio](https://sleeperhit.studio)
 **table-read pipeline** (the same Story API the Sleeper Hit web app, CLI, and MCP
 server use). We fetch the thread, hand it to Sleeper Hit's craft engine with a
-tight creative brief — *≤6 archetype characters, real quotes, genre inferred from
-the thread's tone, rich music + SFX* — and let it write, cast, score, and mix the
-final audio.
+tight creative brief — *the four hosts above, real quotes, sparse bookend music,
+grounded SFX* — and let it write, cast, score, and mix the final audio.
 
 ## How it works
 
 ```
 HN URL → fetch thread (Algolia) → Story API:
-  project → source → plan → approve → job → finalize(audio) → MP3
+  project → source → plan → approve → job → pin voices → autotune Gruner
+          → shape music to bookends → finalize(audio) → MP3
 ```
 
-The genre isn't configured — it's **inferred**. A flamewar becomes a courtroom
-thriller; a Show HN becomes a hopeful comedy; an obituary thread becomes an elegy.
+**Voice pinning:** the Story API can't pin voices at plan time, so the first
+episode *adopts* whatever voices the planner cast for the four hosts (saved in
+the `settings` table under `pinnedVoices`), and every later episode recasts its
+hosts back to that set — the show sounds the same forever. To re-roll the cast,
+delete that row and the next episode adopts fresh voices.
+
 Length scales with the size of the debate.
 
 ## Run it locally

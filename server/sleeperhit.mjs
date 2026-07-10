@@ -158,6 +158,48 @@ export class SleeperHit {
     throw new SleeperHitError('Table read generation timed out.')
   }
 
+  // ── Cast pinning + voice effects ───────────────────────────────────────────
+  // Voices can't be pinned at plan time, but a finished read can be recast in
+  // place (no new revision, no charge). generate.mjs uses these to keep the
+  // recurring hosts on the same voices every episode and to autotune the alien.
+
+  /** The artifact's cast: [{ character, voiceId, voiceName, gender, provider, … }]. */
+  async getCast(artifactId) {
+    const res = await this.request(`/artifacts/${artifactId}/cast`)
+    return res.cast ?? []
+  }
+
+  /** Batch-reassign character voices in place: entries = [{ character, voiceId, voiceName, gender?, provider? }]. */
+  async updateCast(artifactId, entries) {
+    const res = await this.request(`/artifacts/${artifactId}/cast`, {
+      method: 'POST', idempotencyKey: true, body: { entries },
+    })
+    return res.voiceMap ?? res
+  }
+
+  /** One character's dialogue entries ({ entryIndex, character, text }), via the script's character scope. */
+  async getCharacterEntries(artifactId, character) {
+    const qs = `scope=character&character=${encodeURIComponent(character)}&limit=500`
+    const res = await this.request(`/artifacts/${artifactId}/script?${qs}`)
+    return res.script?.selection?.entries ?? []
+  }
+
+  /** Apply the autotune voice effect to a contiguous [start..end] dialogue-entry
+   *  range. Async + queued: returns { modificationId, status }; the tuned audio
+   *  projects onto the read when the modification reaches 'ready'. Omitted
+   *  params fall back to the API's proven defaults (D / minpent / chapel). */
+  async applyAutotune(artifactId, startEntryIndex, endEntryIndex, params) {
+    return this.request(`/artifacts/${artifactId}/voice-modification`, {
+      method: 'POST', idempotencyKey: true,
+      body: {
+        startEntryIndex,
+        endEntryIndex,
+        effect: 'autotune',
+        ...(params ? { params } : {}),
+      },
+    })
+  }
+
   // ── Defined-clip music shaping (musicMode 'defined_clips') ─────────────────
   // The Story API beds ~50% of the read's scenes with music by default; for the
   // podcast we want a sparse, bookended feel, so after the job we keep only the
