@@ -200,6 +200,24 @@ export class SleeperHit {
     })
   }
 
+  /** Re-queue the autotune ranges whose newest record failed (e.g. a queue
+   *  consumer with stale env grabbed them). Returns how many were retried. */
+  async retryFailedVoiceMods(artifactId) {
+    const res = await this.request(`/artifacts/${artifactId}`)
+    const mods = res.artifact?.manifest?.audio?.modifications ?? []
+    const newest = new Map()
+    for (const m of mods) {
+      const k = `${m.startEntryIndex}-${m.endEntryIndex}`
+      const prev = newest.get(k)
+      if (!prev || Date.parse(m.updatedAt || 0) > Date.parse(prev.updatedAt || 0)) newest.set(k, m)
+    }
+    const failed = [...newest.values()].filter((m) => m.status === 'failed')
+    for (const m of failed) {
+      await this.applyAutotune(artifactId, m.startEntryIndex, m.endEntryIndex)
+    }
+    return failed.length
+  }
+
   /** Wait until every voice modification on the artifact settles (newest record
    *  per entry-range is 'ready' or 'failed'). The renders are async + queued;
    *  finalizing before they land would mix the clean takes. Returns

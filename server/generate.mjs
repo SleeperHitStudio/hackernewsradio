@@ -336,13 +336,20 @@ async function runPipeline(id, thread) {
     await note(id, 'Autotuning Gruner (the alien)…')
     const tuned = await autotuneAlien(sh, artifactId, onProgress)
     if (tuned) {
-      // The renders are async — wait for them, then re-assert the pinned cast.
-      // The re-assert is a deliberate cache-buster: the platform's finalize
-      // reuses the voice track rendered at job time, and (as deployed) the
-      // voice-mod worker does NOT invalidate that track — but the CAST route
-      // does. Re-asserting identical voices forces the finalize to rebuild the
-      // track, which is when the tuned clips get projected in.
-      await sh.waitForVoiceModsSettled(artifactId, { onProgress })
+      // The renders are async — wait for them, retrying failed ranges (a queue
+      // consumer with stale env can grab and fail jobs), then re-assert the
+      // pinned cast. The re-assert is a deliberate cache-buster: the platform's
+      // finalize reuses the voice track rendered at job time, and (as deployed)
+      // the voice-mod worker does NOT invalidate that track — but the CAST
+      // route does. Re-asserting identical voices forces the finalize to
+      // rebuild the track, which is when the tuned clips get projected in.
+      let tally = await sh.waitForVoiceModsSettled(artifactId, { onProgress })
+      for (let round = 1; round <= 2 && tally.failed > 0; round++) {
+        const retried = await sh.retryFailedVoiceMods(artifactId)
+        onProgress?.(`autotune: retrying ${retried} failed range(s) (round ${round})`)
+        tally = await sh.waitForVoiceModsSettled(artifactId, { onProgress })
+      }
+      if (tally.failed > 0) onProgress?.(`autotune: ${tally.failed} range(s) still failed — mixing without them`)
       const pinned = (await getSetting('pinnedVoices')) || {}
       const cast = await sh.getCast(artifactId)
       const reassert = cast
