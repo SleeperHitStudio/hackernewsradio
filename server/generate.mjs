@@ -27,14 +27,19 @@ export function normalizeMode() {
 }
 
 /**
- * Scale length to the size of the debate (≈1 page ≈ 1 minute). The Story API
- * gives parse + voice + creative-analysis a 16-min budget to reach performable,
- * so we can afford a fuller read — important so the story has room to actually
- * END instead of getting cut off.
+ * Scale length to the size of the debate (≈1 page ≈ 1 minute). The ceiling is
+ * set by the Story API's FIXED 13,500-token output budget on the script draft
+ * (finishReason=length kills anything bigger): a tightly written rapid-fire
+ * page runs ~1k tokens, so 12 pages fits with margin — but only if the writer
+ * stays terse (the brief demands it), so runPipeline also downshifts the page
+ * target and re-plans whenever a draft still blows the budget.
  */
 function pageTargetFor(commentCount) {
-  return Math.max(4, Math.min(9, Math.ceil(commentCount / 18)))
+  return Math.max(4, Math.min(12, Math.ceil(commentCount / 18)))
 }
+
+/** The Story API's script writer ran out of output tokens mid-draft. */
+const OUTPUT_BUDGET_RE = /output budget|finishReason=length/i
 
 /**
  * The fixed, recurring cast. The planner is briefed to cast EXACTLY these four
@@ -102,7 +107,10 @@ function podcastBrief(thread, pageTarget) {
     title: thread.title.slice(0, 150),
     target: {
       audience: 'Tech-podcast listeners who want an unhinged, filthy, genuinely hilarious show — not a polished panel',
-      objective: 'Turn a real Hacker News thread into a profane, ridiculous, weirdly awkward PODCAST episode hosted by the show\'s fixed four-host cast',
+      objective:
+        'Turn a real Hacker News thread into a profane, ridiculous, weirdly awkward PODCAST episode hosted by the ' +
+        'show\'s fixed four-host cast. WRITE TIGHT: for huge threads, cover the BEST material sharply rather than ' +
+        'everything — a complete tight script beats an exhaustive one that gets cut off mid-draft',
       outcome: 'The listener knows the four hosts by name, actually understands the debate, and is laughing at how weird, awkward, and committed the show is',
       tone: 'profane, irreverent, rapid-fire, ridiculous, weird, awkward, hilarious — unhinged, played completely straight',
     },
@@ -156,8 +164,8 @@ function podcastBrief(thread, pageTarget) {
   }
 }
 
-function buildBrief(thread) {
-  return podcastBrief(thread, pageTargetFor(thread.total))
+function buildBrief(thread, pageTarget) {
+  return podcastBrief(thread, pageTarget)
 }
 
 const stamp = () => new Date().toISOString()
@@ -241,50 +249,75 @@ async function runPipeline(id, thread) {
   })
   await sh.pollSourceReady(projectId, sourceId, { onProgress })
 
-  // Plan generation is a structured-output LLM call and is occasionally flaky.
-  // Plans don't spend credits, so re-roll a few times before giving up.
-  const brief = buildBrief(thread)
-  let planId = null
-  for (let attempt = 1; attempt <= 4; attempt++) {
-    await note(id, attempt === 1 ? `Planning the ${label} (cast, scenes, music, SFX)…` : `Re-planning (attempt ${attempt})…`)
-    try {
-      const plan = await sh.createTableReadPlan(projectId, {
-        title: brief.title,
-        target: brief.target,
-        creativeBrief: brief.creativeBrief,
-        styleConstraints: brief.styleConstraints,
-        sourceIds: [sourceId],
-        narrationPolicy,
-      })
-      await patchDrama(id, { planId: plan.id })
-      const reviewed = await sh.pollPlanForReview(plan.id, { onProgress })
-      if (reviewed.status === 'REQUIRES_APPROVAL') {
-        await note(id, 'Approving the blueprint…')
-        await sh.approvePlan(plan.id)
-      }
-      planId = plan.id
-      break
-    } catch (err) {
-      if (attempt === 4) throw err
-      await note(id, `Plan attempt ${attempt} failed (${err?.message || err}); retrying…`)
-    }
-  }
-
-  // Run the generation job. Failed jobs refund credits, so retry transient
-  // failures; do NOT retry a "time budget" failure (a retry won't help).
-  await note(id, `Performing the ${label} — writing, voicing, scoring…`)
+  // Plan + perform, with an adaptive page target. The Story API's script
+  // writer has a FIXED ~13.5k-token output budget per draft; if a draft blows
+  // it (finishReason=length), retrying the SAME plan only helps once (their
+  // writer gets "be more concise" feedback) — after that we re-plan smaller.
+  // Plans are free; failed jobs refund credits.
+  let pageTarget = pageTargetFor(thread.total)
   let artifactId = null
-  for (let attempt = 1; attempt <= 3; attempt++) {
+
+  for (let round = 1; artifactId === null; round++) {
+    const brief = buildBrief(thread, pageTarget)
+
+    // Plan generation is a structured-output LLM call and is occasionally
+    // flaky. Plans don't spend credits, so re-roll a few times.
+    let planId = null
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      await note(id, attempt === 1
+        ? `Planning the ${label} at ${pageTarget} pages (cast, scenes, music, SFX)…`
+        : `Re-planning (attempt ${attempt})…`)
+      try {
+        const plan = await sh.createTableReadPlan(projectId, {
+          title: brief.title,
+          target: brief.target,
+          creativeBrief: brief.creativeBrief,
+          styleConstraints: brief.styleConstraints,
+          sourceIds: [sourceId],
+          narrationPolicy,
+        })
+        await patchDrama(id, { planId: plan.id })
+        const reviewed = await sh.pollPlanForReview(plan.id, { onProgress })
+        if (reviewed.status === 'REQUIRES_APPROVAL') {
+          await note(id, 'Approving the blueprint…')
+          await sh.approvePlan(plan.id)
+        }
+        planId = plan.id
+        break
+      } catch (err) {
+        if (attempt === 4) throw err
+        await note(id, `Plan attempt ${attempt} failed (${err?.message || err}); retrying…`)
+      }
+    }
+
+    // Run the generation job. Retry transient failures on the same plan; do
+    // NOT retry a "time budget" failure (a retry won't help), and give an
+    // output-budget overflow only ONE same-plan retry before bailing out to
+    // re-plan at a smaller page target.
+    await note(id, `Performing the ${label} — writing, voicing, scoring…`)
     try {
-      const jobId = await sh.createJob(planId)
-      await patchDrama(id, { jobId })
-      artifactId = await sh.pollJobReady(jobId, { onProgress })
-      break
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const jobId = await sh.createJob(planId)
+          await patchDrama(id, { jobId })
+          artifactId = await sh.pollJobReady(jobId, { onProgress })
+          break
+        } catch (err) {
+          const msg = err?.message || String(err)
+          const overBudget = OUTPUT_BUDGET_RE.test(msg)
+          const transient = !/time budget/i.test(msg)
+          if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
+          await note(id, `Performance attempt ${attempt} failed (${msg}); retrying…`)
+        }
+      }
     } catch (err) {
       const msg = err?.message || String(err)
-      const transient = !/time budget/i.test(msg)
-      if (attempt === 3 || !transient) throw err
-      await note(id, `Performance attempt ${attempt} failed (${msg}); retrying…`)
+      if (round < 3 && pageTarget > 4 && OUTPUT_BUDGET_RE.test(msg)) {
+        pageTarget = Math.max(4, pageTarget - 3)
+        await note(id, `Script blew the writer's output budget — re-planning tighter at ${pageTarget} pages…`)
+        continue
+      }
+      throw err
     }
   }
   await patchDrama(id, { artifactId })

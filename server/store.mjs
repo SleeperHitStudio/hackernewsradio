@@ -134,6 +134,22 @@ export async function patchDrama(id, patch) {
   return next
 }
 
+/**
+ * Mark episodes stuck in 'queued'/'running' as failed. runPipeline lives in
+ * this process — a restart (deploy, crash) orphans any in-flight generation,
+ * and without this the episode shows "running" forever. Called once at boot.
+ */
+export async function failStaleRunning() {
+  await ensureReady()
+  const { rowCount } = await getPool().query(
+    `UPDATE episodes SET status = 'failed',
+       data = data || '{"status":"failed","error":"Interrupted by a server restart"}'::jsonb
+     WHERE status IN ('queued', 'running')`,
+  )
+  if (rowCount) console.log(`[store] marked ${rowCount} orphaned in-flight episode(s) as failed`)
+  return rowCount
+}
+
 /** Small JSON key-value settings (e.g. 'pinnedVoices' — the recurring cast's voice map). */
 export async function getSetting(key) {
   await ensureReady()

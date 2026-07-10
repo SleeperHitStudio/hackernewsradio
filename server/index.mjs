@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { config } from './config.mjs'
-import { listDramas, getDrama } from './store.mjs'
+import { listDramas, getDrama, failStaleRunning } from './store.mjs'
 import { startGeneration } from './generate.mjs'
 import { startDailySchedule } from './schedule.mjs'
 
@@ -62,5 +62,6 @@ if (existsSync(dist)) {
 app.listen(config.port, () => {
   console.log(`hackernewsradio server on http://localhost:${config.port}`)
   console.log(`  Story API: ${config.apiBase}  (key ${config.apiKey ? 'loaded' : 'MISSING'})`)
+  failStaleRunning().catch((err) => console.error('[store] stale-run cleanup failed:', err?.message || err))
   startDailySchedule()
 })
