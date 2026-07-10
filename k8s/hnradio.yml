@@ -62,7 +62,7 @@ spec:
             # Consolidate every run under the one "HNRadio" project (one feed)
             # instead of a new project per thread.
             - name: HNRADIO_PROJECT_ID
-              value: "cmqk1338t0001n0li6yxo5lbs"
+              value: "cmredn82g00f5i60609aaw3jq"
             # Talk to Sleeper Hit over the in-cluster service (same namespace).
             - name: SLEEPERHIT_API_BASE
               value: "http://sleeperhitlist-prod-service"
