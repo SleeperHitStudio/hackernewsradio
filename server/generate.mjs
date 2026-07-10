@@ -350,13 +350,24 @@ async function runPipeline(id, thread) {
         tally = await sh.waitForVoiceModsSettled(artifactId, { onProgress })
       }
       if (tally.failed > 0) onProgress?.(`autotune: ${tally.failed} range(s) still failed — mixing without them`)
+      // Single-voice recast (same pinned voice) — the ONE route that, as
+      // deployed, invalidates the cached voice track so the finalize
+      // re-synthesizes with the tuned clips projected in. The batch cast
+      // route does NOT invalidate (verified empirically on 2026-07-10).
       const pinned = (await getSetting('pinnedVoices')) || {}
       const cast = await sh.getCast(artifactId)
-      const reassert = cast
-        .filter((e) => hostForCharacter(e.character) && pinned[hostForCharacter(e.character).name]?.voiceId)
-        .map((e) => ({ character: e.character, ...pinned[hostForCharacter(e.character).name] }))
-      if (reassert.length) await sh.updateCast(artifactId, reassert)
-      onProgress?.('autotune: settled — cast re-asserted so the mix rebuilds with the tuned takes')
+      const alienEntry = cast.find((e) => hostForCharacter(e.character)?.alien)
+      const alienPin = alienEntry && pinned[hostForCharacter(alienEntry.character).name]
+      if (alienEntry) {
+        await sh.recastVoice(artifactId, {
+          character: alienEntry.character,
+          voiceId: alienPin?.voiceId || alienEntry.voiceId,
+          voiceName: alienPin?.voiceName || alienEntry.voiceName,
+          gender: alienPin?.gender || alienEntry.gender,
+          provider: alienPin?.provider || alienEntry.provider,
+        })
+      }
+      onProgress?.('autotune: settled — voice track invalidated so the mix rebuilds with the tuned takes')
     }
   } catch (err) {
     await note(id, `Alien autotune skipped (${err?.message || err})`)

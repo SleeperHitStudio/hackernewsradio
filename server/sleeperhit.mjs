@@ -177,6 +177,21 @@ export class SleeperHit {
     return res.voiceMap ?? res
   }
 
+  /** Recast ONE character's voice via the single-voice route. Unlike the batch
+   *  cast route (as deployed), this also invalidates the cached voices-only
+   *  track, forcing the next finalize to re-synthesize — which is when ready
+   *  voice modifications get projected into the mix. Verified empirically. */
+  async recastVoice(artifactId, { character, voiceId, voiceName, gender, provider }) {
+    await this.request(`/artifacts/${artifactId}/voice`, {
+      method: 'POST', idempotencyKey: true,
+      body: {
+        character, voiceId, voiceName,
+        ...(gender ? { gender } : {}),
+        ...(provider ? { provider } : {}),
+      },
+    })
+  }
+
   /** One character's dialogue entries ({ entryIndex, character, text }), via the script's character scope. */
   async getCharacterEntries(artifactId, character) {
     const qs = `scope=character&character=${encodeURIComponent(character)}&limit=500`
