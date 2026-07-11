@@ -303,7 +303,9 @@ async function runPipeline(id, thread) {
     try {
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const jobId = await sh.createJob(planId)
+          const jobId = await sh.createJob(planId, [
+            { type: 'table_read', narrationPolicy, notes: brief.performanceNotes },
+          ])
           await patchDrama(id, { jobId })
           artifactId = await sh.pollJobReady(jobId, { onProgress })
           break

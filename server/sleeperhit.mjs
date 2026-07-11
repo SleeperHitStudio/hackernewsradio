@@ -132,9 +132,13 @@ export class SleeperHit {
     await this.request(`/story-plans/${planId}/approve`, { method: 'POST', idempotencyKey: true })
   }
 
-  async createJob(storyPlanId) {
+  /** artifactRequests OVERRIDE the plan's own requests on the job — this is
+   *  the channel that reliably reaches script generation (plan-level notes get
+   *  stripped when the plan is stored, verified empirically on job rows). */
+  async createJob(storyPlanId, artifactRequests) {
     const res = await this.request('/story-jobs', {
-      method: 'POST', idempotencyKey: true, body: { storyPlanId },
+      method: 'POST', idempotencyKey: true,
+      body: { storyPlanId, ...(artifactRequests ? { artifactRequests } : {}) },
     })
     return res.job.id
   }
