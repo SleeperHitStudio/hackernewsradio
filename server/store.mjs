@@ -166,6 +166,17 @@ export async function setSetting(key, value) {
   )
 }
 
+/** Remove other episodes of the same thread — a force-regen REPLACES the old
+ *  episode once the new one is ready, instead of stacking duplicates. */
+export async function deleteOtherEpisodesOfThread(hnId, mode, keepId) {
+  await ensureReady()
+  const { rowCount } = await getPool().query(
+    'DELETE FROM episodes WHERE hn_id = $1 AND mode = $2 AND id <> $3',
+    [hnId, mode, keepId],
+  )
+  return rowCount
+}
+
 /** Delete episodes (used for admin cleanup). */
 export async function deleteDramas(ids) {
   await ensureReady()

@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto'
 import { SleeperHit } from './sleeperhit.mjs'
 import { config } from './config.mjs'
 import { fetchThread, threadToTranscript } from './hn.mjs'
-import { upsertDrama, patchDrama, findByHnIdAndMode, getSetting, setSetting } from './store.mjs'
+import { upsertDrama, patchDrama, findByHnIdAndMode, getSetting, setSetting, deleteOtherEpisodesOfThread } from './store.mjs'
 
 const client = () => new SleeperHit({ baseUrl: config.apiBase, apiKey: config.apiKey })
 
@@ -371,6 +371,15 @@ async function runPipeline(id, thread) {
 
   await patchDrama(id, { status: 'ready', audioUrl, error: null })
   await note(id, `Done — your ${label} is ready.`)
+
+  // A regenerated episode REPLACES older takes of the same thread — remove
+  // them so the feed never shows duplicates. Best-effort.
+  try {
+    const removed = await deleteOtherEpisodesOfThread(thread.id, 'podcast', id)
+    if (removed) await note(id, `Replaced ${removed} older episode(s) of this thread.`)
+  } catch (err) {
+    await note(id, `Old-episode cleanup skipped (${err?.message || err})`)
+  }
 
   // Log the aired episode in the project's Series Bible episode map — the
   // bible is the show's canon, so what actually aired belongs there too.
