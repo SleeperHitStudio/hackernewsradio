@@ -158,6 +158,23 @@ export class SleeperHit {
     throw new SleeperHitError('Table read generation timed out.')
   }
 
+  // ── Series Bible (project canon) ────────────────────────────────────────────
+  // The bible holds the show's canon (cast, world rules, jazz theme) and the
+  // episode map; the planner auto-loads it for every plan.
+
+  /** The project's Series Bible document ({ content: { episodes, characters, … } }). */
+  async getSeriesBible(projectId) {
+    const res = await this.request(`/story-projects/${projectId}/series-bible`)
+    return res.document ?? null
+  }
+
+  /** Merge-patch the bible (e.g. { content: { episodes } } replaces just that field). */
+  async patchSeriesBible(projectId, patch) {
+    await this.request(`/story-projects/${projectId}/series-bible`, {
+      method: 'PATCH', idempotencyKey: true, body: patch,
+    })
+  }
+
   // ── Cast pinning + voice effects ───────────────────────────────────────────
   // Voices can't be pinned at plan time, but a finished read can be recast in
   // place (no new revision, no charge). generate.mjs uses these to keep the

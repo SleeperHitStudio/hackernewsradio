@@ -371,6 +371,33 @@ async function runPipeline(id, thread) {
 
   await patchDrama(id, { status: 'ready', audioUrl, error: null })
   await note(id, `Done — your ${label} is ready.`)
+
+  // Log the aired episode in the project's Series Bible episode map — the
+  // bible is the show's canon, so what actually aired belongs there too.
+  try {
+    await logEpisodeInBible(sh, projectId, thread)
+  } catch (err) {
+    await note(id, `Series Bible episode log skipped (${err?.message || err})`)
+  }
+}
+
+/**
+ * Keep the Series Bible's episode map in sync with what actually aired:
+ * append one entry per produced thread, deduped by the HN item id label.
+ */
+async function logEpisodeInBible(sh, projectId, thread) {
+  const doc = await sh.getSeriesBible(projectId)
+  const episodes = Array.isArray(doc?.content?.episodes) ? [...doc.content.episodes] : []
+  const label = `HN ${thread.id}`
+  if (episodes.some((e) => e.label === label)) return
+  episodes.push({
+    id: randomUUID(),
+    label,
+    title: thread.title.slice(0, 200),
+    summary: `Produced episode on the Hacker News thread "${thread.title}" (${thread.total} comments) — ${thread.url}`,
+    status: 'produced',
+  })
+  await sh.patchSeriesBible(projectId, { content: { episodes } })
 }
 
 /**
