@@ -124,21 +124,22 @@ function podcastBrief(thread, pageTarget) {
         'The project SERIES BIBLE is CANON — follow its characters exactly. The four recurring hosts, by NAME, every ' +
         'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (alien, podcast-trained ' +
         'voicebox) — plus at most ONE optional guest voicing the thread\'s most notable commenter. Voices clearly ' +
-        'distinct: Obi an Indian-accented English voice; Gruner a German-accented English voice. Do NOT rename, ' +
-        'merge, or replace them. NO NARRATOR or ANNOUNCER.',
+        'distinct: Obi an Indian-accented English voice; Gruner a DEEP RUSSIAN-accented English voice. Do NOT ' +
+        'rename, merge, or replace them. NO NARRATOR or ANNOUNCER.',
       ...SHARED_AUDIO,
       mustKnowBeforeWriting: [
         ...SHARED_MUST_KNOW,
         'The cast is FIXED and recurring: GARY, MAEVE, OBI, and GRUNER host EVERY episode. Use exactly these four ' +
         'names as the speakers; do not rename, merge, or replace them.',
-        'COLD-OPEN RITUAL: every episode opens the same way — each host introduces themselves by name in one line, ' +
-        'in order (Gary, Maeve, Obi, Gruner), then straight into the thread. It should be slightly awkward every time.',
+        'COLD-OPEN RITUAL: GARY STUMBLES INTO IT — mid-thought, flustered, slightly wrong, never smooth — then each ' +
+        'host introduces themselves in one line, in order (Gary, Maeve, Obi, Gruner), then into the thread.',
         'OBI IS MEAN TO GARY — cutting, personal, relentless, profane; Gary mostly absorbs it, wounded but polite. ' +
         'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
         'The hosts are SATIRE of Silicon Valley archetypes — failed founder (Gary), VC (Maeve), infra lifer (Obi), ' +
         'podcast-brained alien (Gruner). Play the types ruthlessly, as real people, never as sketch characters.',
-        'GRUNER\'s voicebox was TRAINED ON TECH PODCASTS: German-accented English built from Valley lingo used ' +
-        'slightly wrong — "zis has no priors, ja", "ve are so back" — plus German swears (Scheiße, verdammt).',
+        'GRUNER\'s voicebox was TRAINED ON TECH PODCASTS: Russian-accented English — dropped articles ("is bad ' +
+        'take"), blunt declarations, Valley lingo slightly wrong ("ve are so back, da"), Russian swears (blyat, ' +
+        'chyort).',
         'SWEAR CONSTANTLY — F-BOMBS ARE THE SHOW\'S PUNCTUATION, several per exchange: fuck, fucking, shit, goddamn; ' +
         'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
@@ -159,9 +160,11 @@ function podcastBrief(thread, pageTarget) {
       'PROFANITY IS A HARD REQUIREMENT of this show\'s voice, for a mature adult-comedy audience: the hosts drop ' +
       'F-BOMBS CONSTANTLY — at least one "fuck"/"fucking" per PAGE, plus regular "shit" and "goddamn", woven ' +
       'naturally into real reactions (never bleeped, never softened, never lampshaded). Maeve swears with surgical ' +
-      'precision; Gary swears mid-existential-spiral; Obi\'s profanity at Gary is precise and vicious; GRUNER swears ' +
-      'in German (Scheiße, verdammt, ach du lieber Gott) and speaks in heavy tech-podcast jargon used slightly ' +
-      'wrong. Keep the cold-open ritual, quote real commenters by handle, and play everything dead straight.',
+      'precision; Gary swears mid-existential-spiral; Obi\'s profanity at Gary is precise and vicious; GRUNER ' +
+      'speaks RUSSIAN-accented English — dropped articles, blunt declarations, tech-podcast jargon used slightly ' +
+      'wrong ("ve are so back, da") — and swears in Russian (blyat, chyort, bozhe moi). GARY ALWAYS STUMBLES INTO ' +
+      'THE COLD OPEN: mid-thought, flustered, gets something slightly wrong, never smooth — then the intro ritual ' +
+      'assembles around him. Quote real commenters by handle and play everything dead straight.',
   }
 }
 
@@ -518,21 +521,21 @@ async function shapeMusicToBookends(sh, artifactId, onProgress) {
   const outroIndex = total - 1
   const keep = new Set([introIndex, outroIndex])
 
-  // Make sure both bookend scenes actually have a rendered bed — generate any
-  // the coverage skipped (the outro scene usually needs this). Best-effort.
-  const readyIdx = new Set(
-    (Array.isArray(music.definedClips) ? music.definedClips : [])
-      .filter((c) => c.status === 'ready')
-      .map((c) => c.sceneIndex),
-  )
-  const missing = [...keep].filter((i) => !readyIdx.has(i))
-  if (missing.length) {
-    try {
-      onProgress?.(`music: rendering bookend bed(s) for scene(s) [${missing.join(', ')}]`)
-      await sh.regenerateMusicScenes(artifactId, missing, { onProgress })
-    } catch (err) {
-      onProgress?.(`music: bookend bed render skipped (${err?.message || err})`)
-    }
+  // THE THEME IS NON-NEGOTIABLE: set the show's jazz identity as a
+  // screenplay-wide directive (replacing the planner's palette), then ALWAYS
+  // re-render both bookend beds from it — the baseline coverage sometimes
+  // delivers zero beds, and when it does deliver, its per-scene prompts drift
+  // off-theme. Best-effort: a failed render still finalizes voices-only.
+  try {
+    await sh.setMusicDirective(artifactId, {
+      prompt:
+        'The show theme: sleazy late-night jazz — walking upright bass, brushed drums, smoky saxophone, a touch ' +
+        'of Rhodes; slow, too cool for the content, played straight.',
+    })
+    onProgress?.(`music: rendering the jazz theme bookends (scenes ${introIndex} + ${outroIndex})`)
+    await sh.regenerateMusicScenes(artifactId, [...keep], { onProgress })
+  } catch (err) {
+    onProgress?.(`music: jazz bookend render skipped (${err?.message || err})`)
   }
 
   // Disable every non-bookend bed, then VERIFY — a late worker write can

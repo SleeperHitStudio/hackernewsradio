@@ -311,6 +311,7 @@ export class SleeperHit {
       const inFlight = clips.some((c) => c.status === 'pending' || c.status === 'rendering')
       const sig = `${clips.length}:${ready}:${inFlight}`
       onProgress?.(`music: clips ${ready}/${clips.length} ready`)
+      if (clips.length === 0 && i >= 10) return last // coverage delivered nothing (~30s) — we render our own bookends
       if (clips.length > 0 && !inFlight) {
         stable = sig === prevSig ? stable + 1 : 1
         if (stable >= 3) return last // unchanged for ~9s → worker has stopped
@@ -321,6 +322,15 @@ export class SleeperHit {
       await sleep(3000)
     }
     return last
+  }
+
+  /** Set a soundtrack directive (e.g. the show's jazz theme, screenplay-wide,
+   *  mode 'replace' to overwrite the planner's palette) so subsequent clip
+   *  renders use it. */
+  async setMusicDirective(artifactId, { scope = 'screenplay', mode = 'replace', prompt }) {
+    await this.request(`/artifacts/${artifactId}/music`, {
+      method: 'POST', idempotencyKey: true, body: { scope, mode, prompt },
+    })
   }
 
   /** Mutate a single scene's defined clip (e.g. { disabled: true } to mute it). */
