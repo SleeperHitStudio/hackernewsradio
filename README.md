@@ -5,18 +5,27 @@ off-center panel podcast** — a fixed recurring cast reads and argues the actua
 thread, swearing constantly, derailing into absurd tangents, and playing it all
 completely straight. Sparse music, grounded SFX. One URL in, a durable MP3 out.
 
-The hosts are pinned, every episode:
+The hosts are pinned, every episode — a satire of Silicon Valley archetypes.
+Their full canon (bios, wants, wounds, relationships, world rules) lives in the
+HNRadio project's **Series Bible** on the Sleeper Hit side, which the planner
+auto-loads for every episode:
 
-- **Gary** — human man, 40s; ex-founder still quietly processing the pen-plotter
-  startup that ruined him; opens every show.
-- **Maeve** — human woman; ex-security-researcher energy; surgically precise,
-  unsettlingly calm, politely devastating.
-- **Obi** — Lagos-born infrastructure engineer; grounded, allergic to hype —
-  and openly, relentlessly mean to Gary (dry contempt, never shouty).
-- **Gruner** — an alien field researcher whose implanted voicebox converter
-  mapped his native tongue closest to German: he speaks heavily German-accented
-  English, and his lines are **autotuned** (the Story API's voice-modification
-  effect) — the converter's signature sound.
+- **Gary** — the Failed Founder; burned a $38M Series B on Bauxlite, his
+  vertically-integrated aluminum supply-chain startup ("we were disrupting a
+  4,000-year-old metal"). Deadpan, haunted, opens every show.
+- **Maeve** — the VC; general partner at a $2B fund; turns every disaster into
+  "an interesting thesis"; passed on Gary's Series C and mentions it.
+- **Obi** — the Infra Lifer; Bangalore-born staff SRE ("Obi" is the pager
+  handle that stuck); Indian-accented voice; despises hype, founders, and
+  especially Gary — profanely.
+- **Gruner** — an alien field researcher whose implanted voicebox converter was
+  **trained on tech podcasts**: German-accented English made of Valley lingo
+  used slightly wrong ("zis take has no priors, ja"), **autotuned** — the
+  converter's signature sound.
+
+Every episode opens and closes with the show's **jazz theme** — sleazy
+late-night jazz (upright bass, brushed drums, smoky sax), the same identity
+every episode.
 
 It's a thin conductor over the [Sleeper Hit Studio](https://sleeperhit.studio)
 **table-read pipeline** (the same Story API the Sleeper Hit web app, CLI, and MCP

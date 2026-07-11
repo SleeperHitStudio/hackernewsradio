@@ -42,28 +42,18 @@ function pageTargetFor(commentCount) {
 const OUTPUT_BUDGET_RE = /output budget|finishReason=length/i
 
 /**
- * The fixed, recurring cast. The planner is briefed to cast EXACTLY these four
- * by name every episode; pinHostVoices() then keeps their voices identical
- * across episodes, and autotuneAlien() gives the alien his signature sound.
+ * The fixed, recurring cast — names only. The characters' full canon (bios,
+ * wants, wounds, relationships, the jazz theme, world rules) lives in the
+ * HNRadio project's SERIES BIBLE on the Sleeper Hit side (PATCH
+ * /story-projects/{id}/series-bible), which the planner auto-loads for every
+ * plan. The brief only reinforces the non-negotiables. pinHostVoices() keeps
+ * voices identical across episodes; autotuneAlien() gives Gruner his sound.
  */
 const HOSTS = [
-  {
-    name: 'GARY',
-    bio: 'human man, 40s; ex-founder still quietly processing the pen-plotter startup that ruined him; deadpan, kind, faintly haunted; opens every show',
-  },
-  {
-    name: 'MAEVE',
-    bio: 'human woman; ex-security-researcher energy; surgically precise and unsettlingly calm; says devastating things politely',
-  },
-  {
-    name: 'OBI',
-    bio: 'Lagos-born infrastructure engineer; grounded, allergic to hype; openly MEAN to Gary — cutting, relentless dry contempt; civil to everyone else',
-  },
-  {
-    name: 'GRUNER',
-    bio: 'an ALIEN field researcher; his implanted voicebox converter mapped his native tongue closest to German — he speaks English with a HEAVY German accent; polite, formal, slightly wrong about idioms',
-    alien: true,
-  },
+  { name: 'GARY' },
+  { name: 'MAEVE' },
+  { name: 'OBI' },
+  { name: 'GRUNER', alien: true },
 ]
 
 /** Match a script/cast character label ("GARY", "Gary (host)") back to a host. */
@@ -74,16 +64,17 @@ function hostForCharacter(character) {
 
 const SHARED_MUST_KNOW = [
   'The source is a real Hacker News comment thread; the people arguing in it are your raw material.',
-  'Use REAL QUOTES from the comments wherever possible — keep their wording, voice, and personality.',
+  'Use REAL QUOTES from the comments and WEAVE them into the bits — react by handle, make recurring commenters ' +
+  'the show\'s heroes and villains; the thread IS the material, not a topic the hosts talk near.',
 ]
 
 const SHARED_AUDIO = {
   musicStyle:
-    'Sonic palette: modern, electronic, tech-forward — synth-driven, never orchestral or a cheerful jingle; MOOD ' +
-    'adapts to THIS thread (tense = darker/driving, playful = brighter, reflective = cooler). TIMING is strict and ' +
-    'sparse: a ~30–40s intro bed under the cold open, a ~30–40s outro bed at the close, and AT MOST one or two brief ' +
-    '~10s stings to punctuate a mid-show transition. Everything else is VOICES ONLY — the large majority of the ' +
-    'episode has NO music. Bookend in, talk dry, bookend out.',
+    'THE THEME: the show has ONE established theme — sleazy late-night JAZZ: walking upright bass, brushed drums, ' +
+    'smoky saxophone, a touch of Rhodes; slightly too cool for the content, played straight. Keep the theme\'s ' +
+    'identity CONSISTENT every episode. TIMING is strict and sparse: ~30–40s of ' +
+    'the theme under the cold open, ~30–40s under the outro, and AT MOST one or two brief ~10s jazz stings at ' +
+    'mid-show transitions. Everything else is VOICES ONLY — bookend in, talk dry, bookend out.',
   sfxPolicy:
     'Use discrete sound effects to punctuate the show — notification dings, keyboard clatter, phone buzzes, UI clicks, ' +
     'a door, ambient room tone, light transitions between segments. Keep them grounded and purposeful rather than ' +
@@ -95,9 +86,9 @@ const SHARED_AUDIO = {
 // voicePreference biases the cast toward Cartesia (reliable live API).
 const SHARED_STYLE_CONSTRAINTS = {
   musicPolicy:
-    'Music is bookend-only and sparse: ~30–40s under the intro, ~30–40s under the outro, plus AT MOST one or two ' +
-    '~10s punctuation stings mid-show. The vast majority of runtime is voices-only with NO music. SFX stay plentiful ' +
-    'throughout; music does not.',
+    'Music is bookend-only and sparse: the show\'s recurring late-night JAZZ THEME (~30–40s) under the intro and ' +
+    'outro, plus AT MOST one or two ~10s jazz stings mid-show. The vast majority of runtime is voices-only with NO ' +
+    'music. SFX stay plentiful throughout; music does not.',
   voicePreference: 'Prefer Cartesia voices for the cast; avoid leaning on a single provider.',
 }
 
@@ -130,11 +121,11 @@ function podcastBrief(thread, pageTarget) {
         'narrator or announcer: Gary opens cold and the hosts sign off themselves.',
       pageTarget,
       castNotes:
-        'EXACTLY these FOUR recurring hosts, every episode, cast by NAME — plus at most ONE optional guest voicing ' +
-        'the thread\'s most notable commenter. ' +
-        HOSTS.map((h, i) => `${i + 1}) ${h.name} — ${h.bio}.`).join(' ') +
-        ' Voices must be clearly distinct: Gary and Obi obviously different male voices; Gruner a German-accented ' +
-        'English voice. Do NOT rename, merge, or replace them. NO NARRATOR or ANNOUNCER.',
+        'The project SERIES BIBLE is CANON — follow its characters exactly. The four recurring hosts, by NAME, every ' +
+        'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (alien, podcast-trained ' +
+        'voicebox) — plus at most ONE optional guest voicing the thread\'s most notable commenter. Voices clearly ' +
+        'distinct: Obi an Indian-accented English voice; Gruner a German-accented English voice. Do NOT rename, ' +
+        'merge, or replace them. NO NARRATOR or ANNOUNCER.',
       ...SHARED_AUDIO,
       mustKnowBeforeWriting: [
         ...SHARED_MUST_KNOW,
@@ -144,20 +135,20 @@ function podcastBrief(thread, pageTarget) {
         'in order (Gary, Maeve, Obi, Gruner), then straight into the thread. It should be slightly awkward every time.',
         'OBI IS MEAN TO GARY — cutting, personal, relentless, profane; Gary mostly absorbs it, wounded but polite. ' +
         'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
-        'GRUNER speaks English through his voicebox converter: HEAVY German accent, German-inflected word order, and ' +
-        'he SWEARS IN GERMAN (Scheiße, verdammt, ach du lieber Gott). He never explains or acknowledges any of this.',
-        'SWEAR CONSTANTLY, with AMPLE F-BOMBS: fuck, fucking, shit, goddamn — like punctuation, never bleeped, ' +
-        'never apologized for. Maeve swears with surgical precision; Gary swears mid-existential-spiral.',
+        'The hosts are SATIRE of Silicon Valley archetypes — failed founder (Gary), VC (Maeve), infra lifer (Obi), ' +
+        'podcast-brained alien (Gruner). Play the types ruthlessly, as real people, never as sketch characters.',
+        'GRUNER\'s voicebox was TRAINED ON TECH PODCASTS: German-accented English built from Valley lingo used ' +
+        'slightly wrong — "zis has no priors, ja", "ve are so back" — plus German swears (Scheiße, verdammt).',
+        'SWEAR CONSTANTLY — F-BOMBS ARE THE SHOW\'S PUNCTUATION, several per exchange: fuck, fucking, shit, goddamn; ' +
+        'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
         'tangents, sudden painful silences, non sequiturs — irreverent all the way down, played completely straight.',
         'ENGAGING FIRST: under the chaos the episode must be genuinely interesting — the listener should actually ' +
         'understand the thread\'s debate by the end, and be hooked the whole way through.',
-        'MUSIC IS SPARSE: a ~30–40s intro bed, a ~30–40s outro bed, and at most one or two ~10s mid-show stings — ' +
-        'otherwise VOICES ONLY. Most of the episode has no music at all; do not run a continuous score under the talk.',
-        'NO narrator/announcer — Gary opens the show cold, in character, and END with a clean host sign-off: wrap ' +
-        'up fully, do not trail off mid-sentence.',
-        'The outro is just a genuine wrap-up of THIS discussion. Do NOT invent a next episode, tease future shows, ' +
-        'ask listeners to like/subscribe/follow/rate, or use any podcast-outro CTA clichés.',
+        'MUSIC IS THE SHOW\'S JAZZ THEME, bookends only: the SAME sleazy late-night jazz identity (~30–40s) opens ' +
+        'and closes every episode, plus at most one or two ~10s stings — otherwise VOICES ONLY, no score under talk.',
+        'NO narrator/announcer — Gary opens cold; END with a clean host sign-off, wrapped up fully. No next-episode ' +
+        'teases, no like/subscribe/rate, no podcast-outro CTA clichés.',
       ],
     },
     styleConstraints: SHARED_STYLE_CONSTRAINTS,
