@@ -94,7 +94,10 @@ export class SleeperHit {
     throw new SleeperHitError('Source took too long to process.')
   }
 
-  async createTableReadPlan(projectId, { title, target, creativeBrief, styleConstraints, sourceIds, narrationPolicy = 'auto' }) {
+  /** `notes` rides on the artifact request and reaches SCRIPT GENERATION
+   *  directly as job-level instructions — unlike the creative brief, which the
+   *  planner summarizes into a short blueprint (style detail gets lost there). */
+  async createTableReadPlan(projectId, { title, target, creativeBrief, styleConstraints, sourceIds, narrationPolicy = 'auto', notes }) {
     const res = await this.request(`/story-projects/${projectId}/story-plans`, {
       method: 'POST', idempotencyKey: true,
       body: {
@@ -103,7 +106,7 @@ export class SleeperHit {
         creativeBrief,
         ...(styleConstraints ? { styleConstraints } : {}),
         sourceIds,
-        artifactRequests: [{ type: 'table_read', narrationPolicy }],
+        artifactRequests: [{ type: 'table_read', narrationPolicy, ...(notes ? { notes } : {}) }],
       },
     })
     return res.plan

@@ -152,6 +152,16 @@ function podcastBrief(thread, pageTarget) {
       ],
     },
     styleConstraints: SHARED_STYLE_CONSTRAINTS,
+    // Rides on the artifact request straight to SCRIPT GENERATION — the
+    // planner summarizes the creative brief into a short blueprint, and the
+    // profanity charter kept getting compressed down to the word "profane".
+    performanceNotes:
+      'PROFANITY IS A HARD REQUIREMENT of this show\'s voice, for a mature adult-comedy audience: the hosts drop ' +
+      'F-BOMBS CONSTANTLY — at least one "fuck"/"fucking" per PAGE, plus regular "shit" and "goddamn", woven ' +
+      'naturally into real reactions (never bleeped, never softened, never lampshaded). Maeve swears with surgical ' +
+      'precision; Gary swears mid-existential-spiral; Obi\'s profanity at Gary is precise and vicious; GRUNER swears ' +
+      'in German (Scheiße, verdammt, ach du lieber Gott) and speaks in heavy tech-podcast jargon used slightly ' +
+      'wrong. Keep the cold-open ritual, quote real commenters by handle, and play everything dead straight.',
   }
 }
 
@@ -266,6 +276,7 @@ async function runPipeline(id, thread) {
           styleConstraints: brief.styleConstraints,
           sourceIds: [sourceId],
           narrationPolicy,
+          notes: brief.performanceNotes,
         })
         await patchDrama(id, { planId: plan.id })
         const reviewed = await sh.pollPlanForReview(plan.id, { onProgress })
