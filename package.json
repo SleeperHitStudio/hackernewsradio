@@ -3,23 +3,28 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Turn any Hacker News comment thread into a full radio drama — one URL in, an MP3 out. Powered by the Sleeper Hit Studio table-read pipeline.",
+  "description": "Turn any Hacker News comment thread into a full radio drama \u2014 one URL in, an MP3 out. Powered by the Sleeper Hit Studio table-read pipeline.",
   "scripts": {
     "dev": "concurrently -k -n server,web -c green,cyan \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "node --watch server/index.mjs",
     "dev:web": "vite",
     "build": "vite build",
-    "start": "NODE_ENV=production node server/index.mjs"
+    "start": "NODE_ENV=production node server/index.mjs",
+    "deploy": "npm run build && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {
     "express": "^4.21.2",
     "pg": "^8.21.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260712.1",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "wrangler": "^4.110.0"
   }
 }

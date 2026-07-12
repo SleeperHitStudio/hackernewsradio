@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hnradio",
+  "main": "worker/index.mjs",
+  "compatibility_date": "2026-07-12",
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "hnradio.net", "custom_domain": true },
+    { "pattern": "www.hnradio.net", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/e/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hnradio",
+      "database_id": "b82b9ce2-07a0-43b0-bee9-85e4255e87a7",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "hnr-pipeline",
+      "binding": "PIPELINE",
+      "class_name": "HnrPipeline"
+    }
+  ],
+  "triggers": {
+    // Hourly; the handler fires the sweep only at 19:00 America/Chicago
+    // (DST-proof — cron itself is UTC-only).
+    "crons": ["0 * * * *"]
+  },
+  "vars": {
+    "SLEEPERHIT_API_BASE": "https://sleeperhit.studio",
+    "HNRADIO_PROJECT_ID": "cmredn82g00f5i60609aaw3jq"
+  }
+}

@@ -5,3 +5,6 @@ data/dramas.json
 .env
 *.log
 .DS_Store
+
+.wrangler/
+.dev.vars
