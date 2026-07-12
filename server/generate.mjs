@@ -387,6 +387,20 @@ async function runPipeline(id, thread) {
     await note(id, `Alien autotune skipped (${err?.message || err})`)
   }
 
+  // Pin the canonical cartoon headshots (cropped from the show art) so the
+  // table-read cast never shows generated photoreal portraits. Best-effort:
+  // requires the Story API's cast entries[].avatarUrl support; older builds
+  // ignore the field harmlessly.
+  try {
+    await sh.updateCast(artifactId, HOSTS.map((h) => ({
+      character: h.name,
+      avatarUrl: `https://hnradio.net/avatars/${h.name.toLowerCase()}.png`,
+    })))
+    onProgress?.('cast: canonical headshots pinned')
+  } catch (err) {
+    onProgress?.(`cast: headshot pin skipped (${err?.message || err})`)
+  }
+
   // The Story API beds ~50% of scenes with music by default — far too much for a
   // talk podcast. Shape it to a sparse bookend (intro + outro only) before the
   // mix. Non-fatal: if shaping hiccups, we still finalize with whatever exists.
