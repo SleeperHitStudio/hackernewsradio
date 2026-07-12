@@ -192,7 +192,7 @@ export default function App() {
             </a>
           </div>
         </div>
-        <p>Gary, Maeve, Obi, and Gruner read the day's Hacker News flame wars so you don't have to.</p>
+        <p>Gary, Maeve, Obi, and Gruner ride roughshod over your daily dose of Hacker News</p>
       </header>
 
       {showCreate && (
