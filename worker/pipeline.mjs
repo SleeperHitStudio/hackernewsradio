@@ -63,8 +63,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
               narrationPolicy: 'suppress',
             }))
             await patchDrama(db, dramaId, { planId: plan.id })
-            const status = await this.pollChunked(step, `plan r${round}a${attempt}`, 30, async () => {
-              for (let i = 0; i < 10; i++) {
+            const status = await this.pollChunked(step, `plan r${round}a${attempt}`, 50, async () => {
+              for (let i = 0; i < 6; i++) {
                 const res = await sh.request(`/story-plans/${plan.id}`)
                 const s = res.plan?.status
                 if (s === 'REQUIRES_APPROVAL' || s === 'APPROVED' || s === 'READY') return s
@@ -99,8 +99,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
                   },
                 }).then((r) => r.job.id))
               await patchDrama(db, dramaId, { jobId })
-              artifactId = await this.pollChunked(step, `job r${round}a${attempt}`, 34, async () => {
-                for (let i = 0; i < 10; i++) {
+              artifactId = await this.pollChunked(step, `job r${round}a${attempt}`, 60, async () => {
+                for (let i = 0; i < 6; i++) {
                   const res = await sh.request(`/story-jobs/${jobId}`)
                   const job = res.job
                   if (job?.status === 'READY') {
@@ -136,16 +136,19 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await patchDrama(db, dramaId, { artifactId })
 
       // ── Post-production (each best-effort, mirroring the server) ───────────
+      await step.sleep('post-prod break 1', '2 seconds')
       await step.do('pin voices', async () => {
         try { await this.pinHostVoices(db, sh, dramaId, artifactId) } catch (err) {
           await note(`Voice pinning skipped (${err?.message || err})`)
         }
       })
+      await step.sleep('post-prod break 2', '2 seconds')
       await step.do('autotune dial', async () => {
         try { await this.autotuneAlien(db, sh, dramaId, artifactId) } catch (err) {
           await note(`Alien autotune skipped (${err?.message || err})`)
         }
       })
+      await step.sleep('post-prod break 3', '2 seconds')
       await step.do('pin headshots', async () => {
         try {
           await sh.updateCast(artifactId, HOSTS.map((h) => ({
@@ -154,18 +157,20 @@ export class HnrPipeline extends WorkflowEntrypoint {
           })))
         } catch { /* older API */ }
       })
+      await step.sleep('post-prod break 4', '2 seconds')
       await this.shapeMusic(step, db, sh, dramaId, artifactId, note)
 
       // ── Finalize ───────────────────────────────────────────────────────────
       await note('Mixing the durable MP3 (voices + music + SFX)…')
+      await step.sleep('pre-finalize break', '2 seconds')
       const first = await step.do('finalize', () =>
         sh.request(`/artifacts/${artifactId}/finalize`, {
           method: 'POST', idempotencyKey: `${dramaId}-finalize`, body: { mode: 'audio' },
         }))
       let audioUrl = first.finalize?.recordingUrl ?? null
       if (!audioUrl) {
-        audioUrl = await this.pollChunked(step, 'finalize', 40, async () => {
-          for (let i = 0; i < 8; i++) {
+        audioUrl = await this.pollChunked(step, 'finalize', 60, async () => {
+          for (let i = 0; i < 6; i++) {
             await sleep(3000)
             const res = await sh.request(`/artifacts/${artifactId}`)
             const audio = res.artifact?.manifest?.audio
@@ -179,6 +184,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await patchDrama(db, dramaId, { status: 'ready', audioUrl, error: null })
       await note('Done — your podcast is ready.')
 
+      await step.sleep('post-ready break', '2 seconds')
       await step.do('replace + log + publish', async () => {
         try {
           const removed = await deleteOtherEpisodesOfThread(db, thread.id, 'podcast', dramaId)
@@ -311,8 +317,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
         await step.do('render beds', () => sh.request(`/artifacts/${artifactId}/music`, {
           method: 'POST', idempotencyKey: `${dramaId}-beds`, body: { regenerateScenes: [introIndex, outroIndex] },
         }))
-        await this.pollChunked(step, 'beds', 15, async () => {
-          for (let i = 0; i < 8; i++) {
+        await this.pollChunked(step, 'beds', 25, async () => {
+          for (let i = 0; i < 6; i++) {
             await sleep(3000)
             const m = await sh.getMusic(artifactId)
             const clips = (m.definedClips ?? []).filter((c) => [introIndex, outroIndex].includes(c.sceneIndex))
