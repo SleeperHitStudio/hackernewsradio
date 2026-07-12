@@ -33,13 +33,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
       const sourceId = await step.do('add source', () =>
         sh.addTextSource(projectId, { content: threadToTranscript(thread), label: `HN thread ${thread.id}` }))
       await this.pollChunked(step, 'source', 8, async () => {
-        for (let i = 0; i < 5; i++) {
-          const res = await sh.request(`/story-projects/${projectId}/sources/${sourceId}`)
-          const status = res.source?.status
-          if (status === 'READY' || status === undefined) return 'done'
-          if (status === 'FAILED') throw new Error(res.source?.failureMessage || 'Source extraction failed.')
-          await sleep(2500)
-        }
+        const res = await sh.request(`/story-projects/${projectId}/sources/${sourceId}`)
+        const status = res.source?.status
+        if (status === 'READY' || status === undefined) return 'done'
+        if (status === 'FAILED') throw new Error(res.source?.failureMessage || 'Source extraction failed.')
         return 'pending'
       })
 
@@ -63,14 +60,11 @@ export class HnrPipeline extends WorkflowEntrypoint {
               narrationPolicy: 'suppress',
             }))
             await patchDrama(db, dramaId, { planId: plan.id })
-            const status = await this.pollChunked(step, `plan r${round}a${attempt}`, 50, async () => {
-              for (let i = 0; i < 6; i++) {
-                const res = await sh.request(`/story-plans/${plan.id}`)
-                const s = res.plan?.status
-                if (s === 'REQUIRES_APPROVAL' || s === 'APPROVED' || s === 'READY') return s
-                if (s === 'FAILED' || s === 'REJECTED') throw new Error(res.plan?.failureMessage || 'Plan generation failed.')
-                await sleep(3000)
-              }
+            const status = await this.pollChunked(step, `plan r${round}a${attempt}`, 25, async () => {
+              const res = await sh.request(`/story-plans/${plan.id}`)
+              const s = res.plan?.status
+              if (s === 'REQUIRES_APPROVAL' || s === 'APPROVED' || s === 'READY') return s
+              if (s === 'FAILED' || s === 'REJECTED') throw new Error(res.plan?.failureMessage || 'Plan generation failed.')
               return 'pending'
             })
             if (status === 'REQUIRES_APPROVAL') {
@@ -87,31 +81,32 @@ export class HnrPipeline extends WorkflowEntrypoint {
 
         await note('Performing the podcast — writing, voicing, scoring…')
         try {
+          let jobId = null
           for (let attempt = 1; attempt <= 3 && artifactId === null; attempt++) {
             try {
-              const jobId = await step.do(`create job r${round}a${attempt}`, () =>
+              // Resume the round's existing job on retry — a client-side poll
+              // failure does NOT mean the server-side job failed, and a fresh
+              // job would double-spend credits.
+              jobId = jobId ?? await step.do(`create job r${round}`, () =>
                 sh.request('/story-jobs', {
                   method: 'POST',
-                  idempotencyKey: `${dramaId}-job-r${round}a${attempt}`,
+                  idempotencyKey: `${dramaId}-job-r${round}`,
                   body: {
                     storyPlanId: planId,
                     artifactRequests: [{ type: 'table_read', narrationPolicy: 'suppress', notes: brief.performanceNotes }],
                   },
                 }).then((r) => r.job.id))
               await patchDrama(db, dramaId, { jobId })
-              artifactId = await this.pollChunked(step, `job r${round}a${attempt}`, 60, async () => {
-                for (let i = 0; i < 6; i++) {
-                  const res = await sh.request(`/story-jobs/${jobId}`)
-                  const job = res.job
-                  if (job?.status === 'READY') {
-                    const art = (job.artifacts ?? []).find((a) => a.type === 'table_read') ?? (job.artifacts ?? [])[0]
-                    if (!art?.id) throw new Error('Job finished but produced no artifact.')
-                    return art.id
-                  }
-                  if (job?.status === 'FAILED' || job?.status === 'CANCELED') {
-                    throw new Error(job?.failureMessage || `Table read ${job?.status}.`)
-                  }
-                  await sleep(4000)
+              artifactId = await this.pollChunked(step, `job r${round}a${attempt}`, 40, async () => {
+                const res = await sh.request(`/story-jobs/${jobId}`)
+                const job = res.job
+                if (job?.status === 'READY') {
+                  const art = (job.artifacts ?? []).find((a) => a.type === 'table_read') ?? (job.artifacts ?? [])[0]
+                  if (!art?.id) throw new Error('Job finished but produced no artifact.')
+                  return art.id
+                }
+                if (job?.status === 'FAILED' || job?.status === 'CANCELED') {
+                  throw new Error(job?.failureMessage || `Table read ${job?.status}.`)
                 }
                 return 'pending'
               })
@@ -120,6 +115,9 @@ export class HnrPipeline extends WorkflowEntrypoint {
               const overBudget = OUTPUT_BUDGET_RE.test(msg)
               const transient = !/time budget/i.test(msg)
               if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
+              // Server-side terminal failure → new job next attempt; anything
+              // else (network/poll trouble) resumes the same job.
+              if (/FAILED|CANCELED|generation failed/i.test(msg)) jobId = null
               await note(`Performance attempt ${attempt} failed (${msg}); retrying…`)
             }
           }
@@ -169,14 +167,11 @@ export class HnrPipeline extends WorkflowEntrypoint {
         }))
       let audioUrl = first.finalize?.recordingUrl ?? null
       if (!audioUrl) {
-        audioUrl = await this.pollChunked(step, 'finalize', 60, async () => {
-          for (let i = 0; i < 6; i++) {
-            await sleep(3000)
-            const res = await sh.request(`/artifacts/${artifactId}`)
-            const audio = res.artifact?.manifest?.audio
-            if (audio?.finalize?.status === 'failed') throw new Error(audio.finalize.error || 'Audio render failed.')
-            if (audio?.recordingUrl && !['rendering', 'queued'].includes(audio?.finalize?.status)) return audio.recordingUrl
-          }
+        audioUrl = await this.pollChunked(step, 'finalize', 25, async () => {
+          const res = await sh.request(`/artifacts/${artifactId}`)
+          const audio = res.artifact?.manifest?.audio
+          if (audio?.finalize?.status === 'failed') throw new Error(audio.finalize.error || 'Audio render failed.')
+          if (audio?.recordingUrl && !['rendering', 'queued'].includes(audio?.finalize?.status)) return audio.recordingUrl
           return 'pending'
         })
       }
@@ -210,13 +205,15 @@ export class HnrPipeline extends WorkflowEntrypoint {
     }
   }
 
-  /** Run a poll chunk (bounded step.do) until it returns a non-'pending'
-   *  value, sleeping durably between chunks. */
+  /** One cheap status probe per engine invocation, with LONG durable sleeps
+   *  between probes — short sleeps coalesce into a single invocation and the
+   *  accumulated fetches blow Workers' per-invocation subrequest budget
+   *  (observed twice in production). */
   async pollChunked(step, label, maxChunks, chunk) {
     for (let n = 0; n < maxChunks; n++) {
       const out = await step.do(`${label} poll#${n}`, chunk)
       if (out !== 'pending') return out
-      await step.sleep(`${label} wait#${n}`, '15 seconds')
+      await step.sleep(`${label} wait#${n}`, '45 seconds')
     }
     throw new Error(`${label} timed out.`)
   }
@@ -317,14 +314,11 @@ export class HnrPipeline extends WorkflowEntrypoint {
         await step.do('render beds', () => sh.request(`/artifacts/${artifactId}/music`, {
           method: 'POST', idempotencyKey: `${dramaId}-beds`, body: { regenerateScenes: [introIndex, outroIndex] },
         }))
-        await this.pollChunked(step, 'beds', 25, async () => {
-          for (let i = 0; i < 6; i++) {
-            await sleep(3000)
-            const m = await sh.getMusic(artifactId)
-            const clips = (m.definedClips ?? []).filter((c) => [introIndex, outroIndex].includes(c.sceneIndex))
-            if (clips.length >= (total === 1 ? 1 : 2) && clips.every((c) => c.status === 'ready')) return 'done'
-            if (clips.some((c) => c.status === 'failed')) throw new Error('Bookend music render failed.')
-          }
+        await this.pollChunked(step, 'beds', 12, async () => {
+          const m = await sh.getMusic(artifactId)
+          const clips = (m.definedClips ?? []).filter((c) => [introIndex, outroIndex].includes(c.sceneIndex))
+          if (clips.length >= (total === 1 ? 1 : 2) && clips.every((c) => c.status === 'ready')) return 'done'
+          if (clips.some((c) => c.status === 'failed')) throw new Error('Bookend music render failed.')
           return 'pending'
         })
         await step.do('anchor outro', () =>
