@@ -523,21 +523,59 @@ async function shapeMusicToBookends(sh, artifactId, onProgress) {
   const outroIndex = total - 1
   const keep = new Set([introIndex, outroIndex])
 
-  // THE THEME IS NON-NEGOTIABLE: set the show's jazz identity as a
-  // screenplay-wide directive (replacing the planner's palette), then ALWAYS
-  // re-render both bookend beds from it — the baseline coverage sometimes
-  // delivers zero beds, and when it does deliver, its per-scene prompts drift
-  // off-theme. Best-effort: a failed render still finalizes voices-only.
+  // THE THEME IS BANKED: the first successful jazz render saves its intro and
+  // outro bed audio URLs (settings key 'jazzTheme'); every later episode
+  // INJECTS those exact files as ready clips — the identical recording every
+  // episode, no Lyria render, no music-billing dependency. Delete the
+  // 'jazzTheme' settings row to re-roll the theme on the next episode.
   try {
-    await sh.setMusicDirective(artifactId, {
-      prompt:
-        'The show theme: sleazy late-night jazz — walking upright bass, brushed drums, smoky saxophone, a touch ' +
-        'of Rhodes; slow, too cool for the content, played straight.',
-    })
-    onProgress?.(`music: rendering the jazz theme bookends (scenes ${introIndex} + ${outroIndex})`)
-    await sh.regenerateMusicScenes(artifactId, [...keep], { onProgress })
+    const banked = await getSetting('jazzTheme')
+    let injected = false
+    if (banked?.intro?.soundUrl && banked?.outro?.soundUrl) {
+      onProgress?.('music: installing the banked jazz theme bookends')
+      await sh.setDefinedClip(artifactId, introIndex, {
+        soundUrl: banked.intro.soundUrl,
+        ...(banked.intro.durationMs ? { durationMs: banked.intro.durationMs } : {}),
+        playMode: 'once',
+      })
+      await sh.setDefinedClip(artifactId, outroIndex, {
+        soundUrl: banked.outro.soundUrl,
+        ...(banked.outro.durationMs ? { durationMs: banked.outro.durationMs } : {}),
+        playMode: 'once',
+      })
+      // VERIFY the injection took — a Story API build without clip.soundUrl
+      // support silently ignores the field, which would ship a silent episode.
+      const check = await sh.getMusic(artifactId)
+      const ok = (i, url) => (check.definedClips ?? []).some(
+        (c) => c.sceneIndex === i && c.status === 'ready' && c.soundUrl === url,
+      )
+      injected = ok(introIndex, banked.intro.soundUrl) && ok(outroIndex, banked.outro.soundUrl)
+      if (!injected) onProgress?.('music: banked-theme injection not supported by the API yet — falling back to a fresh render')
+    }
+    if (!injected) {
+      await sh.setMusicDirective(artifactId, {
+        prompt:
+          'The show theme: sleazy late-night jazz — walking upright bass, brushed drums, smoky saxophone, a touch ' +
+          'of Rhodes; slow, too cool for the content, played straight.',
+      })
+      onProgress?.(`music: rendering the jazz theme bookends (scenes ${introIndex} + ${outroIndex})`)
+      await sh.regenerateMusicScenes(artifactId, [...keep], { onProgress })
+      // Bank this render as THE theme for all future episodes.
+      const state = await sh.getMusic(artifactId)
+      const clipFor = (i) => (state.definedClips ?? []).find((c) => c.sceneIndex === i && c.status === 'ready' && c.soundUrl)
+      const intro = clipFor(introIndex)
+      const outro = clipFor(outroIndex)
+      if (intro && outro) {
+        await setSetting('jazzTheme', {
+          intro: { soundUrl: intro.soundUrl, durationMs: intro.durationMs ?? null },
+          outro: { soundUrl: outro.soundUrl, durationMs: outro.durationMs ?? null },
+          bankedAt: new Date().toISOString(),
+        })
+        onProgress?.('music: jazz theme BANKED — future episodes reuse these exact recordings')
+      }
+    }
   } catch (err) {
-    onProgress?.(`music: jazz bookend render skipped (${err?.message || err})`)
+    onProgress?.(`music: jazz bookends skipped (${err?.message || err})`)
   }
 
   // Disable every non-bookend bed, then VERIFY — a late worker write can
