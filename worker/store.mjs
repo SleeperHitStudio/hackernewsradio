@@ -65,8 +65,14 @@ export async function appendProgress(db, id, message) {
 }
 
 export async function deleteOtherEpisodesOfThread(db, hnId, mode, keepId) {
+  // Only delete takes STRICTLY OLDER than the keeper. Workflow steps can be
+  // retried long after they first ran — a stale retry of an old instance's
+  // replace step once deleted a NEWER ready take (both rows lost). With the
+  // created_at guard a stale retry deletes nothing: newer rows fail the
+  // comparison, and if the keeper's own row is gone the subquery is NULL.
   const res = await db
-    .prepare('DELETE FROM episodes WHERE hn_id = ?1 AND mode = ?2 AND id <> ?3')
+    .prepare(`DELETE FROM episodes WHERE hn_id = ?1 AND mode = ?2 AND id <> ?3
+              AND created_at < (SELECT created_at FROM episodes WHERE id = ?3)`)
     .bind(String(hnId), mode, keepId)
     .run()
   return res.meta?.changes ?? 0
