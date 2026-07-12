@@ -161,8 +161,9 @@ function podcastBrief(thread, pageTarget) {
     // profanity charter kept getting compressed down to the word "profane".
     performanceNotes:
       'PROFANITY IS A HARD REQUIREMENT of this show\'s voice, for a mature adult-comedy audience: the hosts drop ' +
-      'F-BOMBS CONSTANTLY — at least one "fuck"/"fucking" per PAGE, plus regular "shit" and "goddamn", woven ' +
-      'naturally into real reactions (never bleeped, never softened, never lampshaded). MAEVE SPEAKS FLUENT ' +
+      'F-BOMBS CONSTANTLY — at least one "fuck"/"fucking" per PAGE, plus regular "shit"/"bullshit", woven ' +
+      'naturally into real reactions (never bleeped, never softened, never lampshaded). HARD LINE: never take the ' +
+      'Lord\'s name in vain — no "Jesus", "Christ", "God", "goddamn", "oh my god", or any variant, from ANY host, ever. MAEVE SPEAKS FLUENT ' +
       'VALLEY-PODCAST, deadpan: VC/tech-podcast vernacular used with total sincerity — trader talk (let your ' +
       'winners ride, in the arena, ZIRP), AI-investor speak (priors, power law, agentic, TAM, moat), and ' +
       'Mountainhead-style casual monstrosity (horrifying implications delivered flatly as portfolio math) — ' +
