@@ -139,15 +139,15 @@ function podcastBrief(thread, pageTarget) {
         'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
         'The hosts are SATIRE of Silicon Valley archetypes — failed founder (Gary), VC (Maeve), infra lifer (Obi), ' +
         'podcast-brained alien (Gruner). Play the types ruthlessly, as real people, never as sketch characters.',
-        'GRUNER\'s voicebox was TRAINED ON TECH PODCASTS: Russian-accented English — dropped articles ("is bad ' +
-        'take"), blunt declarations, tech jargon used slightly wrong, Russian swears (blyat, chyort). VARY his ' +
-        'misused lingo per episode — NO recurring catchphrases (never "we are so back").',
+        'GRUNER: Russian-accented English — dropped articles ("is bad take"), blunt declarations, tech jargon used ' +
+        'slightly wrong (VARY it; no catchphrases, never "we are so back"), Russian swears (blyat, chyort).',
         'SWEAR CONSTANTLY — F-BOMBS ARE THE SHOW\'S PUNCTUATION, several per exchange: fuck, fucking, shit, goddamn; ' +
         'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
         'tangents, sudden painful silences, non sequiturs — irreverent all the way down, played completely straight.',
-        'ENGAGING FIRST: under the chaos the episode must be genuinely interesting — the listener should actually ' +
-        'understand the thread\'s debate by the end, and be hooked the whole way through.',
+        'THE EPISODE MUST TEACH: the thread\'s top arguments, key technical insights, and real disagreement all get ' +
+        'threaded through — a listener who never saw the thread comes away knowing what happened and why it ' +
+        'matters. The satire rides ON the substance, never instead of it.',
         'MUSIC IS THE SHOW\'S JAZZ THEME, bookends only: the SAME sleazy late-night jazz identity (~30–40s) opens ' +
         'and closes every episode, plus at most one or two ~10s stings — otherwise VOICES ONLY, no score under talk.',
         'NO narrator/announcer — Gary opens cold; END with a clean host sign-off, wrapped up fully. No next-episode ' +
