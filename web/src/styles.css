@@ -309,3 +309,66 @@ body {
   white-space: nowrap;
 }
 .subscribe:hover { filter: brightness(1.08); }
+
+.masthead__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.subscribe--ghost {
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+.subscribe--ghost:hover { border-color: var(--accent); }
+
+.backlink {
+  color: var(--blue);
+  text-decoration: none;
+  font-size: 0.88rem;
+}
+.backlink:hover { text-decoration: underline; }
+
+.episode__desc { color: var(--muted); line-height: 1.55; margin: 6px 0 4px; }
+.episode__desc a { color: var(--blue); text-decoration: none; }
+
+.modal__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 14, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 20px;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  max-width: 480px;
+  width: 100%;
+  padding: 22px 24px;
+  line-height: 1.55;
+}
+.modal p { color: var(--muted); }
+.modal strong { color: var(--ink); }
+
+.modal__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.modal__head h2 { margin: 0; font-size: 1.2rem; }
+
+.modal__close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1rem;
+  cursor: pointer;
+}
+.modal__close:hover { color: var(--ink); }
+
+.modal__steps { color: var(--muted); padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+
+.modal__cta { margin-top: 14px; }

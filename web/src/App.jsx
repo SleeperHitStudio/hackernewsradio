@@ -94,8 +94,10 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const autoFired = useRef(false)
-  // Deep link: /e/<episode id> highlights + scrolls to that episode.
+  const [showCreate, setShowCreate] = useState(false)
+  // Deep link: /e/<episode id> renders that episode's landing view.
   const deepLinkId = (location.pathname.match(/^\/e\/([0-9a-f-]{36})$/) || [])[1] || null
+  const episode = deepLinkId ? dramas.find((d) => d.id === deepLinkId) || null : null
 
   const refresh = useCallback(async (q) => {
     try {
@@ -172,19 +174,60 @@ export default function App() {
       <header className="masthead">
         <div className="masthead__row">
           <h1>📻 HNR</h1>
-          <a
-            className="subscribe"
-            href="https://sleeperhit.studio/api/v1/publishing-feeds/hnr.xml"
-            target="_blank"
-            rel="noreferrer"
-            title="Podcast RSS feed — paste into any podcast app"
-          >
-            Subscribe (RSS)
-          </a>
+          <div className="masthead__actions">
+            <button type="button" className="subscribe subscribe--ghost" onClick={() => setShowCreate(true)}>
+              Create your own podcast
+            </button>
+            <a
+              className="subscribe"
+              href="https://sleeperhit.studio/api/v1/publishing-feeds/hnr.xml"
+              target="_blank"
+              rel="noreferrer"
+              title="Podcast RSS feed — paste into any podcast app"
+            >
+              Subscribe (RSS)
+            </a>
+          </div>
         </div>
         <p>Gary, Maeve, Obi, and Gruner read the day's Hacker News flame wars so you don't have to.</p>
       </header>
 
+      {showCreate && (
+        <div className="modal__backdrop" onClick={() => setShowCreate(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal__head">
+              <h2>Create your own podcast</h2>
+              <button type="button" className="modal__close" onClick={() => setShowCreate(false)}>✕</button>
+            </div>
+            <p>
+              HNR is made end-to-end by <strong>Sleeper Hit Studio</strong> — the writing, the cast,
+              the voices, the music, the mix, and the podcast feed. You can build your own show the
+              same way:
+            </p>
+            <ol className="modal__steps">
+              <li><strong>Sign up</strong> for a Sleeper Hit Studio account.</li>
+              <li><strong>Connect your favorite AI tool</strong> — Claude, ChatGPT, Cursor, or anything that speaks MCP — to Sleeper Hit's MCP server (or just use the web app).</li>
+              <li><strong>Chat your series into existence</strong>: describe the show, cast recurring hosts, set a theme, and publish to a real podcast feed.</li>
+            </ol>
+            <a className="subscribe modal__cta" href="https://sleeperhit.studio" target="_blank" rel="noreferrer">
+              Get started at sleeperhit.studio →
+            </a>
+          </div>
+        </div>
+      )}
+
+      {episode ? (
+        <section className="feed">
+          <a className="backlink" href="/">← All episodes</a>
+          <p className="episode__desc">
+            Gary, Maeve, Obi, and Gruner take on the Hacker News thread
+            {' '}<a href={episode.url} target="_blank" rel="noreferrer">"{episode.title}"</a>
+            {' '}({episode.commentCount} comments) — profane, satirical, and weirdly educational.
+          </p>
+          <EpisodeCard drama={episode} highlighted />
+        </section>
+      ) : (
+      <>
       <form
         className="composer"
         onSubmit={(e) => { e.preventDefault(); generate(url) }}
@@ -217,6 +260,8 @@ export default function App() {
         )}
         {dramas.map((d) => <EpisodeCard key={d.id} drama={d} highlighted={d.id === deepLinkId} />)}
       </section>
+      </>
+      )}
 
       <footer className="foot">
         Powered by <a href="https://sleeperhit.studio" target="_blank" rel="noopener noreferrer">Sleeper Hit Studio</a>
