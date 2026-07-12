@@ -27,15 +27,16 @@ export function normalizeMode() {
 }
 
 /**
- * Scale length to the size of the debate (≈1 page ≈ 1 minute). The ceiling is
- * set by the Story API's FIXED 13,500-token output budget on the script draft
- * (finishReason=length kills anything bigger): a tightly written rapid-fire
- * page runs ~1k tokens, so 12 pages fits with margin — but only if the writer
- * stays terse (the brief demands it), so runPipeline also downshifts the page
- * target and re-plans whenever a draft still blows the budget.
+ * Scale length to ENGAGEMENT (≈1 page ≈ 1 minute): comments carry most of the
+ * signal, upvotes add heat. Floor 6 pages (~6 min) so even quiet threads get a
+ * real episode; hot front-page threads roll up to 10–12 minutes. The 12-page
+ * ceiling is set by the Story API's FIXED 13,500-token output budget on the
+ * script draft (a tight rapid-fire page ≈ 1k tokens) — runPipeline downshifts
+ * and re-plans if a draft still blows the budget.
  */
-function pageTargetFor(commentCount) {
-  return Math.max(4, Math.min(12, Math.ceil(commentCount / 18)))
+function pageTargetFor(thread) {
+  const engagement = (thread.total || 0) + (thread.points || 0) / 2
+  return Math.max(6, Math.min(12, Math.ceil(engagement / 25)))
 }
 
 /** The Story API's script writer ran out of output tokens mid-draft. */
@@ -267,7 +268,7 @@ async function runPipeline(id, thread) {
   // it (finishReason=length), retrying the SAME plan only helps once (their
   // writer gets "be more concise" feedback) — after that we re-plan smaller.
   // Plans are free; failed jobs refund credits.
-  let pageTarget = pageTargetFor(thread.total)
+  let pageTarget = pageTargetFor(thread)
   let artifactId = null
 
   for (let round = 1; artifactId === null; round++) {
