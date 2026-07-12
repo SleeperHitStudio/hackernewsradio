@@ -145,9 +145,8 @@ function podcastBrief(thread, pageTarget) {
         'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
         'tangents, sudden painful silences, non sequiturs — irreverent all the way down, played completely straight.',
-        'THE EPISODE MUST TEACH: the thread\'s top arguments, key technical insights, and real disagreement all get ' +
-        'threaded through — a listener who never saw the thread comes away knowing what happened and why it ' +
-        'matters. The satire rides ON the substance, never instead of it.',
+        'THE EPISODE MUST TEACH: the thread\'s top arguments, key insights, and real disagreement all get threaded ' +
+        'through — the listener learns what happened and why it matters. Satire rides ON the substance.',
         'MUSIC IS THE SHOW\'S JAZZ THEME, bookends only: the SAME sleazy late-night jazz identity (~30–40s) opens ' +
         'and closes every episode, plus at most one or two ~10s stings — otherwise VOICES ONLY, no score under talk.',
         'NO narrator/announcer — Gary opens cold; END with a clean host sign-off, wrapped up fully. No next-episode ' +
