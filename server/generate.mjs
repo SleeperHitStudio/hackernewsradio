@@ -124,8 +124,10 @@ function podcastBrief(thread, pageTarget) {
       pageTarget,
       castNotes:
         'The project SERIES BIBLE is CANON — follow its characters exactly. The four recurring hosts, by NAME, every ' +
-        'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (alien, podcast-trained ' +
-        'voicebox) — plus at most ONE optional guest voicing the thread\'s most notable commenter. Voices clearly ' +
+        'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (an alien intelligence ' +
+        'trained only on Silicon Valley tech-bro culture; SPEAKS SPARINGLY — short blunt interjections and field ' +
+        'notes, never extended riffs; Russian-accented, dropped articles, jargon slightly wrong, Russian swears) — ' +
+        'plus at most ONE optional guest voicing the thread\'s most notable commenter. Voices clearly ' +
         'distinct: Obi an Indian-accented English voice; Gruner a DEEP RUSSIAN-accented English voice. Do NOT ' +
         'rename, merge, or replace them. NO NARRATOR or ANNOUNCER.',
       ...SHARED_AUDIO,
@@ -139,8 +141,8 @@ function podcastBrief(thread, pageTarget) {
         'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
         'The hosts are SATIRE of Silicon Valley archetypes — failed founder (Gary), VC (Maeve), infra lifer (Obi), ' +
         'podcast-brained alien (Gruner). Play the types ruthlessly, as real people, never as sketch characters.',
-        'GRUNER: Russian-accented English — dropped articles ("is bad take"), blunt declarations, tech jargon used ' +
-        'slightly wrong (VARY it; no catchphrases, never "we are so back"), Russian swears (blyat, chyort).',
+        'GRUNER\'S DIAL: when he REALLY means something he turns a dial on his throat — mark ONLY those lines with a ' +
+        '(dial) parenthetical (often one of several consecutive GRUNER lines). NOBODY ever acknowledges it, ever.',
         'SWEAR CONSTANTLY — F-BOMBS ARE THE SHOW\'S PUNCTUATION, several per exchange: fuck, fucking, shit, goddamn; ' +
         'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
@@ -166,9 +168,12 @@ function podcastBrief(thread, pageTarget) {
       'Mountainhead-style casual monstrosity (horrifying implications delivered flatly as portfolio math) — ' +
       'ROTATED: 2-3 per episode, fresh ones each episode, never repeated. Maeve swears with surgical ' +
       'precision; Gary swears mid-existential-spiral; Obi\'s profanity at Gary is precise and vicious; GRUNER ' +
-      'speaks RUSSIAN-accented English — dropped articles, blunt declarations, tech-podcast jargon used slightly ' +
-      'wrong (vary it every episode; NO catchphrases, never "we are so back") — and swears in Russian (blyat, ' +
-      'chyort, bozhe moi). GARY ALWAYS STUMBLES INTO THE COLD OPEN: mid-thought, flustered, slightly wrong, never ' +
+      'SPEAKS SPARINGLY (short blunt interjections and field notes — never extended riffs) in RUSSIAN-accented ' +
+      'English — dropped articles, tech-podcast jargon used slightly wrong (vary it every episode; NO catchphrases, ' +
+      'never "we are so back") — and swears in Russian (blyat, chyort). GRUNER\'S DIAL: when he truly means ' +
+      'something he turns a dial on his throat — mark ONLY those lines with a (dial) parenthetical, often one of ' +
+      'several consecutive GRUNER lines; NOBODY ever acknowledges or names it, least of all him. GARY ALWAYS ' +
+      'STUMBLES INTO THE COLD OPEN: mid-thought, flustered, slightly wrong, never ' +
       'smooth — then the intro ritual assembles around him. RUNNING BITS MUST EARN THEIR WAY IN THROUGH THE THREAD: ' +
       'Gary\'s Bauxlite scars and Obi\'s contempt only surface when a specific comment triggers them — quote the ' +
       'comment, hit the bit in ONE sharp line, move on; never linger, never do backstory for its own sake. NO ' +
@@ -503,10 +508,14 @@ async function autotuneAlien(sh, artifactId, onProgress) {
     return
   }
   const entries = await sh.getCharacterEntries(artifactId, alien.character)
-  const indexes = [...new Set(entries.map((e) => e.entryIndex))].sort((a, b) => a - b)
+  // THE DIAL: Gruner speaks normally by default; only lines the writer marked
+  // with a (dial) parenthetical get autotuned — his emphasis mechanism. Nobody
+  // on the show ever acknowledges it.
+  const marked = entries.filter((e) => /dial/i.test(e.parenthetical || ''))
+  const indexes = [...new Set(marked.map((e) => e.entryIndex))].sort((a, b) => a - b)
   if (!indexes.length) {
-    onProgress?.(`autotune: no lines found for ${alien.character}`)
-    return
+    onProgress?.(`autotune: ${alien.character} kept the dial off this episode`)
+    return 0
   }
   const runs = []
   for (const i of indexes) {
@@ -514,8 +523,20 @@ async function autotuneAlien(sh, artifactId, onProgress) {
     if (last && i === last.end + 1) last.end = i
     else runs.push({ start: i, end: i })
   }
-  for (const r of runs) await sh.applyAutotune(artifactId, r.start, r.end)
-  onProgress?.(`autotune: ${alien.character} queued — ${indexes.length} line(s) across ${runs.length} range(s)`)
+  for (const r of runs) {
+    await sh.applyAutotune(artifactId, r.start, r.end)
+    // A subtle mechanical click as he turns the throat dial, just before the
+    // tuned words. Best-effort — a missing click never blocks the episode.
+    try {
+      await sh.addSfxCue(artifactId, {
+        entryIndex: r.start,
+        label: 'Dial Click',
+        prompt: 'a single small subtle mechanical click, like a tiny dial or switch',
+        volume: 0.35,
+      })
+    } catch { /* click optional */ }
+  }
+  onProgress?.(`autotune: ${alien.character} turned the dial — ${indexes.length} line(s) across ${runs.length} range(s)`)
   return runs.length
 }
 

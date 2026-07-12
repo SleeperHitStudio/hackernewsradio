@@ -198,6 +198,14 @@ export class SleeperHit {
     return releaseId
   }
 
+  /** Add a timed sound-effect cue at a dialogue entry. */
+  async addSfxCue(artifactId, { entryIndex, label, prompt, volume }) {
+    await this.request(`/artifacts/${artifactId}/sfx`, {
+      method: 'POST', idempotencyKey: true,
+      body: { op: 'add', entryIndex, label, prompt, ...(volume !== undefined ? { volume } : {}) },
+    })
+  }
+
   // ── Cast pinning + voice effects ───────────────────────────────────────────
   // Voices can't be pinned at plan time, but a finished read can be recast in
   // place (no new revision, no charge). generate.mjs uses these to keep the
