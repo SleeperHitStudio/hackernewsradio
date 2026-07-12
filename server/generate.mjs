@@ -36,7 +36,7 @@ export function normalizeMode() {
  */
 function pageTargetFor(thread) {
   const engagement = (thread.total || 0) + (thread.points || 0) / 2
-  return Math.max(6, Math.min(12, Math.ceil(engagement / 25)))
+  return Math.max(7, Math.min(12, Math.ceil(engagement / 20)))
 }
 
 /** The Story API's script writer ran out of output tokens mid-draft. */
@@ -77,11 +77,11 @@ const SHARED_AUDIO = {
     'the theme under the cold open, ~30–40s under the outro, and AT MOST one or two brief ~10s jazz stings at ' +
     'mid-show transitions. Everything else is VOICES ONLY — bookend in, talk dry, bookend out.',
   sfxPolicy:
-    'SFX: smart, purposeful, NATURAL podcast-studio sounds — clicks, beeps, dings, keyboard clatter, phone buzzes, ' +
-    'paper, mugs, room tone — each cue motivated by the script; prefer canonical library effects. HARD RULE: no ' +
-    'musical/instrument sounds as SFX (no horns, sax, stings, drums — music lives in the theme bookends only). ' +
-    'GARY\'S CABLE (rare, max once/episode, peak fluster only): Gary unplugs his mic — a second of static — then ' +
-    'plugs back in mid-word. Few well-placed cues beat a busy soundscape.',
+    'SFX: natural podcast-studio sounds only — clicks, beeps, dings, keyboard, phone buzzes, paper, mugs, room ' +
+    'tone — each cue script-motivated; prefer canonical library effects. HARD RULES: no musical/instrument sounds ' +
+    '(no horns, sax, stings, drums) and ABSOLUTELY NO screeching, squealing, feedback, or harsh high-pitched ' +
+    'sounds. GARY\'S CABLE (rare, max once/episode, peak fluster): a second of LOW soft static — never a shriek — ' +
+    'then he plugs back in mid-word.',
 }
 
 // Soft constraints the planner sees. musicPolicy enforces intro/outro-only music;
@@ -125,8 +125,8 @@ function podcastBrief(thread, pageTarget) {
       castNotes:
         'The project SERIES BIBLE is CANON — follow its characters exactly. The four recurring hosts, by NAME, every ' +
         'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (an alien intelligence ' +
-        'trained only on Silicon Valley tech-bro culture; SPEAKS SPARINGLY — short blunt interjections and field ' +
-        'notes, never extended riffs; Russian-accented, dropped articles, jargon slightly wrong, Russian swears) — ' +
+        'trained only on Silicon Valley tech-bro culture; speaks in SHORT BURSTS — blunt interjections, field notes, ' +
+        'an occasional 2-3 line run; still the least talkative host; Russian-accented, dropped articles, jargon slightly wrong, Russian swears) — ' +
         'plus at most ONE optional guest voicing the thread\'s most notable commenter. Voices clearly ' +
         'distinct: Obi an Indian-accented English voice; Gruner a DEEP RUSSIAN-accented English voice. Do NOT ' +
         'rename, merge, or replace them. NO NARRATOR or ANNOUNCER.',
@@ -177,7 +177,11 @@ function podcastBrief(thread, pageTarget) {
       'STUMBLES INTO THE COLD OPEN: mid-thought, flustered, slightly wrong, never ' +
       'smooth — then the intro ritual assembles around him. RUNNING BITS MUST EARN THEIR WAY IN THROUGH THE THREAD: ' +
       'Gary\'s Bauxlite scars and Obi\'s contempt only surface when a specific comment triggers them — quote the ' +
-      'comment, hit the bit in ONE sharp line, move on; never linger, never do backstory for its own sake. NO ' +
+      'comment, hit the bit in ONE sharp line, move on; never linger, never do backstory for its own sake. THE '
+      + 'COMMENTERS ARE THE CELEBRITIES: satirize them by handle; GARY IS JEALOUS OF THEM (their karma, their '
+      + 'exits, their shipped side projects) — Bauxlite gets AT MOST one line per episode. MAEVE drops a grand '
+      + 'unified tech-history theory a few times per episode (Andreessen-scale, one step too far; the table goes '
+      + 'silent, someone says "...what?", move on — different reference each episode). NO ' +
       'CATCHPHRASES OR STOCK INTENSIFIERS: "we are so back" and "on a Tuesday" are BANNED; if a phrase appears ' +
       'twice in one script, cut the second. Quote real commenters by handle and play everything dead straight.',
   }
