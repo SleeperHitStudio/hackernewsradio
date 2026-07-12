@@ -182,6 +182,22 @@ export class SleeperHit {
     })
   }
 
+  // ── Podcast publishing ──────────────────────────────────────────────────────
+
+  /** Promote a finalized artifact into the series and queue immediate publish.
+   *  The series' public RSS feed picks it up (podcast apps poll the feed). */
+  async publishEpisode(seriesId, { title, artifactId }) {
+    const res = await this.request(`/publishing-series/${seriesId}/releases`, {
+      method: 'POST', idempotencyKey: true,
+      body: { title: title.slice(0, 200), sourceArtifactId: artifactId, type: 'episode' },
+    })
+    const releaseId = (res.release ?? res).id
+    await this.request(`/publishing-releases/${releaseId}/publish`, {
+      method: 'POST', idempotencyKey: true, body: {},
+    })
+    return releaseId
+  }
+
   // ── Cast pinning + voice effects ───────────────────────────────────────────
   // Voices can't be pinned at plan time, but a finished read can be recast in
   // place (no new revision, no charge). generate.mjs uses these to keep the

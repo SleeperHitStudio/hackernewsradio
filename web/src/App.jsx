@@ -170,7 +170,18 @@ export default function App() {
       />
       <div className="app">
       <header className="masthead">
-        <h1>📻 HNR</h1>
+        <div className="masthead__row">
+          <h1>📻 HNR</h1>
+          <a
+            className="subscribe"
+            href="https://sleeperhit.studio/api/v1/publishing-feeds/hnr.xml"
+            target="_blank"
+            rel="noreferrer"
+            title="Podcast RSS feed — paste into any podcast app"
+          >
+            Subscribe (RSS)
+          </a>
+        </div>
         <p>Gary, Maeve, Obi, and Gruner read the day's Hacker News flame wars so you don't have to.</p>
       </header>
 

@@ -413,6 +413,18 @@ async function runPipeline(id, thread) {
   } catch (err) {
     await note(id, `Series Bible episode log skipped (${err?.message || err})`)
   }
+
+  // Publish to the podcast feed (settings key 'publishingSeriesId'; the RSS
+  // feed is what Apple/Spotify/podcast apps poll). Best-effort.
+  try {
+    const seriesId = await getSetting('publishingSeriesId')
+    if (seriesId) {
+      await sh.publishEpisode(seriesId, { title: thread.title, artifactId })
+      await note(id, 'Published to the HNR podcast feed.')
+    }
+  } catch (err) {
+    await note(id, `Podcast publish skipped (${err?.message || err})`)
+  }
 }
 
 /**
@@ -551,6 +563,9 @@ async function shapeMusicToBookends(sh, artifactId, onProgress) {
         soundUrl: banked.outro.soundUrl,
         ...(banked.outro.durationMs ? { durationMs: banked.outro.durationMs } : {}),
         playMode: 'once',
+        // Align the outro bed to FINISH at the show's end — without this it
+        // plays at the final scene's head and fades out a minute early.
+        anchor: 'end',
       })
       // VERIFY the injection took — a Story API build without clip.soundUrl
       // support silently ignores the field, which would ship a silent episode.
@@ -569,6 +584,9 @@ async function shapeMusicToBookends(sh, artifactId, onProgress) {
       })
       onProgress?.(`music: rendering the jazz theme bookends (scenes ${introIndex} + ${outroIndex})`)
       await sh.regenerateMusicScenes(artifactId, [...keep], { onProgress })
+      // Anchor the outro bed to the END of the final scene (best-effort; the
+      // API ignores unknown fields on older builds).
+      try { await sh.setDefinedClip(artifactId, outroIndex, { anchor: 'end' }) } catch { /* older API */ }
       // Bank this render as THE theme for all future episodes.
       const state = await sh.getMusic(artifactId)
       const clipFor = (i) => (state.definedClips ?? []).find((c) => c.sceneIndex === i && c.status === 'ready' && c.soundUrl)
