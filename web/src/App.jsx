@@ -35,6 +35,7 @@ function ShareRow({ drama }) {
     <div className="share">
       <button type="button" className="share__btn" onClick={copy}>{copied ? 'Copied ✓' : 'Copy link'}</button>
       <a className="share__btn" href={`https://x.com/intent/post?text=${enc(text)}&url=${enc(link)}`} target="_blank" rel="noreferrer">Post on X</a>
+      <a className="share__btn" href={`https://facebook.com/sharer/sharer.php?u=${enc(link)}`} target="_blank" rel="noreferrer">Facebook</a>
       <a className="share__btn" href={`https://www.linkedin.com/sharing/share-offsite/?url=${enc(link)}`} target="_blank" rel="noreferrer">LinkedIn</a>
       {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
         <button type="button" className="share__btn" onClick={nativeShare}>Share…</button>
