@@ -16,12 +16,47 @@ function StatusPill({ status }) {
   return <span className={`pill pill--${status}`}>{label}</span>
 }
 
-function EpisodeCard({ drama }) {
-  const log = drama.progress?.slice(-4) ?? []
+function ShareRow({ drama }) {
+  const [copied, setCopied] = useState(false)
+  const link = `${location.origin}/e/${drama.id}`
+  const text = `HNR — ${drama.title}`
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch { /* clipboard unavailable */ }
+  }
+  async function nativeShare() {
+    try { await navigator.share({ title: text, url: link }) } catch { /* dismissed */ }
+  }
+  const enc = encodeURIComponent
   return (
-    <article className="card">
+    <div className="share">
+      <button type="button" className="share__btn" onClick={copy}>{copied ? 'Copied ✓' : 'Copy link'}</button>
+      <a className="share__btn" href={`https://x.com/intent/post?text=${enc(text)}&url=${enc(link)}`} target="_blank" rel="noreferrer">Post on X</a>
+      <a className="share__btn" href={`https://www.linkedin.com/sharing/share-offsite/?url=${enc(link)}`} target="_blank" rel="noreferrer">LinkedIn</a>
+      {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
+        <button type="button" className="share__btn" onClick={nativeShare}>Share…</button>
+      )}
+    </div>
+  )
+}
+
+function EpisodeCard({ drama, highlighted }) {
+  const log = drama.progress?.slice(-4) ?? []
+  const ref = useRef(null)
+  useEffect(() => {
+    if (highlighted && ref.current) {
+      ref.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [highlighted])
+  return (
+    <article className={`card${highlighted ? ' card--highlight' : ''}`} id={`e-${drama.id}`} ref={ref}>
       <header className="card__head">
-        <h3 className="card__title">{drama.title}</h3>
+        <h3 className="card__title">
+          <a className="card__permalink" href={`/e/${drama.id}`}>{drama.title}</a>
+        </h3>
         <StatusPill status={drama.status} />
       </header>
       <div className="card__meta">
@@ -35,6 +70,8 @@ function EpisodeCard({ drama }) {
       {drama.status === 'ready' && drama.audioUrl && (
         <audio className="player" controls preload="none" src={drama.audioUrl} />
       )}
+
+      {drama.status === 'ready' && <ShareRow drama={drama} />}
 
       {!TERMINAL.has(drama.status) && (
         <ul className="progress">
@@ -57,6 +94,8 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const autoFired = useRef(false)
+  // Deep link: /e/<episode id> highlights + scrolls to that episode.
+  const deepLinkId = (location.pathname.match(/^\/e\/([0-9a-f-]{36})$/) || [])[1] || null
 
   const refresh = useCallback(async (q) => {
     try {
@@ -131,8 +170,8 @@ export default function App() {
       />
       <div className="app">
       <header className="masthead">
-        <h1>📻 Hacker News Radio</h1>
-        <p>Turn Hacker News comment threads into high-quality podcasts.</p>
+        <h1>📻 HNR</h1>
+        <p>Gary, Maeve, Obi, and Gruner read the day's Hacker News flame wars so you don't have to.</p>
       </header>
 
       <form
@@ -165,7 +204,7 @@ export default function App() {
         {dramas.length === 0 && (
           <p className="empty">{query ? 'No episodes match your search.' : 'No episodes yet. Paste a thread above to make the first one.'}</p>
         )}
-        {dramas.map((d) => <EpisodeCard key={d.id} drama={d} />)}
+        {dramas.map((d) => <EpisodeCard key={d.id} drama={d} highlighted={d.id === deepLinkId} />)}
       </section>
 
       <footer className="foot">

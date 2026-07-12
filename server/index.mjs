@@ -55,6 +55,33 @@ app.post('/api/generate', wrap(async (req, res) => {
 // /api here, so this static block is simply inert.
 const dist = join(__dirname, '..', 'web', 'dist')
 if (existsSync(dist)) {
+  const { readFileSync } = await import('node:fs')
+  const indexHtml = readFileSync(join(dist, 'index.html'), 'utf8')
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+  // Episode deep links: social crawlers never run the SPA, so /e/:id serves
+  // index.html with the title/OG/Twitter tags rewritten for THAT episode. The
+  // SPA reads the same path client-side to highlight + scroll to the card.
+  app.get('/e/:id', wrap(async (req, res) => {
+    const drama = await getDrama(req.params.id)
+    if (!drama) return res.status(404).sendFile(join(dist, 'index.html'))
+    const title = `HNR — ${drama.title}`
+    const desc = `Gary, Maeve, Obi, and Gruner read the Hacker News thread "${drama.title}" (${drama.commentCount} comments) so you don't have to.`
+    const url = `https://hnradio.net/e/${drama.id}`
+    const html = indexHtml
+      .replace(/<title>[^<]*<\/title>/, `<title>${esc(title)}</title>`)
+      .replace(/(<link rel="canonical" href=")[^"]*(")/, `$1${esc(url)}$2`)
+      .replace(/(<meta name="description" content=")[^"]*(")/, `$1${esc(desc)}$2`)
+      .replace(/(<meta property="og:title" content=")[^"]*(")/, `$1${esc(title)}$2`)
+      .replace(/(<meta property="og:description" content=")[^"]*(")/, `$1${esc(desc)}$2`)
+      .replace(/(<meta property="og:url" content=")[^"]*(")/, `$1${esc(url)}$2`)
+      .replace(/(<meta name="twitter:title" content=")[^"]*(")/, `$1${esc(title)}$2`)
+      .replace(/(<meta name="twitter:description" content=")[^"]*(")/, `$1${esc(desc)}$2`)
+      .replace(/(<meta property="og:type" content=")[^"]*(")/, '$1music.song$2')
+      .replace('</head>', `<meta property="og:audio" content="${esc(drama.audioUrl || '')}" /><meta property="og:audio:type" content="audio/mpeg" /></head>`)
+    res.type('html').send(html)
+  }))
+
   app.use(express.static(dist))
   app.get('*', (_req, res) => res.sendFile(join(dist, 'index.html')))
 }
