@@ -159,7 +159,11 @@ function podcastBrief(thread, pageTarget) {
     performanceNotes:
       'PROFANITY IS A HARD REQUIREMENT of this show\'s voice, for a mature adult-comedy audience: the hosts drop ' +
       'F-BOMBS CONSTANTLY — at least one "fuck"/"fucking" per PAGE, plus regular "shit" and "goddamn", woven ' +
-      'naturally into real reactions (never bleeped, never softened, never lampshaded). Maeve swears with surgical ' +
+      'naturally into real reactions (never bleeped, never softened, never lampshaded). MAEVE SPEAKS FLUENT ' +
+      'VALLEY-PODCAST, deadpan: VC/tech-podcast vernacular used with total sincerity — trader talk (let your ' +
+      'winners ride, in the arena, ZIRP), AI-investor speak (priors, power law, agentic, TAM, moat), and ' +
+      'Mountainhead-style casual monstrosity (horrifying implications delivered flatly as portfolio math) — ' +
+      'ROTATED: 2-3 per episode, fresh ones each episode, never repeated. Maeve swears with surgical ' +
       'precision; Gary swears mid-existential-spiral; Obi\'s profanity at Gary is precise and vicious; GRUNER ' +
       'speaks RUSSIAN-accented English — dropped articles, blunt declarations, tech-podcast jargon used slightly ' +
       'wrong (vary it every episode; NO catchphrases, never "we are so back") — and swears in Russian (blyat, ' +
