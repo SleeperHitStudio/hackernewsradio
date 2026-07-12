@@ -100,7 +100,8 @@ export default function App() {
   // Episode URLs use the HN item id — same identifier as news.ycombinator.com,
   // and stable across regens (our internal GUIDs are not).
   const deepLinkId = (location.pathname.match(/^\/e\/(\d+)$/) || [])[1] || null
-  const episode = deepLinkId ? dramas.find((d) => String(d.hnId) === deepLinkId) || null : null
+  const takes = deepLinkId ? dramas.filter((d) => String(d.hnId) === deepLinkId) : []
+  const episode = takes.find((d) => d.status === 'ready') || takes[0] || null
 
   const refresh = useCallback(async (q) => {
     try {

@@ -24,8 +24,11 @@ export async function getDrama(db, id) {
 }
 
 export async function findByHnIdAndMode(db, hnId, mode) {
+  // Prefer a READY take over a newer in-flight regen — the landing page (and
+  // dedupe) should surface the playable episode while a replacement renders.
   const row = await db
-    .prepare('SELECT data FROM episodes WHERE hn_id = ?1 AND mode = ?2 ORDER BY created_at DESC LIMIT 1')
+    .prepare(`SELECT data FROM episodes WHERE hn_id = ?1 AND mode = ?2
+              ORDER BY (status = 'ready') DESC, created_at DESC LIMIT 1`)
     .bind(String(hnId), mode)
     .first()
   return row ? rowToData(row) : null
