@@ -76,10 +76,11 @@ const SHARED_AUDIO = {
     'the theme under the cold open, ~30–40s under the outro, and AT MOST one or two brief ~10s jazz stings at ' +
     'mid-show transitions. Everything else is VOICES ONLY — bookend in, talk dry, bookend out.',
   sfxPolicy:
-    'Use discrete sound effects to punctuate the show — notification dings, keyboard clatter, phone buzzes, UI clicks, ' +
-    'a door, ambient room tone, light transitions between segments. Keep them grounded and purposeful rather than ' +
-    'cartoonish — NO rimshots, record scratches, or punchline stingers (that is the try-hard comedy we are avoiding). ' +
-    'Prefer common, canonical effects so they reuse from the shared library, and punctuate transitions cleanly.',
+    'SFX: smart, purposeful, NATURAL podcast-studio sounds — clicks, beeps, dings, keyboard clatter, phone buzzes, ' +
+    'paper, mugs, room tone — each cue motivated by the script; prefer canonical library effects. HARD RULE: no ' +
+    'musical/instrument sounds as SFX (no horns, sax, stings, drums — music lives in the theme bookends only). ' +
+    'GARY\'S CABLE (rare, max once/episode, peak fluster only): Gary unplugs his mic — a second of static — then ' +
+    'plugs back in mid-word. Few well-placed cues beat a busy soundscape.',
 }
 
 // Soft constraints the planner sees. musicPolicy enforces intro/outro-only music;
