@@ -146,6 +146,24 @@ export class HnrPipeline extends WorkflowEntrypoint {
           await note(`Alien autotune skipped (${err?.message || err})`)
         }
       })
+      await step.sleep('post-prod break 2b', '2 seconds')
+      await step.do('normalize cable static', async () => {
+        // Gary's cable gag: whatever the writer/detector authored, the SOUND is
+        // always the same canonical 1-2s of soft radio static — an identical
+        // prompt reuses ONE banked asset via the SFX library (like the theme).
+        try {
+          const cues = await sh.listSfxCues(artifactId)
+          for (const c of cues) {
+            if (/static|unplug|cable|disconnect/i.test(`${c.label} ${c.prompt}`)) {
+              await sh.updateSfxCue(artifactId, c.id, {
+                label: 'Cable Static',
+                prompt: 'one to two seconds of soft radio static, like snow on an old television — low, muffled, gentle',
+                volume: 0.5,
+              })
+            }
+          }
+        } catch { /* best-effort */ }
+      })
       await step.sleep('post-prod break 3', '2 seconds')
       await step.do('pin headshots', async () => {
         try {

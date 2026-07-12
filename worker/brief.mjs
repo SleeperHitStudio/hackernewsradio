@@ -53,11 +53,11 @@ const SHARED_AUDIO = {
     'the theme under the cold open, ~30–40s under the outro, and AT MOST one or two brief ~10s jazz stings at ' +
     'mid-show transitions. Everything else is VOICES ONLY — bookend in, talk dry, bookend out.',
   sfxPolicy:
-    'SFX: natural podcast-studio sounds only — clicks, beeps, dings, keyboard, phone buzzes, paper, mugs, room ' +
-    'tone — each cue script-motivated; prefer canonical library effects. HARD RULES: no musical/instrument sounds ' +
-    '(no horns, sax, stings, drums) and ABSOLUTELY NO screeching, squealing, feedback, or harsh high-pitched ' +
-    'sounds. GARY\'S CABLE (rare, max once/episode, peak fluster): a second of LOW soft static — never a shriek — ' +
-    'then he plugs back in mid-word.',
+    'SFX: natural studio sounds only — clicks, beeps, dings, keyboard, buzzes, paper, mugs, room tone — each cue ' +
+    'script-motivated; prefer canonical library effects. HARD RULES: no musical/instrument sounds; NO screeching, ' +
+    'squealing, feedback, or harsh high-pitched sounds. GARY\'S CABLE (rare, max once/episode, peak fluster): his ' +
+    'mic cuts to 1-2s of SOFT RADIO STATIC (snow on an old TV — low, muffled), then he is back mid-word. No ' +
+    'unplug foley — just the static.',
 }
 
 // Soft constraints the planner sees. musicPolicy enforces intro/outro-only music;

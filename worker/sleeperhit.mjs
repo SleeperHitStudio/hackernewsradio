@@ -198,6 +198,21 @@ export class SleeperHit {
     return releaseId
   }
 
+
+  /** List the artifact's timed SFX cues. */
+  async listSfxCues(artifactId) {
+    const res = await this.request(`/artifacts/${artifactId}/sfx`)
+    return res.sfx?.cues ?? []
+  }
+
+  /** Update a cue in place (retime, rename, re-prompt, mute). */
+  async updateSfxCue(artifactId, id, fields) {
+    await this.request(`/artifacts/${artifactId}/sfx`, {
+      method: 'POST', idempotencyKey: true,
+      body: { op: 'update', id, ...fields },
+    })
+  }
+
   /** Add a timed sound-effect cue at a dialogue entry. */
   async addSfxCue(artifactId, { entryIndex, label, prompt, volume }) {
     await this.request(`/artifacts/${artifactId}/sfx`, {
