@@ -31,9 +31,8 @@ body {
   display: block;
   width: 100%;
   height: auto;
-  max-height: 78vh;
-  object-fit: cover;
-  object-position: top; /* never crop the HNR neon sign; the crop comes out of the desk/cables */
+  max-height: 82vh;
+  object-fit: contain; /* the WHOLE image — neon sign AND nameplates; side bars vanish into the dark bg */
   border-bottom: 1px solid var(--line);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }

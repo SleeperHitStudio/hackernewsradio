@@ -138,8 +138,8 @@ function podcastBrief(thread, pageTarget) {
         'The hosts are SATIRE of Silicon Valley archetypes — failed founder (Gary), VC (Maeve), infra lifer (Obi), ' +
         'podcast-brained alien (Gruner). Play the types ruthlessly, as real people, never as sketch characters.',
         'GRUNER\'s voicebox was TRAINED ON TECH PODCASTS: Russian-accented English — dropped articles ("is bad ' +
-        'take"), blunt declarations, Valley lingo slightly wrong ("ve are so back, da"), Russian swears (blyat, ' +
-        'chyort).',
+        'take"), blunt declarations, tech jargon used slightly wrong, Russian swears (blyat, chyort). VARY his ' +
+        'misused lingo per episode — NO recurring catchphrases (never "we are so back").',
         'SWEAR CONSTANTLY — F-BOMBS ARE THE SHOW\'S PUNCTUATION, several per exchange: fuck, fucking, shit, goddamn; ' +
         'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
@@ -162,9 +162,13 @@ function podcastBrief(thread, pageTarget) {
       'naturally into real reactions (never bleeped, never softened, never lampshaded). Maeve swears with surgical ' +
       'precision; Gary swears mid-existential-spiral; Obi\'s profanity at Gary is precise and vicious; GRUNER ' +
       'speaks RUSSIAN-accented English — dropped articles, blunt declarations, tech-podcast jargon used slightly ' +
-      'wrong ("ve are so back, da") — and swears in Russian (blyat, chyort, bozhe moi). GARY ALWAYS STUMBLES INTO ' +
-      'THE COLD OPEN: mid-thought, flustered, gets something slightly wrong, never smooth — then the intro ritual ' +
-      'assembles around him. Quote real commenters by handle and play everything dead straight.',
+      'wrong (vary it every episode; NO catchphrases, never "we are so back") — and swears in Russian (blyat, ' +
+      'chyort, bozhe moi). GARY ALWAYS STUMBLES INTO THE COLD OPEN: mid-thought, flustered, slightly wrong, never ' +
+      'smooth — then the intro ritual assembles around him. RUNNING BITS MUST EARN THEIR WAY IN THROUGH THE THREAD: ' +
+      'Gary\'s Bauxlite scars and Obi\'s contempt only surface when a specific comment triggers them — quote the ' +
+      'comment, hit the bit in ONE sharp line, move on; never linger, never do backstory for its own sake. NO ' +
+      'CATCHPHRASES OR STOCK INTENSIFIERS: "we are so back" and "on a Tuesday" are BANNED; if a phrase appears ' +
+      'twice in one script, cut the second. Quote real commenters by handle and play everything dead straight.',
   }
 }
 
