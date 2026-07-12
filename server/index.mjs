@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { config } from './config.mjs'
-import { listDramas, getDrama, failStaleRunning } from './store.mjs'
+import { listDramas, getDrama, findByHnIdAndMode, failStaleRunning } from './store.mjs'
 import { startGeneration } from './generate.mjs'
 import { startDailySchedule } from './schedule.mjs'
 
@@ -63,11 +63,20 @@ if (existsSync(dist)) {
   // index.html with the title/OG/Twitter tags rewritten for THAT episode. The
   // SPA reads the same path client-side to highlight + scroll to the card.
   app.get('/e/:id', wrap(async (req, res) => {
-    const drama = await getDrama(req.params.id)
+    const raw = req.params.id
+    // Canonical episode ids are the HN item id (stable across regens). Legacy
+    // GUID links (shared before the switch) 301 to the canonical URL.
+    let drama = null
+    if (/^\d+$/.test(raw)) {
+      drama = await findByHnIdAndMode(raw, 'podcast')
+    } else {
+      const byGuid = await getDrama(raw)
+      if (byGuid?.hnId) return res.redirect(301, `/e/${byGuid.hnId}`)
+    }
     if (!drama) return res.status(404).sendFile(join(dist, 'index.html'))
     const title = `HNR — ${drama.title}`
     const desc = `Gary, Maeve, Obi, and Gruner read the Hacker News thread "${drama.title}" (${drama.commentCount} comments) so you don't have to.`
-    const url = `https://hnradio.net/e/${drama.id}`
+    const url = `https://hnradio.net/e/${drama.hnId}`
     const html = indexHtml
       .replace(/<title>[^<]*<\/title>/, `<title>${esc(title)}</title>`)
       .replace(/(<link rel="canonical" href=")[^"]*(")/, `$1${esc(url)}$2`)

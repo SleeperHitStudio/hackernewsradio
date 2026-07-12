@@ -18,7 +18,7 @@ function StatusPill({ status }) {
 
 function ShareRow({ drama }) {
   const [copied, setCopied] = useState(false)
-  const link = `${location.origin}/e/${drama.id}`
+  const link = `${location.origin}/e/${drama.hnId}`
   const text = `HNR — ${drama.title}`
   async function copy() {
     try {
@@ -56,7 +56,7 @@ function EpisodeCard({ drama, highlighted }) {
     <article className={`card${highlighted ? ' card--highlight' : ''}`} id={`e-${drama.id}`} ref={ref}>
       <header className="card__head">
         <h3 className="card__title">
-          <a className="card__permalink" href={`/e/${drama.id}`}>{drama.title}</a>
+          <a className="card__permalink" href={`/e/${drama.hnId}`}>{drama.title}</a>
         </h3>
         <StatusPill status={drama.status} />
       </header>
@@ -97,8 +97,10 @@ export default function App() {
   const autoFired = useRef(false)
   const [showCreate, setShowCreate] = useState(false)
   // Deep link: /e/<episode id> renders that episode's landing view.
-  const deepLinkId = (location.pathname.match(/^\/e\/([0-9a-f-]{36})$/) || [])[1] || null
-  const episode = deepLinkId ? dramas.find((d) => d.id === deepLinkId) || null : null
+  // Episode URLs use the HN item id — same identifier as news.ycombinator.com,
+  // and stable across regens (our internal GUIDs are not).
+  const deepLinkId = (location.pathname.match(/^\/e\/(\d+)$/) || [])[1] || null
+  const episode = deepLinkId ? dramas.find((d) => String(d.hnId) === deepLinkId) || null : null
 
   const refresh = useCallback(async (q) => {
     try {
@@ -259,7 +261,7 @@ export default function App() {
         {dramas.length === 0 && (
           <p className="empty">{query ? 'No episodes match your search.' : 'No episodes yet. Paste a thread above to make the first one.'}</p>
         )}
-        {dramas.map((d) => <EpisodeCard key={d.id} drama={d} highlighted={d.id === deepLinkId} />)}
+        {dramas.map((d) => <EpisodeCard key={d.id} drama={d} highlighted={String(d.hnId) === deepLinkId} />)}
       </section>
       </>
       )}
