@@ -155,9 +155,9 @@ async function dailySweep(env) {
         audioUrl: null, error: null, createdAt: new Date().toISOString(),
       }
       await upsertDrama(env.DB, drama)
-      // 10-minute stagger ≈ serialized episodes: five concurrent generations
-      // rate-limited voice synthesis and shipped truncated mixes (two 3:48
-      // episodes on the first sweep whose scripts ran ~10 minutes of dialogue).
+      // 10-minute stagger ≈ serialized episodes: keeps platform load flat and
+      // the length-gate rerolls (pipeline.mjs) from stacking up. (The first
+      // sweep's short episodes turned out to be thin WRITING, not truncation.)
       await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url, staggerSec: i * 600 } })
       i++
     } catch { /* next story */ }

@@ -174,7 +174,10 @@ export function podcastBrief(thread, pageTarget) {
       + 'unified tech-history theory a few times per episode (Andreessen-scale, one step too far; the table goes '
       + 'silent, someone says "...what?", move on — different reference each episode). NO ' +
       'CATCHPHRASES OR STOCK INTENSIFIERS: "we are so back" and "on a Tuesday" are BANNED; if a phrase appears ' +
-      'twice in one script, cut the second. Quote real commenters by handle and play everything dead straight.',
+      'twice in one script, cut the second. Quote real commenters by handle and play everything dead straight. ' +
+      `RUNTIME IS SPOKEN DIALOGUE: this is AUDIO — stage directions are dead air. Write AT LEAST ${pageTarget * 120} ` +
+      `words of actual spoken lines (~${pageTarget} minutes on air) across ${pageTarget * 8}+ dialogue exchanges; ` +
+      'a script light on dialogue plays as a broken half-episode no matter how good the pages look.',
   }
 }
 

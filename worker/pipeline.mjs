@@ -104,15 +104,18 @@ export class HnrPipeline extends WorkflowEntrypoint {
         await note('Performing the podcast — writing, voicing, scoring…')
         try {
           let jobId = null
+          let jobRoll = 0
           for (let attempt = 1; attempt <= 3 && artifactId === null; attempt++) {
             try {
               // Resume the round's existing job on retry — a client-side poll
               // failure does NOT mean the server-side job failed, and a fresh
-              // job would double-spend credits.
-              jobId = jobId ?? await step.do(`create job r${round}`, () =>
+              // job would double-spend credits. jobRoll bumps only when we
+              // DELIBERATELY abandon a job (terminal failure / thin script);
+              // without it the idempotency key would hand back the corpse.
+              jobId = jobId ?? await step.do(`create job r${round}j${jobRoll}`, () =>
                 sh.request('/story-jobs', {
                   method: 'POST',
-                  idempotencyKey: `${dramaId}-job-r${round}`,
+                  idempotencyKey: `${dramaId}-job-r${round}-j${jobRoll}`,
                   body: {
                     storyPlanId: planId,
                     artifactRequests: [{ type: 'table_read', narrationPolicy: 'suppress', notes: brief.performanceNotes }],
@@ -132,6 +135,30 @@ export class HnrPipeline extends WorkflowEntrypoint {
                 }
                 return 'pending'
               })
+
+              // Length gate: the writer is high-variance — some rolls produce
+              // 100+ dialogue entries (~9 min spoken), others 40 (~4 min) from
+              // the SAME brief. The audio is always fine; thin episodes were
+              // under-WRITTEN, not truncated. Measure actual SPOKEN words and
+              // reroll a fresh performance when far under the page target
+              // (~1 page ≈ 1 min ≈ ~150 spoken words; gate at 85/page).
+              const spokenWords = await step.do(`measure r${round}a${attempt}`, async () => {
+                const res = await sh.request(`/artifacts/${artifactId}/script?limit=500`)
+                const entries = res.script?.selection?.entries ?? res.script?.entries ?? []
+                return entries.reduce(
+                  (sum, e) => sum + String(e.text ?? '').trim().split(/\s+/).filter(Boolean).length, 0)
+              }).catch(() => null)
+              const minSpoken = Math.round(pageTarget * 85)
+              if (spokenWords !== null && spokenWords < minSpoken) {
+                if (attempt < 3) {
+                  await note(`Script came in thin (${spokenWords} spoken words, want ${minSpoken}+) — rolling a fresh take…`)
+                  jobId = null
+                  jobRoll++
+                  artifactId = null
+                  continue
+                }
+                await note(`Accepting a thin take (${spokenWords} spoken words) — retries exhausted`)
+              }
             } catch (err) {
               const msg = err?.message || String(err)
               const overBudget = OUTPUT_BUDGET_RE.test(msg)
@@ -139,7 +166,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
               if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
               // Server-side terminal failure → new job next attempt; anything
               // else (network/poll trouble) resumes the same job.
-              if (/FAILED|CANCELED|generation failed/i.test(msg)) jobId = null
+              if (/FAILED|CANCELED|generation failed/i.test(msg)) { jobId = null; jobRoll++ }
               await note(`Performance attempt ${attempt} failed (${msg}); retrying…`)
             }
           }
