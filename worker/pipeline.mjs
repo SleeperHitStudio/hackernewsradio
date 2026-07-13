@@ -229,7 +229,18 @@ export class HnrPipeline extends WorkflowEntrypoint {
    *  (observed twice in production). */
   async pollChunked(step, label, maxChunks, chunk) {
     for (let n = 0; n < maxChunks; n++) {
-      const out = await step.do(`${label} poll#${n}`, chunk)
+      const out = await step.do(`${label} poll#${n}`, async () => {
+        try {
+          return await chunk()
+        } catch (err) {
+          // A Durable Object that stays warm across the 45s sleeps accumulates
+          // subrequests in one invocation; once the budget is spent, in-step
+          // retries can never succeed. Treat it as 'pending' so the next sleep
+          // (and eventual hibernation) resets the budget.
+          if (/Too many subrequests/i.test(err?.message || '')) return 'pending'
+          throw err
+        }
+      })
       if (out !== 'pending') return out
       await step.sleep(`${label} wait#${n}`, '45 seconds')
     }
