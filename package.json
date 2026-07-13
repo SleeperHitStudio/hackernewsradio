@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Turn any Hacker News comment thread into a full radio drama \u2014 one URL in, an MP3 out. Powered by the Sleeper Hit Studio table-read pipeline.",
+  "description": "Turn any Hacker News comment thread into a full radio drama — one URL in, an MP3 out. Powered by the Sleeper Hit Studio table-read pipeline.",
   "scripts": {
     "dev": "concurrently -k -n server,web -c green,cyan \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "node --watch server/index.mjs",
@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "pg": "^8.21.0"
+    "pg": "^8.21.0",
+    "posthog-js": "^1.399.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260712.1",

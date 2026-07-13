@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import posthog from 'posthog-js'
 
 const TERMINAL = new Set(['ready', 'failed'])
 
@@ -25,18 +26,20 @@ function ShareRow({ drama }) {
       await navigator.clipboard.writeText(link)
       setCopied(true)
       setTimeout(() => setCopied(false), 1600)
+      posthog.capture('episode_link_copied', { hn_id: drama.hnId, episode_title: drama.title })
     } catch { /* clipboard unavailable */ }
   }
   async function nativeShare() {
+    posthog.capture('episode_shared_native', { hn_id: drama.hnId, episode_title: drama.title })
     try { await navigator.share({ title: text, url: link }) } catch { /* dismissed */ }
   }
   const enc = encodeURIComponent
   return (
     <div className="share">
       <button type="button" className="share__btn" onClick={copy}>{copied ? 'Copied ✓' : 'Copy link'}</button>
-      <a className="share__btn" href={`https://x.com/intent/post?text=${enc(text)}&url=${enc(link)}`} target="_blank" rel="noreferrer">Post on X</a>
-      <a className="share__btn" href={`https://facebook.com/sharer/sharer.php?u=${enc(link)}`} target="_blank" rel="noreferrer">Facebook</a>
-      <a className="share__btn" href={`https://www.linkedin.com/sharing/share-offsite/?url=${enc(link)}`} target="_blank" rel="noreferrer">LinkedIn</a>
+      <a className="share__btn" href={`https://x.com/intent/post?text=${enc(text)}&url=${enc(link)}`} target="_blank" rel="noreferrer" onClick={() => posthog.capture('episode_shared_social', { platform: 'x', hn_id: drama.hnId, episode_title: drama.title })}>Post on X</a>
+      <a className="share__btn" href={`https://facebook.com/sharer/sharer.php?u=${enc(link)}`} target="_blank" rel="noreferrer" onClick={() => posthog.capture('episode_shared_social', { platform: 'facebook', hn_id: drama.hnId, episode_title: drama.title })}>Facebook</a>
+      <a className="share__btn" href={`https://www.linkedin.com/sharing/share-offsite/?url=${enc(link)}`} target="_blank" rel="noreferrer" onClick={() => posthog.capture('episode_shared_social', { platform: 'linkedin', hn_id: drama.hnId, episode_title: drama.title })}>LinkedIn</a>
       {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
         <button type="button" className="share__btn" onClick={nativeShare}>Share…</button>
       )}
@@ -69,7 +72,13 @@ function EpisodeCard({ drama, highlighted }) {
       </div>
 
       {drama.status === 'ready' && drama.audioUrl && (
-        <audio className="player" controls preload="none" src={drama.audioUrl} />
+        <audio
+          className="player"
+          controls
+          preload="none"
+          src={drama.audioUrl}
+          onPlay={() => posthog.capture('episode_playback_started', { hn_id: drama.hnId, episode_title: drama.title, comment_count: drama.commentCount })}
+        />
       )}
 
       {drama.status === 'ready' && <ShareRow drama={drama} />}
@@ -130,6 +139,7 @@ export default function App() {
       await refresh(query)
     } catch (err) {
       setError(err.message)
+      posthog.capture('episode_generation_errored', { error_message: err.message })
     } finally {
       setBusy(false)
     }
@@ -146,9 +156,17 @@ export default function App() {
     if (param && !autoFired.current) {
       autoFired.current = true
       setUrl(param)
+      posthog.capture('episode_generation_auto_started', { hn_id: id || null })
       generate(param)
     }
   }, [refresh, generate])
+
+  // Track deep-link episode page views.
+  useEffect(() => {
+    if (deepLinkId) {
+      posthog.capture('episode_deep_link_viewed', { hn_id: deepLinkId })
+    }
+  }, [deepLinkId])
 
   // Poll while any episode is still in flight.
   useEffect(() => {
@@ -160,7 +178,10 @@ export default function App() {
 
   // Debounced server-side search.
   useEffect(() => {
-    const t = setTimeout(() => refresh(query), 250)
+    const t = setTimeout(() => {
+      if (query.trim()) posthog.capture('episode_search_performed', { query_length: query.trim().length })
+      refresh(query)
+    }, 250)
     return () => clearTimeout(t)
   }, [query, refresh])
 
@@ -179,7 +200,7 @@ export default function App() {
         <div className="masthead__row">
           <h1>📻 HNR</h1>
           <div className="masthead__actions">
-            <button type="button" className="subscribe subscribe--ghost" onClick={() => setShowCreate(true)}>
+            <button type="button" className="subscribe subscribe--ghost" onClick={() => { posthog.capture('create_podcast_modal_opened'); setShowCreate(true) }}>
               Create your own podcast
             </button>
             <a
@@ -188,6 +209,7 @@ export default function App() {
               target="_blank"
               rel="noreferrer"
               title="Podcast RSS feed — paste into any podcast app"
+              onClick={() => posthog.capture('rss_subscribe_clicked')}
             >
               Subscribe (RSS)
             </a>
@@ -213,7 +235,7 @@ export default function App() {
               <li><strong>Connect your favorite AI tool</strong> — Claude, ChatGPT, Cursor, or anything that speaks MCP — to Sleeper Hit's MCP server (or just use the web app).</li>
               <li><strong>Chat your series into existence</strong>: describe the show, cast recurring hosts, set a theme, and publish to a real podcast feed.</li>
             </ol>
-            <a className="subscribe modal__cta" href="https://sleeperhit.studio" target="_blank" rel="noreferrer">
+            <a className="subscribe modal__cta" href="https://sleeperhit.studio" target="_blank" rel="noreferrer" onClick={() => posthog.capture('create_podcast_cta_clicked')}>
               Get started at sleeperhit.studio →
             </a>
           </div>
@@ -234,7 +256,7 @@ export default function App() {
       <>
       <form
         className="composer"
-        onSubmit={(e) => { e.preventDefault(); generate(url) }}
+        onSubmit={(e) => { e.preventDefault(); posthog.capture('episode_generation_submitted'); generate(url) }}
       >
         <input
           type="text"

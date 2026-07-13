@@ -8,3 +8,6 @@ data/dramas.json
 
 .wrangler/
 .dev.vars
+
+# claude harness state (keep skills, drop lockfile)
+.claude/scheduled_tasks.lock

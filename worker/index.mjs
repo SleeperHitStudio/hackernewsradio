@@ -13,11 +13,15 @@ const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-  // Media (episode MP3s) streams from files.sleeperhitlist.com; everything
+  // Media (episode MP3s) streams from files.sleeperhitlist.com; PostHog needs
+  // event ingestion (us.i) + lazy-loaded modules (us-assets.i); everything
   // else is same-origin. Vite emits plain script/style tags (no inline JS).
+  // Keep in sync with web/public/_headers (covers ASSETS-served paths).
   'Content-Security-Policy':
     "default-src 'self'; img-src 'self' data:; media-src 'self' https://files.sleeperhitlist.com; " +
-    "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",
+    "style-src 'self' 'unsafe-inline'; " +
+    "script-src 'self' https://us-assets.i.posthog.com; " +
+    "connect-src 'self' https://us.i.posthog.com https://us-assets.i.posthog.com; frame-ancestors 'none'",
 }
 
 function withHeaders(res, extra = {}) {
