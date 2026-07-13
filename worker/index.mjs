@@ -75,6 +75,22 @@ async function handleApi(request, env, url) {
     const drama = await getDrama(env.DB, one[1])
     return drama ? json({ drama }) : json({ error: 'Not found' }, 404)
   }
+  // Resume a failed run whose performance already exists (e.g. the workflow
+  // died at finalize): re-enters the pipeline in resume mode, skipping
+  // straight to finalize on the existing artifact — no generation re-spend.
+  const resume = pathname.match(/^\/api\/dramas\/([0-9a-f-]{36})\/resume$/)
+  if (resume && request.method === 'POST') {
+    const drama = await getDrama(env.DB, resume[1])
+    if (!drama) return json({ error: 'Not found' }, 404)
+    if (drama.status !== 'failed' || !drama.artifactId) {
+      return json({ error: 'Resume needs a failed episode with an existing performance (artifactId).' }, 400)
+    }
+    await env.PIPELINE.create({
+      id: crypto.randomUUID(),
+      params: { dramaId: drama.id, url: drama.url, resumeArtifactId: drama.artifactId },
+    })
+    return json({ resumed: drama.id })
+  }
   if (pathname === '/api/generate' && request.method === 'POST') {
     if (!env.SLEEPERHIT_API_KEY) return json({ error: 'Server is missing SLEEPERHIT_API_KEY.' }, 500)
     let body

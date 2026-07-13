@@ -30,6 +30,18 @@ export class HnrPipeline extends WorkflowEntrypoint {
       // ── Source ─────────────────────────────────────────────────────────────
       const projectId = env.HNRADIO_PROJECT_ID
 
+      // Resume mode: a run that died AFTER the performance completed (e.g. the
+      // subrequest budget bug at finalize) leaves a fully post-produced
+      // artifact behind — POST /api/dramas/:id/resume re-enters here and
+      // skips straight to finalize instead of re-spending generation credits.
+      let artifactId = event.payload.resumeArtifactId ?? null
+      if (artifactId) {
+        await patchDrama(db, dramaId, { artifactId })
+        await note('Resuming — the performance already exists; mixing the final audio…')
+      }
+
+      if (!artifactId) {
+
       // Project cast canon: pinned host portraits + the show's portrait style,
       // inherited by every episode at creation (the platform seeds them before
       // generation, so hosts are never re-rendered). One GET, PATCH only when
@@ -64,7 +76,6 @@ export class HnrPipeline extends WorkflowEntrypoint {
 
       // ── Plan + perform with the adaptive page target ───────────────────────
       let pageTarget = pageTargetFor(thread)
-      let artifactId = null
       for (let round = 1; artifactId === null; round++) {
         const brief = buildBrief(thread, pageTarget)
         let planId = null
@@ -224,11 +235,12 @@ export class HnrPipeline extends WorkflowEntrypoint {
       })
       await step.sleep('post-prod break 4', '2 seconds')
       await this.shapeMusic(step, db, sh, dramaId, artifactId, note)
+      } // end fresh-generation path (resume mode skips straight here)
 
       // ── Finalize ───────────────────────────────────────────────────────────
       await note('Mixing the durable MP3 (voices + music + SFX)…')
       await step.sleep('pre-finalize break', '2 seconds')
-      const first = await step.do('finalize', () =>
+      const first = await this.hardStep(step, 'finalize', () =>
         sh.request(`/artifacts/${artifactId}/finalize`, {
           method: 'POST', idempotencyKey: `${dramaId}-finalize`, body: { mode: 'audio' },
         }))
@@ -269,6 +281,22 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await patchDrama(db, dramaId, { status: 'failed', error: err?.message || String(err) })
       await note(`Failed: ${err?.message || err}`)
       throw err
+    }
+  }
+
+  /** step.do for critical one-shot calls that must survive subrequest-budget
+   *  exhaustion: a warm Durable Object accumulates fetches across steps, and
+   *  once the budget is spent every in-invocation retry is doomed. On that
+   *  error, take a LONG durable sleep (reliably hibernates → fresh budget on
+   *  wake) and retry under a new step name. */
+  async hardStep(step, label, fn) {
+    for (let n = 0; ; n++) {
+      try {
+        return await step.do(n === 0 ? label : `${label} retry${n}`, fn)
+      } catch (err) {
+        if (n >= 3 || !/Too many subrequests/i.test(err?.message || '')) throw err
+        await step.sleep(`${label} budget cooldown${n}`, '6 minutes')
+      }
     }
   }
 
