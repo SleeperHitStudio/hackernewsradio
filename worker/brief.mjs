@@ -33,6 +33,21 @@ export const HOSTS = [
   { name: 'GRUNER', alien: true },
 ]
 
+/** Canonical portrait for a host (the cropped hero-art headshots we serve). */
+export const hostAvatarUrl = (name) => `https://hnradio.net/avatars/${String(name).toLowerCase()}.png`
+
+/** The show's canonical portrait style — lives in the project cast canon so
+ *  guest characters render in the same look as the pinned hosts. */
+export const AVATAR_STYLE =
+  'Portrait-only head-and-shoulders character image in a grounded, contemporary '
+  + 'tech-culture comedy style, like a cinematic editorial portrait with subtle '
+  + 'satirical edge. Muted office-neon palette — cool grey-blue glow, sickly green '
+  + 'reflections, occasional warm skin tones — with lighting that feels like a '
+  + 'late-night podcast booth or a startup conference room under fluorescent spill '
+  + 'and screen light. Realistic skin texture, tired eyes, believable faces; no '
+  + 'glamour retouching. No names, letters, captions, logos, watermarks, signage, '
+  + 'or any text inside the image.'
+
 /** Match a script/cast character label ("GARY", "Gary (host)") back to a host. */
 export function hostForCharacter(character) {
   const c = String(character || '').toUpperCase()

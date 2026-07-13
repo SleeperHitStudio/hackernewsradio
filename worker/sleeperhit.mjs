@@ -182,6 +182,25 @@ export class SleeperHit {
     })
   }
 
+  // ── Cast canon (project-level pinned portraits + portrait style) ────────────
+  // Every new episode inherits these at creation: the platform seeds each
+  // matching character's avatarUrl before generation (so canonical portraits
+  // are never re-rendered) and installs avatarStyle as the episode's
+  // portrait-style override.
+
+  /** { content: { avatarStyle, characters: [{ name, avatarUrl, avatarPrompt }] } } */
+  async getCastCanon(projectId) {
+    const res = await this.request(`/story-projects/${projectId}/cast-canon`)
+    return res.canon ?? null
+  }
+
+  /** Merge-patch the canon (characters merge by name). */
+  async patchCastCanon(projectId, content) {
+    await this.request(`/story-projects/${projectId}/cast-canon`, {
+      method: 'PATCH', body: { content },
+    })
+  }
+
   // ── Podcast publishing ──────────────────────────────────────────────────────
 
   /** Promote a finalized artifact into the series and queue immediate publish.

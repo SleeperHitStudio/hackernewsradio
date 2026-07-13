@@ -8,7 +8,7 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers'
 import { SleeperHit } from './sleeperhit.mjs'
 import { fetchThread, threadToTranscript } from './hn.mjs'
-import { buildBrief, pageTargetFor, hostForCharacter, HOSTS, OUTPUT_BUDGET_RE } from './brief.mjs'
+import { buildBrief, pageTargetFor, hostForCharacter, hostAvatarUrl, AVATAR_STYLE, HOSTS, OUTPUT_BUDGET_RE } from './brief.mjs'
 import { patchDrama, appendProgress, getSetting, setSetting, deleteOtherEpisodesOfThread } from './store.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -29,6 +29,28 @@ export class HnrPipeline extends WorkflowEntrypoint {
 
       // ── Source ─────────────────────────────────────────────────────────────
       const projectId = env.HNRADIO_PROJECT_ID
+
+      // Project cast canon: pinned host portraits + the show's portrait style,
+      // inherited by every episode at creation (the platform seeds them before
+      // generation, so hosts are never re-rendered). One GET, PATCH only when
+      // out of date; tolerant of platform builds that predate the endpoint —
+      // the per-episode 'pin headshots' step stays as the fallback.
+      await step.do('ensure cast canon', async () => {
+        try {
+          const canon = await sh.getCastCanon(projectId)
+          const have = new Map((canon?.content?.characters ?? []).map((c) => [c.name.toUpperCase(), c.avatarUrl]))
+          const current = canon?.content?.avatarStyle === AVATAR_STYLE
+            && HOSTS.every((h) => have.get(h.name) === hostAvatarUrl(h.name))
+          if (!current) {
+            await sh.patchCastCanon(projectId, {
+              avatarStyle: AVATAR_STYLE,
+              characters: HOSTS.map((h) => ({ name: h.name, avatarUrl: hostAvatarUrl(h.name) })),
+            })
+            await note('Refreshed the show cast canon (portraits + style)')
+          }
+        } catch { /* endpoint not deployed yet — pin step covers the hosts */ }
+      })
+
       await note('Adding this episode to HNRadio…')
       const sourceId = await step.do('add source', () =>
         sh.addTextSource(projectId, { content: threadToTranscript(thread), label: `HN thread ${thread.id}` }))
