@@ -300,6 +300,16 @@ export class HnrPipeline extends WorkflowEntrypoint {
       const introIndex = 0
       const outroIndex = Math.max(0, total - 1)
 
+      // WAIT for the platform's baseline coverage renders to fully settle
+      // BEFORE installing/muting anything — an in-flight render completing
+      // later overwrites clip records (it clobbered the banked theme and
+      // un-muted mid-show beds in production).
+      await this.pollChunked(step, 'music settle', 10, async () => {
+        const m = await sh.getMusic(artifactId)
+        const inFlight = (m.definedClips ?? []).some((c) => c.status === 'pending' || c.status === 'rendering')
+        return inFlight ? 'pending' : 'done'
+      }).catch(() => { /* settle timeout — proceed anyway */ })
+
       const banked = await getSetting(db, 'jazzTheme')
       let injected = false
       if (banked?.intro?.soundUrl && banked?.outro?.soundUrl) {
@@ -359,7 +369,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await step.do('mute middles', async () => {
         const state = await sh.getMusic(artifactId)
         for (const c of state.definedClips ?? []) {
-          if (![introIndex, outroIndex].includes(c.sceneIndex) && c.status === 'ready' && !c.disabled) {
+          if (![introIndex, outroIndex].includes(c.sceneIndex) && !c.disabled) {
             await sh.setDefinedClip(artifactId, c.sceneIndex, { disabled: true })
           }
         }
