@@ -72,8 +72,11 @@ existing MP3 instead of spending credits again.
 
 ## Config
 
-The only thing to set is `SLEEPERHIT_API_KEY`. Everything else has a default
-(see `.env.example`). `SLEEPERHIT_API_BASE` defaults to production.
+Set `SLEEPERHIT_API_KEY` for generation. Listener-requested episodes also use
+Spotify OAuth: set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`, and register
+`https://hnradio.net/api/auth/spotify/callback` as the Spotify app redirect URI.
+Everything else has a default (see `.env.example`). `SLEEPERHIT_API_BASE`
+defaults to production.
 
 ## Deploy
 

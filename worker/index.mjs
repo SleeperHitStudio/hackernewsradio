@@ -6,7 +6,7 @@
  */
 import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread } from './store.mjs'
 import { fetchThread } from './hn.mjs'
-import { claimSpotifyGeneration, spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
+import { claimSpotifyGeneration, releaseSpotifyGeneration, spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
 
 export { HnrPipeline } from './pipeline.mjs'
 
@@ -42,6 +42,7 @@ async function startGeneration(request, env, url, { force = false, requireEntitl
     const existing = await findByHnIdAndMode(env.DB, thread.id, 'podcast')
     if (existing && ['queued', 'running', 'ready'].includes(existing.status)) return { drama: existing, reused: true }
   }
+  let entitlementClaimed = false
   if (requireEntitlement) {
     const claim = await claimSpotifyGeneration(request, env, thread.id)
     if (!claim.ok) {
@@ -50,6 +51,7 @@ async function startGeneration(request, env, url, { force = false, requireEntitl
       err.generatedHnId = claim.generatedHnId || null
       throw err
     }
+    entitlementClaimed = true
   }
   const drama = {
     id: crypto.randomUUID(),
@@ -65,13 +67,18 @@ async function startGeneration(request, env, url, { force = false, requireEntitl
     error: null,
     createdAt: new Date().toISOString(),
   }
-  await upsertDrama(env.DB, drama)
-  // A forced take replaces the visible episode immediately. Retiring older
-  // rows here prevents stale failed/running cards from lingering for the full
-  // generation window; stale workflows can no longer recreate deleted rows
-  // because patchDrama only updates records that still exist.
-  if (force) await deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', drama.id)
-  await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url } })
+  try {
+    await upsertDrama(env.DB, drama)
+    // A forced take replaces the visible episode immediately. Retiring older
+    // rows here prevents stale failed/running cards from lingering for the full
+    // generation window; stale workflows can no longer recreate deleted rows
+    // because patchDrama only updates records that still exist.
+    if (force) await deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', drama.id)
+    await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url } })
+  } catch (err) {
+    if (entitlementClaimed) await releaseSpotifyGeneration(request, env, thread.id)
+    throw err
+  }
   return { drama, reused: false }
 }
 

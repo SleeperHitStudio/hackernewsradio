@@ -120,3 +120,11 @@ export async function claimSpotifyGeneration(request, env, hnId) {
     ? { ok: true }
     : { ok: false, code: 'spotify_generation_used', generatedHnId: user.generated_hn_id || null }
 }
+
+export async function releaseSpotifyGeneration(request, env, hnId) {
+  const user = await spotifyUser(request, env)
+  if (!user) return
+  await env.DB.prepare(`UPDATE spotify_users SET generation_used_at = NULL, generated_hn_id = NULL
+    WHERE spotify_user_id = ?1 AND generated_hn_id = ?2`)
+    .bind(user.spotify_user_id, String(hnId)).run()
+}

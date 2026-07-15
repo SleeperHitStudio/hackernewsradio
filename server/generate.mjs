@@ -442,7 +442,7 @@ async function runPipeline(id, thread) {
     if (seriesId) {
       await sh.publishEpisode(seriesId, {
         title: thread.title,
-        descriptionDirection: 'Write 1-2 pithy sentences (25-55 words) that sell this specific episode. Be irreverent, playful, and sharp, but use no profanity. Lead with the transcript’s actual tension, argument, or absurdity. Avoid host roll calls, generic show boilerplate, and phrases like “the hosts discuss” or “this episode explores.”',
+        descriptionDirection: 'Write one pithy sentence, 20-40 words, that sells this specific episode. Be irreverent, playful, and sharp, but use no profanity. Lead with the transcript’s actual tension, argument, or absurdity. Avoid host roll calls, generic show boilerplate, and phrases like “the hosts discuss” or “this episode explores.”',
         artifactId,
         seasonNumber: 1,
       })
