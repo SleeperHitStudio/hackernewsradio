@@ -108,6 +108,7 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [spotifyGate, setSpotifyGate] = useState(null)
   const autoFired = useRef(false)
   const [showCreate, setShowCreate] = useState(false)
   // Deep link: /e/<episode id> renders that episode's landing view.
@@ -133,6 +134,7 @@ export default function App() {
     if (!clean) return
     setBusy(true)
     setError(null)
+    setSpotifyGate(null)
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -140,6 +142,10 @@ export default function App() {
         body: JSON.stringify({ url: clean }),
       })
       const data = await res.json()
+      if (!res.ok && String(data.code || '').startsWith('spotify_')) {
+        setSpotifyGate({ code: data.code, generatedHnId: data.generatedHnId || null, requestedUrl: clean })
+        return
+      }
       if (!res.ok) throw new Error(data.error || 'Failed to start generation.')
       await refresh(query)
     } catch (err) {
@@ -154,6 +160,15 @@ export default function App() {
   useEffect(() => {
     refresh()
     const sp = new URLSearchParams(window.location.search)
+    const requested = sp.get('request')
+    if (requested) setUrl(requested)
+    if (sp.get('spotify')) {
+      fetch('/api/auth/spotify/status').then((res) => res.json()).then((status) => {
+        if (status.follows && !status.used) setSpotifyGate({ code: 'spotify_verified', requestedUrl: requested || '' })
+        else if (!status.follows) setSpotifyGate({ code: 'spotify_follow_required', requestedUrl: requested || '' })
+        else if (status.used) setSpotifyGate({ code: 'spotify_generation_used', generatedHnId: status.generatedHnId, requestedUrl: requested || '' })
+      }).catch(() => {})
+    }
     let param = sp.get('url')
     const id = sp.get('id')
     if (param && id && /\/item\/?$/.test(param)) param = `${param}?id=${id}`
@@ -205,6 +220,9 @@ export default function App() {
         <div className="masthead__row">
           <h1>📻 HNR</h1>
           <div className="masthead__actions">
+            <a href="https://open.spotify.com/show/033Q5rX4lklQvrQlxikj7Q" target="_blank" rel="noreferrer" className="spotify-badge" onClick={() => posthog.capture('spotify_badge_clicked')}>
+              <img src="/spotify-podcast-badge.svg" alt="Listen on Spotify" width="165" height="40" />
+            </a>
             <button type="button" className="subscribe subscribe--ghost" onClick={() => { posthog.capture('create_podcast_modal_opened'); setShowCreate(true) }}>
               Create your own podcast
             </button>
@@ -275,6 +293,30 @@ export default function App() {
         </button>
       </form>
       {error && <p className="composer__error">{error}</p>}
+      {spotifyGate && (
+        <div className="spotify-gate" role="status">
+          {spotifyGate.code === 'spotify_verified' ? (
+            <>
+              <strong>Follow verified.</strong>
+              <p>You have one community episode. Paste the thread above and click “Make the episode.”</p>
+            </>
+          ) : spotifyGate.code === 'spotify_generation_used' ? (
+            <>
+              <strong>Your community episode has already aired.</strong>
+              <p>{spotifyGate.generatedHnId ? <a href={`/e/${spotifyGate.generatedHnId}`}>Open it here.</a> : 'Each Spotify account can unlock one episode.'}</p>
+            </>
+          ) : (
+            <>
+              <strong>Want us to make this thread?</strong>
+              <p>Follow HNR on Spotify, then verify your follow to unlock one community-generated episode.</p>
+              <div className="spotify-gate__actions">
+                <a href="https://open.spotify.com/show/033Q5rX4lklQvrQlxikj7Q" target="_blank" rel="noreferrer"><img src="/spotify-podcast-badge.svg" alt="Follow HNR on Spotify" width="165" height="40" /></a>
+                <a className="subscribe" href={`/api/auth/spotify/start?returnTo=${encodeURIComponent(`/?request=${encodeURIComponent(spotifyGate.requestedUrl || url)}`)}`}>I followed — verify</a>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="searchbar">
         <input
