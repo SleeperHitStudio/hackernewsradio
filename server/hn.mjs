@@ -45,12 +45,20 @@ function htmlToText(html) {
  * Flatten the comment tree depth-first into an ordered list. Each entry keeps
  * the author, depth (for "replying to" texture), and decoded text.
  */
-function flatten(node, depth, out) {
-  for (const child of node.children ?? []) {
+function flatten(node, depth, out, branch = null, parentId = null) {
+  for (const [index, child] of (node.children ?? []).entries()) {
+    const childBranch = branch ?? index
     if (child.type === 'comment' && child.text && !child.deleted && !child.dead) {
-      out.push({ author: child.author || 'someone', depth, text: htmlToText(child.text) })
+      out.push({
+        id: String(child.id),
+        parentId: parentId == null ? null : String(parentId),
+        branch: childBranch,
+        author: child.author || 'someone',
+        depth,
+        text: htmlToText(child.text),
+      })
     }
-    flatten(child, depth + 1, out)
+    flatten(child, depth + 1, out, childBranch, child.id)
   }
 }
 
@@ -92,7 +100,41 @@ export async function fetchThread(input) {
  * of comments and per-comment length so a huge thread doesn't blow the source
  * budget — the planner gets the title, the OP, and the densest slice of debate.
  */
-export function threadToTranscript(thread, { maxComments = 120, maxCharsEach = 900 } = {}) {
+function selectAcrossBranches(comments, maxComments) {
+  if (comments.length <= maxComments) return comments
+  const groups = new Map()
+  for (const comment of comments) {
+    const key = comment.branch ?? 0
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(comment)
+  }
+  const selected = []
+  const queues = [...groups.values()]
+  for (let index = 0; selected.length < maxComments; index++) {
+    let added = false
+    for (const queue of queues) {
+      if (queue[index]) {
+        selected.push(queue[index])
+        added = true
+        if (selected.length === maxComments) break
+      }
+    }
+    if (!added) break
+  }
+  return selected
+}
+
+function excerpt(text, maxChars) {
+  if (text.length <= maxChars) return text
+  const prefix = text.slice(0, maxChars)
+  const sentenceEnd = Math.max(prefix.lastIndexOf('. '), prefix.lastIndexOf('? '), prefix.lastIndexOf('! '))
+  const wordEnd = prefix.lastIndexOf(' ')
+  const end = sentenceEnd >= maxChars * 0.6 ? sentenceEnd + 1 : wordEnd
+  return `${prefix.slice(0, Math.max(1, end)).trim()} [HNR EXCERPT SHORTENED]`
+}
+
+export function threadToTranscript(thread, { maxComments = 240, maxCharsEach = 1600 } = {}) {
+  const comments = selectAcrossBranches(thread.comments, maxComments)
   const lines = []
   lines.push(`# Hacker News thread: ${thread.title}`)
   lines.push(`Original link: ${thread.url} · posted by ${thread.author}` +
@@ -103,12 +145,14 @@ export function threadToTranscript(thread, { maxComments = 120, maxCharsEach = 9
     lines.push(thread.storyText.slice(0, 1500))
     lines.push('')
   }
-  lines.push(`## Comments (${thread.total} total, showing up to ${maxComments})`)
+  lines.push(`## Comments (${thread.total} total; ${comments.length} included across top-level reply branches)`)
+  lines.push('Source note: comments are complete unless explicitly marked [HNR EXCERPT SHORTENED]. Never claim an unmarked comment was cut off.')
   lines.push('')
-  for (const c of thread.comments.slice(0, maxComments)) {
+  for (const c of comments) {
     const indent = '  '.repeat(Math.min(c.depth, 6))
-    const body = c.text.length > maxCharsEach ? `${c.text.slice(0, maxCharsEach)}…` : c.text
-    lines.push(`${indent}- ${c.author}: ${body.replace(/\n+/g, ' ')}`)
+    const reply = c.parentId ? ` reply_to=${c.parentId}` : ''
+    const body = excerpt(c.text, maxCharsEach)
+    lines.push(`${indent}- [comment=${c.id}${reply}] ${c.author}: ${body.replace(/\n+/g, ' ')}`)
   }
   return lines.join('\n')
 }
