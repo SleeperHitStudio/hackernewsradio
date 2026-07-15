@@ -440,12 +440,25 @@ async function runPipeline(id, thread) {
   try {
     const seriesId = await getSetting('publishingSeriesId')
     if (seriesId) {
-      await sh.publishEpisode(seriesId, { title: thread.title, artifactId })
+      await sh.publishEpisode(seriesId, {
+        title: thread.title,
+        description: episodeDescription(thread),
+        artifactId,
+        seasonNumber: 1,
+      })
       await note(id, 'Published to the HNR podcast feed.')
     }
   } catch (err) {
     await note(id, `Podcast publish skipped (${err?.message || err})`)
   }
+}
+
+function episodeDescription(thread) {
+  const commentCount = Number(thread.total ?? thread.comments?.length ?? 0)
+  const breadth = commentCount > 0
+    ? ` across ${commentCount} Hacker News comments and their reply threads`
+    : ' through the original Hacker News discussion'
+  return `Gary, Maeve, Obi, and Gruner tear into “${thread.title},” following the arguments, counterarguments, and standout voices${breadth}. A profane, satirical HNR roundtable grounded in the original discussion. Original thread: ${thread.url}`
 }
 
 /**
