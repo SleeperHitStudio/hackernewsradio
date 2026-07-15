@@ -558,8 +558,8 @@ async function autotuneAlien(sh, artifactId, onProgress) {
       await sh.addSfxCue(artifactId, {
         entryIndex: r.start,
         label: 'Dial Click',
-        prompt: 'a single small subtle mechanical click, like a tiny dial or switch',
-        volume: 0.35,
+        prompt: 'exactly one short, dry, definitive mechanical switch click — isolated single transient, no second click, no double-click, no ratchet, no sequence, no tail',
+        volume: 0.42,
       })
     } catch { /* click optional */ }
   }
