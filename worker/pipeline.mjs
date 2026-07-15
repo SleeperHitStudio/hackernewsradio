@@ -251,7 +251,11 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await step.sleep('pre-finalize break', '2 seconds')
       const first = await this.hardStep(step, 'finalize', () =>
         sh.request(`/artifacts/${artifactId}/finalize`, {
-          method: 'POST', idempotencyKey: `${dramaId}-finalize`, body: { mode: 'audio' },
+          method: 'POST',
+          idempotencyKey: event.payload.repairRunId
+            ? `${dramaId}-finalize-repair-${event.payload.repairRunId}`
+            : `${dramaId}-finalize`,
+          body: { mode: 'audio' },
         }))
       let audioUrl = first.finalize?.recordingUrl ?? null
       if (!audioUrl) {

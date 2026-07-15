@@ -75,8 +75,13 @@ function EpisodeCard({ drama, highlighted }) {
         <audio
           className="player"
           controls
+          controlsList="nodownload noplaybackrate"
+          disableRemotePlayback
           preload="none"
           src={drama.audioUrl}
+          onRateChange={(event) => {
+            if (event.currentTarget.playbackRate !== 1) event.currentTarget.playbackRate = 1
+          }}
           onPlay={() => posthog.capture('episode_playback_started', { hn_id: drama.hnId, episode_title: drama.title, comment_count: drama.commentCount })}
         />
       )}

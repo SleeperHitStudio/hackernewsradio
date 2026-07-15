@@ -105,12 +105,14 @@ async function handleApi(request, env, url) {
     if (!drama?.artifactId) return json({ error: 'Repair needs an existing performance (artifactId).' }, 400)
     let body
     try { body = await request.json() } catch { body = {} }
+    const repairRunId = crypto.randomUUID()
     await env.PIPELINE.create({
-      id: crypto.randomUUID(),
+      id: repairRunId,
       params: {
         dramaId: drama.id,
         url: drama.url,
         repairArtifactId: drama.artifactId,
+        repairRunId,
         skipPublish: body?.publish !== true,
       },
     })
