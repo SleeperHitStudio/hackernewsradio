@@ -311,6 +311,21 @@ body {
 .subscribe:hover { filter: brightness(1.08); }
 
 .masthead__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.spotify-badge { display: inline-flex; height: 40px; }
+.spotify-badge img { display: block; width: 165px; height: 40px; }
+
+.spotify-gate {
+  margin-top: 14px;
+  padding: 16px 18px;
+  border: 1px solid #1ed760;
+  border-radius: 12px;
+  background: rgba(30, 215, 96, 0.07);
+}
+.spotify-gate strong { color: var(--ink); }
+.spotify-gate p { color: var(--muted); margin: 6px 0 12px; line-height: 1.5; }
+.spotify-gate a { color: var(--ink); }
+.spotify-gate__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.spotify-gate__actions img { display: block; width: 165px; height: 40px; }
 
 .subscribe--ghost {
   background: var(--panel);

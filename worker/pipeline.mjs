@@ -289,7 +289,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
           if (seriesId) {
             await sh.publishEpisode(seriesId, {
               title: thread.title,
-              description: episodeDescription(thread),
+              descriptionDirection: 'Write one pithy sentence, 20-40 words, that sells this specific episode. Be irreverent, playful, and sharp, but use no profanity. Lead with the transcript’s actual tension, argument, or absurdity. Avoid host roll calls, generic show boilerplate, and phrases like “the hosts discuss” or “this episode explores.”',
               artifactId,
               seasonNumber: 1,
             })
@@ -507,12 +507,4 @@ export class HnrPipeline extends WorkflowEntrypoint {
     })
     await sh.patchSeriesBible(projectId, { content: { episodes } })
   }
-}
-
-function episodeDescription(thread) {
-  const commentCount = Number(thread.total ?? thread.comments?.length ?? 0)
-  const breadth = commentCount > 0
-    ? ` across ${commentCount} Hacker News comments and their reply threads`
-    : ' through the original Hacker News discussion'
-  return `Gary, Maeve, Obi, and Gruner tear into “${thread.title},” following the arguments, counterarguments, and standout voices${breadth}. A profane, satirical HNR roundtable grounded in the original discussion. Original thread: ${thread.url}`
 }

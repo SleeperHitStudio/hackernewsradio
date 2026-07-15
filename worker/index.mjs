@@ -6,6 +6,7 @@
  */
 import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread } from './store.mjs'
 import { fetchThread } from './hn.mjs'
+import { claimSpotifyGeneration, releaseSpotifyGeneration, spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
 
 export { HnrPipeline } from './pipeline.mjs'
 
@@ -35,11 +36,22 @@ const json = (data, status = 200) =>
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-async function startGeneration(env, url, { force = false } = {}) {
+async function startGeneration(request, env, url, { force = false, requireEntitlement = true } = {}) {
   const thread = await fetchThread(url)
   if (!force) {
     const existing = await findByHnIdAndMode(env.DB, thread.id, 'podcast')
-    if (existing && existing.status === 'ready') return { drama: existing, reused: true }
+    if (existing && ['queued', 'running', 'ready'].includes(existing.status)) return { drama: existing, reused: true }
+  }
+  let entitlementClaimed = false
+  if (requireEntitlement) {
+    const claim = await claimSpotifyGeneration(request, env, thread.id)
+    if (!claim.ok) {
+      const err = new Error(claim.code)
+      err.code = claim.code
+      err.generatedHnId = claim.generatedHnId || null
+      throw err
+    }
+    entitlementClaimed = true
   }
   const drama = {
     id: crypto.randomUUID(),
@@ -55,18 +67,26 @@ async function startGeneration(env, url, { force = false } = {}) {
     error: null,
     createdAt: new Date().toISOString(),
   }
-  await upsertDrama(env.DB, drama)
-  // A forced take replaces the visible episode immediately. Retiring older
-  // rows here prevents stale failed/running cards from lingering for the full
-  // generation window; stale workflows can no longer recreate deleted rows
-  // because patchDrama only updates records that still exist.
-  if (force) await deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', drama.id)
-  await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url } })
+  try {
+    await upsertDrama(env.DB, drama)
+    // A forced take replaces the visible episode immediately. Retiring older
+    // rows here prevents stale failed/running cards from lingering for the full
+    // generation window; stale workflows can no longer recreate deleted rows
+    // because patchDrama only updates records that still exist.
+    if (force) await deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', drama.id)
+    await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url } })
+  } catch (err) {
+    if (entitlementClaimed) await releaseSpotifyGeneration(request, env, thread.id)
+    throw err
+  }
   return { drama, reused: false }
 }
 
 async function handleApi(request, env, url) {
   const { pathname } = url
+  if (pathname === '/api/auth/spotify/start' && request.method === 'GET') return spotifyStart(request, env, url)
+  if (pathname === '/api/auth/spotify/callback' && request.method === 'GET') return spotifyCallback(request, env, url)
+  if (pathname === '/api/auth/spotify/status' && request.method === 'GET') return json(await spotifyStatus(request, env))
   if (pathname === '/api/health') {
     return json({ ok: true, apiBase: env.SLEEPERHIT_API_BASE, hasKey: Boolean(env.SLEEPERHIT_API_KEY), platform: 'cloudflare' })
   }
@@ -124,9 +144,12 @@ async function handleApi(request, env, url) {
     try { body = await request.json() } catch { body = {} }
     if (!body?.url) return json({ error: 'Provide a Hacker News thread "url".' }, 400)
     try {
-      const result = await startGeneration(env, body.url, { force: Boolean(body.force) })
+      const result = await startGeneration(request, env, body.url, { force: Boolean(body.force) })
       return json(result)
     } catch (err) {
+      if (String(err?.code || '').startsWith('spotify_')) {
+        return json({ error: err.code, code: err.code, generatedHnId: err.generatedHnId || null }, 403)
+      }
       return json({ error: err?.message || String(err) }, 400)
     }
   }
