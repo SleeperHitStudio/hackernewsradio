@@ -4,7 +4,7 @@
  * OG tags. Generation runs as a durable Workflow (see pipeline.mjs); the daily
  * 7pm America/Chicago sweep fires from an hourly cron trigger (DST-proof).
  */
-import { listDramas, getDrama, findByHnIdAndMode, upsertDrama } from './store.mjs'
+import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread } from './store.mjs'
 import { fetchThread } from './hn.mjs'
 
 export { HnrPipeline } from './pipeline.mjs'
@@ -56,6 +56,11 @@ async function startGeneration(env, url, { force = false } = {}) {
     createdAt: new Date().toISOString(),
   }
   await upsertDrama(env.DB, drama)
+  // A forced take replaces the visible episode immediately. Retiring older
+  // rows here prevents stale failed/running cards from lingering for the full
+  // generation window; stale workflows can no longer recreate deleted rows
+  // because patchDrama only updates records that still exist.
+  if (force) await deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', drama.id)
   await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url } })
   return { drama, reused: false }
 }
