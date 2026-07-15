@@ -96,6 +96,26 @@ async function handleApi(request, env, url) {
     })
     return json({ resumed: drama.id })
   }
+  // Re-run post-production against an existing performance without spending
+  // on a new script/read. Used to repair optional effects or music that a
+  // transient Worker subrequest-budget exhaustion skipped.
+  const repair = pathname.match(/^\/api\/dramas\/([0-9a-f-]{36})\/repair$/)
+  if (repair && request.method === 'POST') {
+    const drama = await getDrama(env.DB, repair[1])
+    if (!drama?.artifactId) return json({ error: 'Repair needs an existing performance (artifactId).' }, 400)
+    let body
+    try { body = await request.json() } catch { body = {} }
+    await env.PIPELINE.create({
+      id: crypto.randomUUID(),
+      params: {
+        dramaId: drama.id,
+        url: drama.url,
+        repairArtifactId: drama.artifactId,
+        skipPublish: body?.publish !== true,
+      },
+    })
+    return json({ repairing: drama.id, publish: body?.publish === true })
+  }
   if (pathname === '/api/generate' && request.method === 'POST') {
     if (!env.SLEEPERHIT_API_KEY) return json({ error: 'Server is missing SLEEPERHIT_API_KEY.' }, 500)
     let body

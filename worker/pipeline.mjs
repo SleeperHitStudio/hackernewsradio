@@ -34,10 +34,12 @@ export class HnrPipeline extends WorkflowEntrypoint {
       // subrequest budget bug at finalize) leaves a fully post-produced
       // artifact behind — POST /api/dramas/:id/resume re-enters here and
       // skips straight to finalize instead of re-spending generation credits.
-      let artifactId = event.payload.resumeArtifactId ?? null
+      let artifactId = event.payload.resumeArtifactId ?? event.payload.repairArtifactId ?? null
       if (artifactId) {
         await patchDrama(db, dramaId, { artifactId })
-        await note('Resuming — the performance already exists; mixing the final audio…')
+        await note(event.payload.repairArtifactId
+          ? 'Repairing post-production on the existing performance…'
+          : 'Resuming — the performance already exists; mixing the final audio…')
       }
 
       if (!artifactId) {
@@ -193,6 +195,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
       }
       await patchDrama(db, dramaId, { artifactId })
 
+      } // end generation path
+
+      if (!event.payload.resumeArtifactId || event.payload.repairArtifactId) {
+
       // ── Post-production (each best-effort, mirroring the server) ───────────
       await step.sleep('post-prod break 1', '2 seconds')
       await step.do('pin voices', async () => {
@@ -201,11 +207,11 @@ export class HnrPipeline extends WorkflowEntrypoint {
         }
       })
       await step.sleep('post-prod break 2', '2 seconds')
-      await step.do('autotune dial', async () => {
-        try { await this.autotuneAlien(db, sh, dramaId, artifactId) } catch (err) {
-          await note(`Alien autotune skipped (${err?.message || err})`)
-        }
-      })
+      try {
+        await this.hardStep(step, 'autotune dial', () => this.autotuneAlien(db, sh, dramaId, artifactId))
+      } catch (err) {
+        await note(`Alien autotune skipped (${err?.message || err})`)
+      }
       await step.sleep('post-prod break 2b', '2 seconds')
       await step.do('normalize cable static', async () => {
         // Gary's cable gag: whatever the writer/detector authored, the SOUND is
@@ -214,7 +220,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
         try {
           const cues = await sh.listSfxCues(artifactId)
           for (const c of cues) {
-            if (/static|unplug|cable|disconnect/i.test(`${c.label} ${c.prompt}`)) {
+            const description = `${c.label} ${c.prompt}`
+            if (/phone.*buzz|buzz.*phone|phone.*vibrat|vibrat.*phone/i.test(description)) {
+              await sh.updateSfxCue(artifactId, c.id, { isDisabled: true })
+            } else if (/static|unplug|cable|disconnect/i.test(description)) {
               await sh.updateSfxCue(artifactId, c.id, {
                 label: 'Cable Static',
                 prompt: 'one to two seconds of soft radio static, like snow on an old television — low, muffled, gentle',
@@ -235,7 +244,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
       })
       await step.sleep('post-prod break 4', '2 seconds')
       await this.shapeMusic(step, db, sh, dramaId, artifactId, note)
-      } // end fresh-generation path (resume mode skips straight here)
+      } // end post-production path (resume mode skips straight to finalize)
 
       // ── Finalize ───────────────────────────────────────────────────────────
       await note('Mixing the durable MP3 (voices + music + SFX)…')
@@ -259,7 +268,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await note('Done — your podcast is ready.')
 
       await step.sleep('post-ready break', '2 seconds')
-      await step.do('replace + log + publish', async () => {
+      await step.do('replace + log', async () => {
         try {
           const removed = await deleteOtherEpisodesOfThread(db, thread.id, 'podcast', dramaId)
           if (removed) await note(`Replaced ${removed} older episode(s) of this thread.`)
@@ -267,16 +276,20 @@ export class HnrPipeline extends WorkflowEntrypoint {
         try { await this.logEpisodeInBible(sh, projectId, thread) } catch (err) {
           await note(`Series Bible episode log skipped (${err?.message || err})`)
         }
-        try {
+      })
+      await step.sleep('pre-publish budget break', '6 minutes')
+      try {
+        if (event.payload.skipPublish) return
+        await this.hardStep(step, 'publish podcast feed', async () => {
           const seriesId = await getSetting(db, 'publishingSeriesId')
           if (seriesId) {
             await sh.publishEpisode(seriesId, { title: thread.title, artifactId })
             await note('Published to the HNR podcast feed.')
           }
-        } catch (err) {
-          await note(`Podcast publish skipped (${err?.message || err})`)
-        }
-      })
+        })
+      } catch (err) {
+        await note(`Podcast publish skipped (${err?.message || err})`)
+      }
     } catch (err) {
       await patchDrama(db, dramaId, { status: 'failed', error: err?.message || String(err) })
       await note(`Failed: ${err?.message || err}`)
@@ -397,6 +410,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
         const inFlight = (m.definedClips ?? []).some((c) => c.status === 'pending' || c.status === 'rendering')
         return inFlight ? 'pending' : 'done'
       }).catch(() => { /* settle timeout — proceed anyway */ })
+      // The settle probes may share one warm Durable Object invocation and
+      // consume its fetch allowance. Hibernate before the write-heavy theme
+      // installation so those calls receive a fresh subrequest budget.
+      await step.sleep('music write budget break', '6 minutes')
 
       const banked = await getSetting(db, 'jazzTheme')
       let injected = false
