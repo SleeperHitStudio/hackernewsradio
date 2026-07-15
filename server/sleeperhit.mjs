@@ -186,10 +186,16 @@ export class SleeperHit {
 
   /** Promote a finalized artifact into the series and queue immediate publish.
    *  The series' public RSS feed picks it up (podcast apps poll the feed). */
-  async publishEpisode(seriesId, { title, artifactId }) {
+  async publishEpisode(seriesId, { title, description, artifactId, seasonNumber = 1 }) {
     const res = await this.request(`/publishing-series/${seriesId}/releases`, {
       method: 'POST', idempotencyKey: true,
-      body: { title: title.slice(0, 200), sourceArtifactId: artifactId, type: 'episode' },
+      body: {
+        title: title.slice(0, 200),
+        description: description?.slice(0, 10_000),
+        sourceArtifactId: artifactId,
+        type: 'episode',
+        seasonNumber,
+      },
     })
     const releaseId = (res.release ?? res).id
     await this.request(`/publishing-releases/${releaseId}/publish`, {

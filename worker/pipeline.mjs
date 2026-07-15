@@ -287,7 +287,12 @@ export class HnrPipeline extends WorkflowEntrypoint {
         await this.hardStep(step, 'publish podcast feed', async () => {
           const seriesId = await getSetting(db, 'publishingSeriesId')
           if (seriesId) {
-            await sh.publishEpisode(seriesId, { title: thread.title, artifactId })
+            await sh.publishEpisode(seriesId, {
+              title: thread.title,
+              description: episodeDescription(thread),
+              artifactId,
+              seasonNumber: 1,
+            })
             await note('Published to the HNR podcast feed.')
           }
         })
@@ -502,4 +507,12 @@ export class HnrPipeline extends WorkflowEntrypoint {
     })
     await sh.patchSeriesBible(projectId, { content: { episodes } })
   }
+}
+
+function episodeDescription(thread) {
+  const commentCount = Number(thread.total ?? thread.comments?.length ?? 0)
+  const breadth = commentCount > 0
+    ? ` across ${commentCount} Hacker News comments and their reply threads`
+    : ' through the original Hacker News discussion'
+  return `Gary, Maeve, Obi, and Gruner tear into “${thread.title},” following the arguments, counterarguments, and standout voices${breadth}. A profane, satirical HNR roundtable grounded in the original discussion. Original thread: ${thread.url}`
 }
