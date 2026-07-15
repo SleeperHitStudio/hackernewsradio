@@ -136,26 +136,19 @@ function podcastBrief(thread, pageTarget) {
       ...SHARED_AUDIO,
       mustKnowBeforeWriting: [
         ...SHARED_MUST_KNOW,
-        'The cast is FIXED and recurring: GARY, MAEVE, OBI, and GRUNER host EVERY episode. Use exactly these four ' +
-        'names as the speakers; do not rename, merge, or replace them.',
+        'The cast is FIXED: GARY (failed founder), MAEVE (VC), OBI (infra lifer), and GRUNER (podcast-brained alien). Use exactly these hosts; play their satire straight.',
         'COLD-OPEN RITUAL: GARY STUMBLES INTO IT — mid-thought, flustered, slightly wrong, never smooth — then each ' +
-        'host introduces themselves in one line, in order (Gary, Maeve, Obi, Gruner), then into the thread.',
+        'host introduces themselves in order. No narrator; end with a clean host sign-off and no CTA.',
         'OBI IS MEAN TO GARY — cutting, personal, relentless, profane; Gary mostly absorbs it, wounded but polite. ' +
         'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
-        'The hosts are SATIRE of Silicon Valley archetypes — failed founder (Gary), VC (Maeve), infra lifer (Obi), ' +
-        'podcast-brained alien (Gruner). Play the types ruthlessly, as real people, never as sketch characters.',
         'GRUNER\'S DIAL: when he REALLY means something he turns a dial on his throat — mark ONLY those lines with a ' +
         '(dial) parenthetical (often one of several consecutive GRUNER lines). NOBODY ever acknowledges it, ever.',
         'SWEAR CONSTANTLY — F-BOMBS ARE THE SHOW\'S PUNCTUATION, several per exchange: fuck, fucking, shit, goddamn; ' +
         'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
         'tangents, sudden painful silences, non sequiturs — irreverent all the way down, played completely straight.',
-        'THE EPISODE MUST TEACH: organize discussion into 3-6 recurring themes supported by multiple comments. Spotlight reply chains that sharpen or challenge each theme.',
-        'Cover top arguments, key insights, minority positions, and real disagreement. Teach the discussion\'s shape, not a handful of colorful quotes. Satire rides on substance.',
         'MUSIC IS THE SHOW\'S JAZZ THEME, bookends only: the SAME sleazy late-night jazz identity (~30–40s) opens ' +
         'and closes every episode, plus at most one or two ~10s stings — otherwise VOICES ONLY, no score under talk.',
-        'NO narrator/announcer — Gary opens cold; END with a clean host sign-off, wrapped up fully. No next-episode ' +
-        'teases, no like/subscribe/rate, no podcast-outro CTA clichés.',
       ],
     },
     styleConstraints: SHARED_STYLE_CONSTRAINTS,
@@ -224,6 +217,7 @@ export async function startGeneration(url, { force = false } = {}) {
     createdAt: stamp(),
   }
   await upsertDrama(drama)
+  if (force) await deleteOtherEpisodesOfThread(thread.id, mode, drama.id)
 
   runPipeline(drama.id, thread).catch(async (err) => {
     await patchDrama(drama.id, {
