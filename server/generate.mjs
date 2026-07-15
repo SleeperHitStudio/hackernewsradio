@@ -67,6 +67,12 @@ const SHARED_MUST_KNOW = [
   'The source is a real Hacker News comment thread; the people arguing in it are your raw material.',
   'Use REAL QUOTES from the comments and WEAVE them into the bits — react by handle, make recurring commenters ' +
   'the show\'s heroes and villains; the thread IS the material, not a topic the hosts talk near.',
+  'Before writing, derive 3-6 THEMES from the breadth of the supplied comments. Structure the episode around those ' +
+  'themes, then call out specific reply threads and handles as representative evidence — do not cherry-pick isolated ' +
+  'quotes while ignoring the larger shape of the discussion.',
+  'Preserve reply context: when quoting a reply, explain what it answers and include the parent position when it ' +
+  'changes the meaning. Never say a comment was cut off unless its source text explicitly contains the marker ' +
+  '[HNR EXCERPT SHORTENED].',
 ]
 
 const SHARED_AUDIO = {
@@ -147,8 +153,10 @@ function podcastBrief(thread, pageTarget) {
         'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
         'tangents, sudden painful silences, non sequiturs — irreverent all the way down, played completely straight.',
-        'THE EPISODE MUST TEACH: the thread\'s top arguments, key insights, and real disagreement all get threaded ' +
-        'through — the listener learns what happened and why it matters. Satire rides ON the substance.',
+        'THE EPISODE MUST TEACH: organize the thread into 3-6 recurring themes supported by multiple comments, then ' +
+        'spotlight specific reply chains that sharpen or challenge each theme. Cover the top arguments, key insights, ' +
+        'minority positions, and real disagreement so the listener learns the shape of the discussion, not merely a ' +
+        'handful of colorful quotes. Satire rides ON the substance.',
         'MUSIC IS THE SHOW\'S JAZZ THEME, bookends only: the SAME sleazy late-night jazz identity (~30–40s) opens ' +
         'and closes every episode, plus at most one or two ~10s stings — otherwise VOICES ONLY, no score under talk.',
         'NO narrator/announcer — Gary opens cold; END with a clean host sign-off, wrapped up fully. No next-episode ' +
