@@ -26,6 +26,11 @@ test('voice modification summaries track the newest requested range records', ()
   assert.equal(summary.failed, 1)
   assert.equal(summary.pending, 1)
   assert.deepEqual(summary.failedRanges, [{ start: 4, end: 6 }])
+  assert.deepEqual(summary.statuses, [
+    { start: 4, end: 6, status: 'failed' },
+    { start: 12, end: 12, status: 'ready' },
+    { start: 20, end: 21, status: 'missing' },
+  ])
 })
 
 test('failed voice mod retries use stable per-range idempotency keys', async () => {

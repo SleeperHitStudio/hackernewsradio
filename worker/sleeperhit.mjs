@@ -54,7 +54,12 @@ export function summarizeVoiceModifications(modifications, requestedRanges) {
   for (const range of requestedRanges) {
     const normalized = { start: Number(range.start), end: Number(range.end) }
     const modification = latest.get(rangeKey(normalized))
-    const status = String(modification?.status || 'pending').toLowerCase()
+    // Missing is deliberately distinct from queued/rendering. Recovery may
+    // enqueue a missing range, but must leave an existing in-flight render
+    // alone and let the normal poll settle it.
+    const status = modification
+      ? String(modification.status || 'pending').toLowerCase()
+      : 'missing'
     statuses.push({ ...normalized, status })
     if (status === 'ready') ready++
     else if (status === 'failed') {

@@ -2,6 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS,
+  NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS,
+  NIGHTLY_MUSIC_STALL_TIMEOUT_MS,
   PUBLISHED_PROGRESS_MESSAGE,
   centralRunContext,
   hasPublishedProgress,
@@ -12,10 +15,24 @@ import {
   runNightlyReconciliation,
 } from '../worker/nightly.mjs'
 
-function harness({ settings = new Map(), dramas = new Map(), topIds = [] } = {}) {
+function harness({
+  settings = new Map(),
+  dramas = new Map(),
+  topIds = [],
+  now = '2026-07-16T06:00:00.000Z',
+  randomIds = ['resume_watchdog_1'],
+} = {}) {
   const creates = []
+  const deletes = []
+  const restarts = []
+  const terminations = []
   const workflowStatuses = new Map()
+  const missingCheckpoints = new Set()
+  const clock = { now: new Date(now) }
+  const ids = [...randomIds]
   const dependencies = {
+    now: () => new Date(clock.now),
+    randomUUID: () => ids.shift() || `resume_watchdog_${creates.length + 1}`,
     async getSetting(_db, key) { return structuredClone(settings.get(key) ?? null) },
     async setSetting(_db, key, value) { settings.set(key, structuredClone(value)) },
     async getDrama(_db, id) { return structuredClone(dramas.get(id) ?? null) },
@@ -30,8 +47,17 @@ function harness({ settings = new Map(), dramas = new Map(), topIds = [] } = {})
       dramas.set(id, next)
       return structuredClone(next)
     },
-    async deleteDrama(_db, id) { return dramas.delete(id) ? 1 : 0 },
-    async deleteOtherEpisodesOfThread() { return 0 },
+    async appendProgress(_db, id, message, { runId, eventKey } = {}) {
+      const current = dramas.get(id)
+      if (!current) return []
+      const progress = [...(current.progress ?? []), {
+        at: clock.now.toISOString(), message, runId, eventKey,
+      }]
+      dramas.set(id, { ...current, progress })
+      return structuredClone(progress)
+    },
+    async deleteDrama(_db, id) { deletes.push({ type: 'episode', id }); return dramas.delete(id) ? 1 : 0 },
+    async deleteOtherEpisodesOfThread(...args) { deletes.push({ type: 'thread', args }); return 0 },
     async fetchJson(url) {
       if (url.endsWith('/topstories.json')) return topIds
       const id = url.match(/item\/(\d+)\.json$/)?.[1]
@@ -57,11 +83,84 @@ function harness({ settings = new Map(), dramas = new Map(), topIds = [] } = {})
         return { id: options.id }
       },
       async get(id) {
-        return { async status() { return { status: workflowStatuses.get(id) || 'unknown' } } }
+        return {
+          async status() { return { status: workflowStatuses.get(id) || 'unknown' } },
+          async restart(options) {
+            restarts.push({ id, options: structuredClone(options) })
+            if (missingCheckpoints.has(id)) throw new Error('No workflow step matching the requested checkpoint was found.')
+            workflowStatuses.set(id, 'waiting')
+          },
+          async terminate() {
+            terminations.push(id)
+            workflowStatuses.set(id, 'terminated')
+          },
+        }
       },
     },
   }
-  return { creates, dependencies, dramas, env, settings, workflowStatuses }
+  return {
+    clock,
+    creates,
+    deletes,
+    dependencies,
+    dramas,
+    env,
+    missingCheckpoints,
+    restarts,
+    settings,
+    terminations,
+    workflowStatuses,
+  }
+}
+
+function activeArtifactFixture({
+  now = '2026-07-16T06:00:00.000Z',
+  progressAgeMs = NIGHTLY_MUSIC_STALL_TIMEOUT_MS + 1,
+  musicWatchdog,
+} = {}) {
+  const date = '2026-07-15'
+  const nowMs = Date.parse(now)
+  const drama = {
+    id: 'episode_stalled',
+    hnId: '42',
+    status: 'running',
+    audioUrl: null,
+    artifactId: 'artifact_stable',
+    jobId: 'job_stable',
+    url: 'https://news.ycombinator.com/item?id=42',
+    title: 'Story 42',
+    createdAt: '2026-07-16T01:00:00.000Z',
+    progress: [{
+      at: new Date(nowMs - progressAgeMs).toISOString(),
+      message: 'autotune: GRUNER turned the dial — 1 line(s) across 1 range(s)',
+    }],
+  }
+  const item = {
+    hnId: drama.hnId,
+    url: drama.url,
+    title: drama.title,
+    episodeId: drama.id,
+    workflowId: 'workflow_stalled',
+    attempt: 1,
+    recoveryAttempts: 0,
+    status: 'waiting',
+    ...(musicWatchdog ? { musicWatchdog } : {}),
+  }
+  const batch = {
+    date,
+    status: 'running',
+    target: 5,
+    items: [item],
+    errors: [],
+  }
+  const h = harness({
+    now,
+    settings: new Map([[nightlyBatchKey(date), batch]]),
+    dramas: new Map([[drama.id, drama]]),
+    topIds: [],
+  })
+  h.workflowStatuses.set(item.workflowId, 'waiting')
+  return { batch, date, drama, h, item, nowMs }
 }
 
 test('nightly helpers distinguish active Workflows and feed-published episodes', () => {
@@ -83,6 +182,165 @@ test('nightly helpers distinguish active Workflows and feed-published episodes',
     date: '2026-07-15',
     hour: 20,
   })
+})
+
+test('a stale active artifact restarts once from the completed music sleep without regeneration', async () => {
+  const { date, drama, h } = activeArtifactFixture()
+
+  const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.deepEqual(h.restarts, [{
+    id: 'workflow_stalled',
+    options: { from: { name: 'music write budget break', type: 'sleep' } },
+  }])
+  assert.equal(h.creates.length, 0)
+  assert.equal(h.terminations.length, 0)
+  assert.equal(h.deletes.length, 0)
+  assert.equal(h.dramas.get(drama.id).artifactId, 'artifact_stable')
+  assert.equal(h.dramas.get(drama.id).jobId, 'job_stable')
+  assert.match(h.dramas.get(drama.id).progress.at(-1).message, /restarting from that checkpoint/i)
+  assert.equal(reconciled.items[0].workflowId, 'workflow_stalled')
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 1)
+  assert.equal(reconciled.items[0].musicWatchdog.lastAction, 'checkpoint-restart')
+})
+
+test('an active artifact with recent episode progress is not restarted', async () => {
+  const { date, h } = activeArtifactFixture({
+    progressAgeMs: NIGHTLY_MUSIC_STALL_TIMEOUT_MS - 1,
+  })
+
+  const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.restarts.length, 0)
+  assert.equal(h.creates.length, 0)
+  assert.equal(h.terminations.length, 0)
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 0)
+  assert.equal(reconciled.items[0].musicWatchdog.artifactObservedAt, '2026-07-16T06:00:00.000Z')
+  assert.equal(reconciled.items[0].status, 'waiting')
+})
+
+test('an artifact with no timestamped progress gets a full observation window before restart', async () => {
+  const { date, drama, h } = activeArtifactFixture()
+  h.dramas.set(drama.id, { ...drama, progress: [] })
+
+  let reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.restarts.length, 0)
+  assert.equal(reconciled.items[0].musicWatchdog.artifactObservedAt, '2026-07-16T06:00:00.000Z')
+
+  h.clock.now = new Date(h.clock.now.getTime() + NIGHTLY_MUSIC_STALL_TIMEOUT_MS)
+  reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.restarts.length, 1)
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 1)
+})
+
+test('a stale artifact upstream of the music checkpoint stays active and observes the cooldown', async () => {
+  const { date, h } = activeArtifactFixture()
+  h.missingCheckpoints.add('workflow_stalled')
+
+  let reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.restarts.length, 1)
+  assert.equal(h.creates.length, 0)
+  assert.equal(h.terminations.length, 0)
+  assert.equal(reconciled.items[0].status, 'waiting')
+  assert.equal(reconciled.items[0].workflowId, 'workflow_stalled')
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 0)
+  assert.match(reconciled.items[0].musicWatchdog.lastCheckpointError, /no workflow step matching/i)
+
+  h.clock.now = new Date(h.clock.now.getTime() + NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS - 1)
+  reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.restarts.length, 1)
+  assert.equal(reconciled.items[0].status, 'waiting')
+})
+
+test('the watchdog cooldown blocks an immediate second recovery even when progress is stale', async () => {
+  const now = '2026-07-16T06:00:00.000Z'
+  const nowMs = Date.parse(now)
+  const { date, h } = activeArtifactFixture({
+    now,
+    progressAgeMs: NIGHTLY_MUSIC_STALL_TIMEOUT_MS * 2,
+    musicWatchdog: {
+      artifactId: 'artifact_stable',
+      recoveryCount: 1,
+      lastAction: 'checkpoint-restart',
+      lastAttemptAt: new Date(nowMs - NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS + 1).toISOString(),
+      lastRecoveryAt: new Date(nowMs - NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS + 1).toISOString(),
+    },
+  })
+
+  const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.restarts.length, 0)
+  assert.equal(h.terminations.length, 0)
+  assert.equal(h.creates.length, 0)
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 1)
+})
+
+test('a second stale interval terminates the stuck instance and resumes the same artifact', async () => {
+  const now = '2026-07-16T06:00:00.000Z'
+  const nowMs = Date.parse(now)
+  const { date, drama, h } = activeArtifactFixture({
+    now,
+    progressAgeMs: NIGHTLY_MUSIC_STALL_TIMEOUT_MS + 1,
+    musicWatchdog: {
+      artifactId: 'artifact_stable',
+      recoveryCount: 1,
+      lastAction: 'checkpoint-restart',
+      lastAttemptAt: new Date(nowMs - NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS - 1).toISOString(),
+      lastRecoveryAt: new Date(nowMs - NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS - 1).toISOString(),
+    },
+  })
+
+  const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.deepEqual(h.terminations, ['workflow_stalled'])
+  assert.equal(h.restarts.length, 0)
+  assert.equal(h.creates.length, 1)
+  assert.deepEqual(h.creates[0], {
+    id: 'resume_watchdog_1',
+    params: {
+      dramaId: drama.id,
+      url: drama.url,
+      resumeArtifactId: 'artifact_stable',
+      resumeRunId: 'resume_watchdog_1',
+      skipPublish: false,
+    },
+  })
+  assert.equal('repairArtifactId' in h.creates[0].params, false)
+  assert.equal('storyPlanId' in h.creates[0].params, false)
+  assert.equal(h.deletes.length, 0)
+  assert.equal(h.dramas.get(drama.id).artifactId, 'artifact_stable')
+  assert.equal(h.dramas.get(drama.id).jobId, 'job_stable')
+  assert.match(h.dramas.get(drama.id).progress.at(-1).message, /existing performance/i)
+  assert.equal(reconciled.items[0].episodeId, drama.id)
+  assert.equal(reconciled.items[0].workflowId, 'resume_watchdog_1')
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 2)
+  assert.equal(reconciled.items[0].musicWatchdog.lastAction, 'resume-workflow')
+})
+
+test('music wake recovery is bounded after the replacement resume Workflow', async () => {
+  const now = '2026-07-16T06:00:00.000Z'
+  const nowMs = Date.parse(now)
+  const { date, h } = activeArtifactFixture({
+    now,
+    progressAgeMs: NIGHTLY_MUSIC_STALL_TIMEOUT_MS * 2,
+    musicWatchdog: {
+      artifactId: 'artifact_stable',
+      recoveryCount: NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS,
+      lastAction: 'resume-workflow',
+      lastAttemptAt: new Date(nowMs - NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS - 1).toISOString(),
+      lastRecoveryAt: new Date(nowMs - NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS - 1).toISOString(),
+    },
+  })
+
+  const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.restarts.length, 0)
+  assert.equal(h.terminations.length, 0)
+  assert.equal(h.creates.length, 0)
+  assert.equal(reconciled.items[0].status, 'waiting')
+  assert.match(reconciled.items[0].lastError, /watchdog exhausted/i)
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS)
 })
 
 test('nightly selection scans past already-published stories until five slots are queued', async () => {

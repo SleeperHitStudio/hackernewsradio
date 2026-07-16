@@ -169,11 +169,30 @@ export function inspectBookends(music, {
 }
 
 /**
- * After the first render settles, retry only failed requested ranges once.
- * The poll callback must return a summary scoped to the requested ranges.
+ * Reconcile the exact requested ranges before rendering: READY and in-flight
+ * records are reused, only missing ranges are initially enqueued, and failed
+ * ranges are retried once after the first poll settles. The inspect/poll
+ * callbacks must return summaries scoped to the requested ranges.
  */
-export async function ensureRequestedVoiceModsReady({ requestedRanges, poll, retryFailed }) {
+export async function ensureRequestedVoiceModsReady({
+  requestedRanges,
+  inspect,
+  enqueueMissing,
+  poll,
+  retryFailed,
+}) {
   if (!requestedRanges.length) return { total: 0, ready: 0, pending: 0, failed: 0, failedRanges: [] }
+
+  if (inspect) {
+    const initial = await inspect()
+    const missingRanges = (initial?.statuses ?? [])
+      .filter(({ status }) => status === 'missing')
+      .map(({ start, end }) => ({ start, end }))
+    if (missingRanges.length) {
+      if (!enqueueMissing) throw new Error('Missing Gruner autotune ranges cannot be enqueued.')
+      await enqueueMissing(missingRanges)
+    }
+  }
 
   let summary = await poll(1)
   if (summary.failed > 0) {
