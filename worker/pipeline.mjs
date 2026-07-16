@@ -8,7 +8,16 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers'
 import { SleeperHit } from './sleeperhit.mjs'
 import { fetchThread, threadToTranscript } from './hn.mjs'
-import { buildBrief, pageTargetFor, hostForCharacter, hostAvatarUrl, AVATAR_STYLE, HOSTS, OUTPUT_BUDGET_RE } from './brief.mjs'
+import {
+  AVATAR_STYLE,
+  HOSTS,
+  OUTPUT_BUDGET_RE,
+  buildBrief,
+  buildStoryJobArtifactRequests,
+  hostAvatarUrl,
+  hostForCharacter,
+  pageTargetFor,
+} from './brief.mjs'
 import { patchDrama, appendProgress, getDrama, getSetting, setSetting, deleteOtherEpisodesOfThread } from './store.mjs'
 import {
   STORY_JOB_POLL_CHUNKS,
@@ -101,6 +110,16 @@ export class HnrPipeline extends WorkflowEntrypoint {
         return 'pending'
       })
 
+      // Preassign the complete recurring cast before Sleeper starts the table
+      // read. First-run/incomplete settings deliberately omit voiceMap so the
+      // existing AI assignment + post-artifact pinHostVoices bootstrap remains
+      // intact. This generation block is skipped entirely on resume/repair.
+      const pinnedVoices = await runWorkflowStepOnce(
+        step,
+        'load pinned voices',
+        () => getSetting(db, 'pinnedVoices'),
+      )
+
       // ── Plan + perform with the adaptive page target ───────────────────────
       let pageTarget = pageTargetFor(thread)
       for (let round = 1; artifactId === null; round++) {
@@ -154,15 +173,23 @@ export class HnrPipeline extends WorkflowEntrypoint {
               // job would double-spend credits. jobRoll bumps only when we
               // DELIBERATELY abandon a job (terminal failure / thin script);
               // without it the idempotency key would hand back the corpse.
-              jobId = jobId ?? await this.hardStep(step, `create job r${round}j${jobRoll}`, () =>
-                sh.request('/story-jobs', {
+              jobId = jobId ?? await this.hardStep(step, `create job r${round}j${jobRoll}`, async () => {
+                const artifactRequests = buildStoryJobArtifactRequests({
+                  existingArtifactId: artifactId,
+                  pinnedVoices,
+                  narrationPolicy: 'suppress',
+                  notes: brief.performanceNotes,
+                })
+                if (!artifactRequests) throw new Error('Existing artifacts must use resume/repair, not createJob.')
+                return sh.request('/story-jobs', {
                   method: 'POST',
                   idempotencyKey: `${dramaId}-job-r${round}-j${jobRoll}`,
                   body: {
                     storyPlanId: planId,
-                    artifactRequests: [{ type: 'table_read', narrationPolicy: 'suppress', notes: brief.performanceNotes }],
+                    artifactRequests,
                   },
-                }).then((r) => r.job.id), { replaySafe: true })
+                }).then((r) => r.job.id)
+              }, { replaySafe: true })
               await patchDrama(db, dramaId, { jobId })
               artifactId = await this.pollChunked(step, `job r${round}a${attempt}`, STORY_JOB_POLL_CHUNKS, async () => {
                 const res = await sh.request(`/story-jobs/${jobId}`)
