@@ -425,14 +425,6 @@ export class HnrPipeline extends WorkflowEntrypoint {
       { replaySafe: true }
     )
     for (const [index, range] of runs.entries()) {
-      await this.hardStep(
-        step,
-        `autotune enqueue ${index}`,
-        () => sh.applyAutotune(artifactId, range.start, range.end, undefined, {
-          idempotencyKey: `${idempotencyScope}-autotune-${range.start}-${range.end}-attempt1`,
-        }),
-        { replaySafe: true }
-      )
       const { cue } = await ensureAutotuneClickReady({
         cues: sfxCues,
         entryIndex: range.start,
@@ -473,6 +465,27 @@ export class HnrPipeline extends WorkflowEntrypoint {
     })
     await ensureRequestedVoiceModsReady({
       requestedRanges: runs,
+      inspect: () => this.hardStep(
+        step,
+        'autotune existing ranges',
+        () => sh.getVoiceModificationSummary(artifactId, runs),
+        { replaySafe: true }
+      ),
+      enqueueMissing: async (missingRanges) => {
+        for (const range of missingRanges) {
+          await this.hardStep(
+            step,
+            `autotune enqueue missing ${range.start}-${range.end}`,
+            () => sh.applyAutotune(artifactId, range.start, range.end, undefined, {
+              // Stable across generation/resume/repair Workflows. Concurrent
+              // recovery scopes that both observe a missing range therefore
+              // converge on the same initial operation instead of stacking.
+              idempotencyKey: `${artifactId}-autotune-${range.start}-${range.end}-initial`,
+            }),
+            { replaySafe: true }
+          )
+        }
+      },
       poll,
       retryFailed: async (failedRanges) => {
         await this.hardStep(

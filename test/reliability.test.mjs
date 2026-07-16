@@ -190,6 +190,59 @@ test('failed requested voice mods are retried exactly once and must all become r
   assert.equal(failedRetries, 1)
 })
 
+test('ready requested voice mods are reused without enqueueing another render', async () => {
+  const requestedRanges = [{ start: 96, end: 96 }]
+  let enqueues = 0
+  let retries = 0
+  const summary = await ensureRequestedVoiceModsReady({
+    requestedRanges,
+    inspect: async () => ({
+      total: 1, ready: 1, pending: 0, failed: 0,
+      failedRanges: [],
+      statuses: [{ start: 96, end: 96, status: 'ready' }],
+    }),
+    enqueueMissing: async () => { enqueues++ },
+    poll: async () => ({ total: 1, ready: 1, pending: 0, failed: 0, failedRanges: [] }),
+    retryFailed: async () => { retries++ },
+  })
+
+  assert.equal(summary.ready, 1)
+  assert.equal(enqueues, 0)
+  assert.equal(retries, 0)
+})
+
+test('missing voice mods enqueue once while failed ranges use the retry path', async () => {
+  const failed = { start: 4, end: 6 }
+  const missing = { start: 12, end: 12 }
+  const enqueues = []
+  const retries = []
+  let polls = 0
+  const summary = await ensureRequestedVoiceModsReady({
+    requestedRanges: [failed, missing],
+    inspect: async () => ({
+      total: 2, ready: 0, pending: 1, failed: 1,
+      failedRanges: [failed],
+      statuses: [
+        { ...failed, status: 'failed' },
+        { ...missing, status: 'missing' },
+      ],
+    }),
+    enqueueMissing: async (ranges) => enqueues.push(ranges),
+    poll: async () => {
+      polls++
+      return polls === 1
+        ? { total: 2, ready: 1, pending: 0, failed: 1, failedRanges: [failed] }
+        : { total: 2, ready: 2, pending: 0, failed: 0, failedRanges: [] }
+    },
+    retryFailed: async (ranges) => retries.push(ranges),
+  })
+
+  assert.equal(summary.ready, 2)
+  assert.deepEqual(enqueues, [[missing]])
+  assert.deepEqual(retries, [[failed]])
+  assert.equal(polls, 2)
+})
+
 test('a new Gruner dial click is exactly 0.5s and must return ready audio', async () => {
   let addFields
   let updates = 0
