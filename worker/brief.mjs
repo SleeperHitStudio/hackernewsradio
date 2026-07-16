@@ -33,6 +33,52 @@ export const HOSTS = [
   { name: 'GRUNER', alien: true },
 ]
 
+/**
+ * Convert the D1 `pinnedVoices` setting into the narrow Story API contract.
+ * Preassignment is all-or-nothing for HNR's fixed cast: an incomplete map must
+ * fall back to Sleeper's existing assignment flow, where pinHostVoices() can
+ * bootstrap or repair the setting after the artifact exists.
+ *
+ * Only caller-owned voiceIds cross the boundary. Sleeper resolves each id and
+ * writes authoritative voiceName/gender/provider metadata server-side.
+ */
+export function canonicalPinnedVoiceMap(pinnedVoices) {
+  if (!pinnedVoices || typeof pinnedVoices !== 'object' || Array.isArray(pinnedVoices)) return null
+
+  const byCanonicalName = new Map(
+    Object.entries(pinnedVoices).map(([name, value]) => [String(name).trim().toUpperCase(), value]),
+  )
+  const voiceMap = {}
+  for (const host of HOSTS) {
+    const pinned = byCanonicalName.get(host.name)
+    const voiceId = typeof pinned?.voiceId === 'string' ? pinned.voiceId.trim() : ''
+    if (!voiceId) return null
+    voiceMap[host.name] = { voiceId }
+  }
+  return voiceMap
+}
+
+/**
+ * Build the job-level request that reaches table-read generation. Existing
+ * artifacts (resume/repair) return null so recovery never creates a new job or
+ * changes the cast it is repairing.
+ */
+export function buildStoryJobArtifactRequests({
+  existingArtifactId = null,
+  pinnedVoices = null,
+  narrationPolicy = 'suppress',
+  notes = null,
+} = {}) {
+  if (existingArtifactId) return null
+  const voiceMap = canonicalPinnedVoiceMap(pinnedVoices)
+  return [{
+    type: 'table_read',
+    narrationPolicy,
+    ...(notes ? { notes } : {}),
+    ...(voiceMap ? { voiceMap } : {}),
+  }]
+}
+
 /** Canonical portrait for a host (the cropped hero-art headshots we serve). */
 export const hostAvatarUrl = (name) => `https://hnradio.net/avatars/${String(name).toLowerCase()}.png`
 
