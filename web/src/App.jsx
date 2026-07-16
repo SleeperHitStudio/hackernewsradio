@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import posthog from 'posthog-js'
+import { acceptTurnstileToken, resetRejectedTurnstile } from './turnstile.mjs'
 
 const TERMINAL = new Set(['ready', 'failed'])
 const SPOTIFY_SHOW_URL = 'https://open.spotify.com/show/033Q5rX4lklQvrQlxikj7Q'
@@ -211,7 +212,12 @@ export default function App() {
       setTurnstileError(null)
       turnstileWidgetRef.current = turnstile.render(turnstileRef.current, {
         sitekey: turnstileSiteKey,
-        callback: (token) => setTurnstileToken(token),
+        callback: (token) => acceptTurnstileToken(token, {
+          setToken: setTurnstileToken,
+          setWidgetError: setTurnstileError,
+          setWidgetLoaded: setTurnstileWidgetLoaded,
+          setPageError: setError,
+        }),
         'expired-callback': () => setTurnstileToken(''),
         'error-callback': () => {
           setTurnstileToken('')
@@ -258,7 +264,14 @@ export default function App() {
       const data = await res.json()
       if (!res.ok && data.code === 'turnstile_failed') {
         await refreshCommunityConfig()
-        setTurnstileToken('')
+        resetRejectedTurnstile({
+          turnstile: window.turnstile,
+          widgetId: turnstileWidgetRef.current,
+          setToken: setTurnstileToken,
+          setWidgetError: setTurnstileError,
+          setWidgetLoaded: setTurnstileWidgetLoaded,
+          remount: () => setTurnstileRetry((value) => value + 1),
+        })
         throw new Error('Please complete the anti-bot check below, then try again.')
       }
       if (!res.ok) throw new Error('Could not unlock this episode.')
@@ -437,6 +450,7 @@ export default function App() {
                   className="share__btn"
                   type="button"
                   onClick={() => {
+                    setError(null)
                     setTurnstileError(null)
                     setTurnstileToken('')
                     setTurnstileRetry((value) => value + 1)
