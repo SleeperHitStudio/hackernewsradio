@@ -1,5 +1,10 @@
 export const MIN_SPOKEN_WORDS_PER_PAGE = 55
 export const STORY_JOB_POLL_CHUNKS = 84
+export const AUTOTUNE_CLICK_DURATION_S = 0.5
+export const AUTOTUNE_CLICK_LABEL = 'Dial Click'
+export const AUTOTUNE_CLICK_PROMPT =
+  'One clear, dry, definitive mechanical switch click. A single isolated transient with no tail.'
+export const AUTOTUNE_CLICK_VOLUME = 0.42
 
 const TRANSIENT_WORKFLOW_ERROR_RE =
   /Too many subrequests|Durable Object reset because its code was updated|network error reaching|fetch failed|connection reset|timed out/i
@@ -183,4 +188,45 @@ export async function ensureRequestedVoiceModsReady({ requestedRanges, poll, ret
     )
   }
   return summary
+}
+
+/**
+ * Install the physical click that announces Gruner's autotune. Sleeper allows
+ * only one cue per entry, so repair/resume runs must regenerate the existing
+ * cue in place. A provider failure can leave an add as a draft cue; fail closed
+ * here so an episode cannot finalize without its required click.
+ */
+export async function ensureAutotuneClickReady({ cues, entryIndex, addCue, updateCue }) {
+  const targetEntryIndex = Number(entryIndex)
+  if (!Number.isInteger(targetEntryIndex) || targetEntryIndex < 0) {
+    throw new Error(`Gruner dial click has invalid entry index (${entryIndex}).`)
+  }
+
+  const existing = (Array.isArray(cues) ? cues : [])
+    .find((cue) => Number(cue?.entryIndex) === targetEntryIndex)
+  const fields = {
+    entryIndex: targetEntryIndex,
+    label: AUTOTUNE_CLICK_LABEL,
+    prompt: AUTOTUNE_CLICK_PROMPT,
+    volume: AUTOTUNE_CLICK_VOLUME,
+    generatedDurationS: AUTOTUNE_CLICK_DURATION_S,
+    enabled: true,
+  }
+  const cue = existing
+    ? await updateCue(existing.id, { ...fields, regenerate: true })
+    : await addCue(fields)
+
+  const problems = []
+  if (!cue || typeof cue !== 'object') problems.push('Sleeper returned no cue')
+  if (Number(cue?.entryIndex) !== targetEntryIndex) problems.push('cue entry does not match')
+  if (Number(cue?.generatedDurationS) !== AUTOTUNE_CLICK_DURATION_S) {
+    problems.push(`duration is not ${AUTOTUNE_CLICK_DURATION_S}s`)
+  }
+  if (typeof cue?.soundUrl !== 'string' || !cue.soundUrl.trim()) problems.push('audio is missing')
+  if (cue?.isDraft === true) problems.push('cue is still a draft')
+  if (cue?.isDisabled === true || cue?.enabled === false) problems.push('cue is disabled')
+  if (problems.length) {
+    throw new Error(`Gruner dial click incomplete at entry ${targetEntryIndex}: ${problems.join(', ')}.`)
+  }
+  return { cue, operation: existing ? 'update' : 'add' }
 }

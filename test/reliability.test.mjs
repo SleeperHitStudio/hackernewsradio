@@ -2,11 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  AUTOTUNE_CLICK_DURATION_S,
+  AUTOTUNE_CLICK_LABEL,
+  AUTOTUNE_CLICK_PROMPT,
+  AUTOTUNE_CLICK_VOLUME,
   MIN_SPOKEN_WORDS_PER_PAGE,
   STORY_JOB_POLL_CHUNKS,
   WORKFLOW_STEP_ONCE,
   audibleMiddleSceneIndexes,
   bookendSceneIndexes,
+  ensureAutotuneClickReady,
   ensureRequestedVoiceModsReady,
   hasInFlightMusicClips,
   inspectBookends,
@@ -183,4 +188,103 @@ test('failed requested voice mods are retried exactly once and must all become r
     retryFailed: async () => { failedRetries++ },
   }), /Gruner autotune incomplete/)
   assert.equal(failedRetries, 1)
+})
+
+test('a new Gruner dial click is exactly 0.5s and must return ready audio', async () => {
+  let addFields
+  let updates = 0
+  const result = await ensureAutotuneClickReady({
+    cues: [],
+    entryIndex: 17,
+    addCue: async (fields) => {
+      addFields = fields
+      return {
+        id: 'cue_new',
+        ...fields,
+        soundUrl: 'https://cdn.test/dial-click.mp3',
+        isDraft: false,
+        isDisabled: false,
+      }
+    },
+    updateCue: async () => { updates++ },
+  })
+
+  assert.equal(result.operation, 'add')
+  assert.equal(updates, 0)
+  assert.deepEqual(addFields, {
+    entryIndex: 17,
+    label: AUTOTUNE_CLICK_LABEL,
+    prompt: AUTOTUNE_CLICK_PROMPT,
+    volume: AUTOTUNE_CLICK_VOLUME,
+    generatedDurationS: AUTOTUNE_CLICK_DURATION_S,
+    enabled: true,
+  })
+  assert.equal(addFields.generatedDurationS, 0.5)
+})
+
+test('repair regenerates the existing entry cue instead of adding a duplicate', async () => {
+  let adds = 0
+  const updates = []
+  const result = await ensureAutotuneClickReady({
+    cues: [{
+      id: 'cue_old',
+      entryIndex: 17,
+      label: 'Old buzz',
+      generatedDurationS: 5,
+      soundUrl: null,
+      isDraft: true,
+    }],
+    entryIndex: 17,
+    addCue: async () => { adds++ },
+    updateCue: async (id, fields) => {
+      updates.push({ id, fields })
+      return {
+        id,
+        ...fields,
+        soundUrl: 'https://cdn.test/repaired-click.mp3',
+        isDraft: false,
+        isDisabled: false,
+      }
+    },
+  })
+
+  assert.equal(result.operation, 'update')
+  assert.equal(adds, 0)
+  assert.deepEqual(updates, [{
+    id: 'cue_old',
+    fields: {
+      entryIndex: 17,
+      label: AUTOTUNE_CLICK_LABEL,
+      prompt: AUTOTUNE_CLICK_PROMPT,
+      volume: AUTOTUNE_CLICK_VOLUME,
+      generatedDurationS: 0.5,
+      enabled: true,
+      regenerate: true,
+    },
+  }])
+})
+
+test('Gruner dial click readiness fails closed for missing, draft, disabled, or wrong-duration audio', async () => {
+  for (const cue of [
+    undefined,
+    {
+      id: 'cue_draft', entryIndex: 17, generatedDurationS: 0.5,
+      soundUrl: null, isDraft: true, enabled: true,
+    },
+    {
+      id: 'cue_disabled', entryIndex: 17, generatedDurationS: 0.5,
+      soundUrl: 'https://cdn.test/disabled-click.mp3', isDraft: false, isDisabled: true,
+    },
+    {
+      id: 'cue_long', entryIndex: 17, generatedDurationS: 5,
+      soundUrl: 'https://cdn.test/long-buzz.mp3', isDraft: false, enabled: true,
+    },
+  ]) {
+    await assert.rejects(ensureAutotuneClickReady({
+      cues: [],
+      entryIndex: 17,
+      addCue: async () => cue,
+      updateCue: async () => assert.fail('update should not run'),
+    }), /Gruner dial click incomplete at entry 17/)
+  }
 })

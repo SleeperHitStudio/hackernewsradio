@@ -332,19 +332,37 @@ export class SleeperHit {
   }
 
   /** Update a cue in place (retime, rename, re-prompt, mute). */
-  async updateSfxCue(artifactId, id, fields) {
-    await this.request(`/artifacts/${artifactId}/sfx`, {
-      method: 'POST', idempotencyKey: true,
+  async updateSfxCue(artifactId, id, fields, { idempotencyKey } = {}) {
+    const res = await this.request(`/artifacts/${artifactId}/sfx`, {
+      method: 'POST', idempotencyKey: idempotencyKey || true,
       body: { op: 'update', id, ...fields },
     })
+    return res.cue
   }
 
   /** Add a timed sound-effect cue at a dialogue entry. */
-  async addSfxCue(artifactId, { entryIndex, label, prompt, volume, idempotencyKey }) {
-    await this.request(`/artifacts/${artifactId}/sfx`, {
+  async addSfxCue(artifactId, {
+    entryIndex,
+    label,
+    prompt,
+    volume,
+    generatedDurationS,
+    enabled,
+    idempotencyKey,
+  }) {
+    const res = await this.request(`/artifacts/${artifactId}/sfx`, {
       method: 'POST', idempotencyKey: idempotencyKey || true,
-      body: { op: 'add', entryIndex, label, prompt, ...(volume !== undefined ? { volume } : {}) },
+      body: {
+        op: 'add',
+        entryIndex,
+        label,
+        prompt,
+        ...(volume !== undefined ? { volume } : {}),
+        ...(generatedDurationS !== undefined ? { generatedDurationS } : {}),
+        ...(enabled !== undefined ? { enabled } : {}),
+      },
     })
+    return res.cue
   }
 
   // ── Cast pinning + voice effects ───────────────────────────────────────────
