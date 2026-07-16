@@ -30,8 +30,8 @@
     }
   ],
   "triggers": {
-    // Hourly; the handler fires the sweep only at 19:00 America/Chicago
-    // (DST-proof — cron itself is UTC-only).
+    // Hourly; the handler starts each batch after 19:00 America/Chicago and
+    // reconciles incomplete persisted batches on later ticks (DST-proof).
     "crons": ["0 * * * *"]
   },
   "vars": {

@@ -11,6 +11,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,6 +21,7 @@ jobs:
       - run: npm ci
       - name: Syntax-check worker modules
         run: for f in worker/*.mjs; do node --check "$f"; done
+      - run: npm test
       - run: npm run build
         env:
           # Public client-side token (kept out of source per repo policy).
@@ -30,6 +32,41 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           command: d1 migrations apply DB --remote
+      - name: Wait for every active Workflow instance
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # Wrangler 4.110 groups described `Waiting` instances under the
+          # `running` list filter; the accepted remote filters are queued,
+          # running, and paused. A deploy while any of those exists can reset
+          # its Durable Object, so this guard is independent of time-of-day.
+          active_statuses=(queued running paused)
+          while true; do
+            active=0
+            for status in "${active_statuses[@]}"; do
+              if ! instances=$(npx wrangler workflows instances list hnr-pipeline --status "$status" --per-page 1 2>&1); then
+                printf '%s\n' "$instances" >&2
+                exit 1
+              fi
+              if grep -Fq 'There are no instances' <<<"$instances"; then
+                continue
+              fi
+              if grep -Eq 'Showing [1-9][0-9]* instance' <<<"$instances"; then
+                echo "Workflow has an active ${status} instance."
+                active=1
+                continue
+              fi
+              printf 'Unrecognized Wrangler output; refusing an unsafe deploy:\n%s\n' "$instances" >&2
+              exit 1
+            done
+            if (( active == 0 )); then
+              echo 'No active Workflow instances; deployment may proceed.'
+              break
+            fi
+            echo 'Workflow activity remains; checking again in 300s.'
+            sleep 300
+          done
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:

@@ -57,11 +57,26 @@ export async function patchDrama(db, id, patch) {
   return next
 }
 
-export async function appendProgress(db, id, message) {
+export async function appendProgress(db, id, message, { runId = 'legacy', eventKey = message } = {}) {
   const d = await getDrama(db, id)
-  const progress = [...(d?.progress ?? []), { at: new Date().toISOString(), message }]
+  const existing = d?.progress ?? []
+  // Cloudflare Workflows reconstruct the handler around durable sleeps and
+  // replay code outside completed step.do calls. De-duplicate only the same
+  // logical event in the same run: a later repair is allowed to report the same
+  // stage again with a fresh timestamp.
+  if (existing.some((entry) => {
+    const entryRunId = entry?.runId ?? 'legacy'
+    const entryEventKey = entry?.eventKey ?? entry?.message
+    return entryRunId === runId && entryEventKey === eventKey
+  })) return existing
+  const progress = [...existing, { at: new Date().toISOString(), message, runId, eventKey }]
   if (d) await upsertDrama(db, { ...d, progress })
   return progress
+}
+
+export async function deleteDrama(db, id) {
+  const res = await db.prepare('DELETE FROM episodes WHERE id = ?1').bind(id).run()
+  return res.meta?.changes ?? 0
 }
 
 export async function deleteOtherEpisodesOfThread(db, hnId, mode, keepId) {

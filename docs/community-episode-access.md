@@ -28,7 +28,9 @@ receives Extended Quota Mode.
    never consume an unlock.
 3. For a new thread, HNR presents the Spotify show badge.
 4. The listener follows the show and clicks “I followed — unlock my episode.”
-5. If configured, Cloudflare Turnstile must succeed.
+5. If a complete key pair is configured, HNR shows an explicit, always-visible
+   Cloudflare Turnstile widget and requires it to succeed. Loader failures show
+   a retry control instead of leaving an impossible confirmation button.
 6. HNR creates an opaque, random browser token, stores only its SHA-256 hash in
    D1, and sends the raw token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie.
 7. The token receives one atomic generation claim. Parallel requests cannot
@@ -68,6 +70,10 @@ values or neither:
 - `TURNSTILE_SITE_KEY`: public Worker variable returned to the browser.
 - `TURNSTILE_SECRET_KEY`: encrypted Worker secret used only for Siteverify.
 
+Older HNR setups used `TURNSTILE_CLIENT_ID` and
+`TURNSTILE_CLIENT_SECRET`. Those aliases remain supported, but new deployments
+should use the canonical names above.
+
 Create a managed widget restricted to `hnradio.net` and `www.hnradio.net`. Add
 the site key to `wrangler.jsonc` under `vars`, then upload the secret without
 committing it:
@@ -77,8 +83,13 @@ printf '%s' "$TURNSTILE_SECRET_KEY" | npx wrangler secret put TURNSTILE_SECRET_K
 ```
 
 When neither value is configured, the honor/cookie gate remains functional but
-does not perform a bot challenge. If only one value is configured, confirmation
-fails closed.
+does not perform a bot challenge. A partial key rollout also temporarily
+disables the challenge: the public config exposes no site key and the server
+does not demand a token. This intentionally fails open for the optional bot
+layer so a secret-only or site-key-only deployment cannot strand humans behind
+an invisible challenge. Once both values are present, the browser always
+renders the widget before enabling confirmation and the server verifies the
+token.
 
 ## Privacy and retention
 
