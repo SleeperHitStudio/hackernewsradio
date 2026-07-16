@@ -1,6 +1,14 @@
 const COOKIE = 'hnr_community_access'
 const MAX_AGE = 365 * 24 * 60 * 60
 
+// Early local setup instructions called these CLIENT_ID/CLIENT_SECRET. Keep
+// those aliases so an existing deployment cannot strand the browser between a
+// server-side check and a widget whose public key was never exposed.
+const turnstileKeys = (env) => ({
+  siteKey: env.TURNSTILE_SITE_KEY || env.TURNSTILE_CLIENT_ID || null,
+  secretKey: env.TURNSTILE_SECRET_KEY || env.TURNSTILE_CLIENT_SECRET || null,
+})
+
 const randomToken = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(32))
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -21,10 +29,15 @@ const cookieToken = (request) => {
 }
 
 async function verifyTurnstile(request, env, token) {
-  if (!env.TURNSTILE_SITE_KEY && !env.TURNSTILE_SECRET_KEY) return true
-  if (!env.TURNSTILE_SITE_KEY || !env.TURNSTILE_SECRET_KEY || !token) return false
+  // Turnstile is an optional abuse-control layer on top of an honor-system
+  // follow gate. A partial key rollout must disable the check temporarily,
+  // rather than create an impossible state where the server demands a token
+  // but the browser has no site key with which to render the widget.
+  const { siteKey, secretKey } = turnstileKeys(env)
+  if (!siteKey || !secretKey) return true
+  if (!token) return false
   const body = new FormData()
-  body.append('secret', env.TURNSTILE_SECRET_KEY)
+  body.append('secret', secretKey)
   body.append('response', token)
   const ip = request.headers.get('CF-Connecting-IP')
   if (ip) body.append('remoteip', ip)
@@ -42,7 +55,8 @@ async function browserEntitlement(request, env) {
 }
 
 export function communityConfig(env) {
-  return { turnstileSiteKey: env.TURNSTILE_SITE_KEY || null }
+  const { siteKey, secretKey } = turnstileKeys(env)
+  return { turnstileSiteKey: siteKey && secretKey ? siteKey : null }
 }
 
 export async function confirmCommunityFollow(request, env) {
@@ -97,4 +111,3 @@ export async function releaseCommunityGeneration(request, env, hnId) {
     WHERE token_hash = ?1 AND generated_hn_id = ?2`)
     .bind(entitlement.token_hash, String(hnId)).run()
 }
-

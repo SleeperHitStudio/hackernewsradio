@@ -72,15 +72,25 @@ existing MP3 instead of spending credits again.
 
 ## Config
 
-Set `SLEEPERHIT_API_KEY` for generation. Listener-requested episodes also use
-Spotify OAuth: set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`, and register
-`https://hnradio.net/api/auth/spotify/callback` as the Spotify app redirect URI.
-Everything else has a default (see `.env.example`). `SLEEPERHIT_API_BASE`
-defaults to production.
+Set `SLEEPERHIT_API_KEY` for generation. Public listener requests use the
+honor-based Spotify follow confirmation and a server-issued browser cookie;
+they do **not** use Spotify OAuth. The existing OAuth endpoints are retained
+only for development/testing with Spotify's allowlisted development users. If
+you exercise that test path, set `SPOTIFY_CLIENT_ID` and
+`SPOTIFY_CLIENT_SECRET`, and register
+`https://hnradio.net/api/auth/spotify/callback` as the redirect URI. Everything
+else has a default (see `.env.example`). `SLEEPERHIT_API_BASE` defaults to
+production.
 
-Public listener requests use an honor-based Spotify follow confirmation and a
-server-issued browser cookie. See [Community episode access](docs/community-episode-access.md)
-for the limitation, abuse controls, and optional Spotify OAuth test path.
+The Worker recovery endpoints, `POST /api/dramas/:id/resume` and
+`POST /api/dramas/:id/repair`, are disabled unless `HNR_OPERATOR_TOKEN` is set
+and require `Authorization: Bearer <token>`. Configure production with
+`npx wrangler secret put HNR_OPERATOR_TOKEN`; do secret/config updates outside
+the nightly run window because they can restart live Worker/Workflow state.
+
+See [Community episode access](docs/community-episode-access.md) for the public
+gate's limitation, abuse controls, Turnstile behavior, and optional Spotify
+OAuth test path.
 
 
 ## Deploy

@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Turn any Hacker News comment thread into a full radio drama — one URL in, an MP3 out. Powered by the Sleeper Hit Studio table-read pipeline.",
   "scripts": {
+    "test": "node --test",
     "dev": "concurrently -k -n server,web -c green,cyan \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "node --watch server/index.mjs",
     "dev:web": "vite",

@@ -16,6 +16,10 @@ function loadTurnstile() {
     script.onload = () => resolve(window.turnstile)
     script.onerror = reject
     document.head.appendChild(script)
+  }).catch((error) => {
+    // A transient CSP/network failure must not poison every retry in this tab.
+    turnstileLoader = null
+    throw error
   })
   return turnstileLoader
 }
@@ -127,8 +131,13 @@ export default function App() {
   const [error, setError] = useState(null)
   const [communityGate, setCommunityGate] = useState(null)
   const [turnstileSiteKey, setTurnstileSiteKey] = useState(null)
+  const [turnstileConfigLoaded, setTurnstileConfigLoaded] = useState(false)
   const [turnstileToken, setTurnstileToken] = useState('')
+  const [turnstileError, setTurnstileError] = useState(null)
+  const [turnstileRetry, setTurnstileRetry] = useState(0)
+  const [turnstileWidgetLoaded, setTurnstileWidgetLoaded] = useState(false)
   const turnstileRef = useRef(null)
+  const turnstileWidgetRef = useRef(null)
   const autoFired = useRef(false)
   const [showCreate, setShowCreate] = useState(false)
   // Deep link: /e/<episode id> renders that episode's landing view.
@@ -176,40 +185,83 @@ export default function App() {
     }
   }, [query, refresh])
 
-  useEffect(() => {
-    fetch('/api/community/config').then((res) => res.json()).then((config) => {
-      setTurnstileSiteKey(config.turnstileSiteKey || null)
-    }).catch(() => {})
+  const refreshCommunityConfig = useCallback(async () => {
+    const res = await fetch('/api/community/config', { cache: 'no-store' })
+    if (!res.ok) throw new Error('Could not load the anti-bot configuration.')
+    const config = await res.json()
+    const siteKey = config.turnstileSiteKey || null
+    setTurnstileSiteKey(siteKey)
+    setTurnstileConfigLoaded(true)
+    return siteKey
   }, [])
+
+  useEffect(() => {
+    refreshCommunityConfig().catch(() => {
+      setTurnstileConfigLoaded(false)
+      setError('The anti-bot check could not load. Please refresh and try again.')
+    })
+  }, [refreshCommunityConfig])
 
   useEffect(() => {
     if (!communityGate || !turnstileSiteKey || !turnstileRef.current) return
     let active = true
+    setTurnstileWidgetLoaded(false)
     loadTurnstile().then((turnstile) => {
       if (!active || !turnstileRef.current) return
-      turnstile.render(turnstileRef.current, {
+      setTurnstileError(null)
+      turnstileWidgetRef.current = turnstile.render(turnstileRef.current, {
         sitekey: turnstileSiteKey,
         callback: (token) => setTurnstileToken(token),
         'expired-callback': () => setTurnstileToken(''),
-        'error-callback': () => setTurnstileToken(''),
+        'error-callback': () => {
+          setTurnstileToken('')
+          setTurnstileWidgetLoaded(false)
+          setTurnstileError('The anti-bot check hit a snag. Please retry it.')
+        },
+        appearance: 'always',
         theme: 'dark',
       })
-    }).catch(() => setError('The anti-bot check could not load. Please refresh and try again.'))
-    return () => { active = false }
-  }, [communityGate, turnstileSiteKey])
+      setTurnstileWidgetLoaded(true)
+    }).catch(() => {
+      setTurnstileWidgetLoaded(false)
+      setTurnstileError('The anti-bot check could not load. Please retry it.')
+    })
+    return () => {
+      active = false
+      if (window.turnstile && turnstileWidgetRef.current != null) {
+        try { window.turnstile.remove(turnstileWidgetRef.current) } catch { /* widget already gone */ }
+      }
+      turnstileWidgetRef.current = null
+    }
+  }, [communityGate, turnstileRetry, turnstileSiteKey])
 
   const confirmFollow = useCallback(async () => {
     const requestedUrl = communityGate?.requestedUrl || url
     setBusy(true)
     setError(null)
     try {
+      // Re-read the public config on every click. This closes the deployment
+      // race where a tab loaded before Turnstile was enabled: the old page had
+      // no widget/token, while the newly configured Worker correctly required
+      // one and could only answer with an impossible-to-complete error.
+      const currentSiteKey = await refreshCommunityConfig()
+      if (currentSiteKey && (currentSiteKey !== turnstileSiteKey || !turnstileToken)) {
+        if (currentSiteKey !== turnstileSiteKey) setTurnstileToken('')
+        setError('Please complete the anti-bot check below, then try again.')
+        return
+      }
       const res = await fetch('/api/community/confirm-follow', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ turnstileToken }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.code === 'turnstile_failed' ? 'Please complete the anti-bot check and try again.' : 'Could not unlock this episode.')
+      if (!res.ok && data.code === 'turnstile_failed') {
+        await refreshCommunityConfig()
+        setTurnstileToken('')
+        throw new Error('Please complete the anti-bot check below, then try again.')
+      }
+      if (!res.ok) throw new Error('Could not unlock this episode.')
       posthog.capture('spotify_follow_self_attested')
       if (data.used) {
         setCommunityGate({ code: 'community_generation_used', generatedHnId: data.generatedHnId || null, requestedUrl })
@@ -221,7 +273,7 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [communityGate, generate, turnstileToken, url])
+  }, [communityGate, generate, refreshCommunityConfig, turnstileConfigLoaded, turnstileSiteKey, turnstileToken, url])
 
   // Initial load + auto-generate from a deep link (?url=… or ?id=…).
   useEffect(() => {
@@ -364,14 +416,41 @@ export default function App() {
             <>
               <strong>Want us to make this thread?</strong>
               <p>Follow HNR on Spotify, then tell us you did to unlock one community-generated episode in this browser.</p>
+              {!turnstileConfigLoaded && (
+                <button
+                  className="share__btn"
+                  type="button"
+                  onClick={() => {
+                    setError(null)
+                    refreshCommunityConfig().catch(() => {
+                      setError('The anti-bot check could not load. Please retry it.')
+                    })
+                  }}
+                >
+                  Retry human check
+                </button>
+              )}
+              {turnstileSiteKey && <div className="turnstile" ref={turnstileRef} />}
+              {turnstileSiteKey && !turnstileWidgetLoaded && !turnstileError && <small>Loading human check…</small>}
+              {turnstileSiteKey && turnstileError && (
+                <button
+                  className="share__btn"
+                  type="button"
+                  onClick={() => {
+                    setTurnstileError(null)
+                    setTurnstileToken('')
+                    setTurnstileRetry((value) => value + 1)
+                  }}
+                >
+                  Retry anti-bot check
+                </button>
+              )}
               <div className="spotify-gate__actions">
                 <a href={SPOTIFY_SHOW_URL} target="_blank" rel="noreferrer"><img src="/spotify-podcast-badge.svg" alt="Follow HNR on Spotify" width="165" height="40" /></a>
-                <button className="subscribe" type="button" onClick={confirmFollow} disabled={busy || Boolean(turnstileSiteKey && !turnstileToken)}>
-                  {busy ? 'Unlocking…' : 'I followed — unlock my episode'}
+                <button className="subscribe" type="button" onClick={confirmFollow} disabled={busy || !turnstileConfigLoaded || Boolean(turnstileSiteKey && !turnstileToken)}>
+                  {busy ? 'Unlocking…' : !turnstileConfigLoaded ? 'Loading anti-bot check…' : 'I followed — unlock my episode'}
                 </button>
               </div>
-              {turnstileSiteKey && <div className="turnstile" ref={turnstileRef} />}
-              <small>We cannot verify public follows through Spotify, so this confirmation is based on trust.</small>
             </>
           )}
         </div>

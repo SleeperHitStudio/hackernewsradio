@@ -1,0 +1,186 @@
+export const MIN_SPOKEN_WORDS_PER_PAGE = 55
+export const STORY_JOB_POLL_CHUNKS = 84
+
+const TRANSIENT_WORKFLOW_ERROR_RE =
+  /Too many subrequests|Durable Object reset because its code was updated|network error reaching|fetch failed|connection reset|timed out/i
+
+// The pipeline owns retry classification so a terminal Story API response is
+// never retried five times by Workflows before our code can react to it. This
+// also makes every callback invocation use the same explicit idempotency key.
+export const WORKFLOW_STEP_ONCE = Object.freeze({
+  retries: { limit: 1, delay: '1 second', backoff: 'constant' },
+  timeout: '10 minutes',
+})
+
+function errorText(error) {
+  const parts = []
+  let current = error
+  const seen = new Set()
+  while (current && !seen.has(current)) {
+    seen.add(current)
+    parts.push(current?.message || String(current))
+    current = current?.cause
+  }
+  return parts.join(' ')
+}
+
+export function isTransientWorkflowError(error) {
+  let current = error
+  const seen = new Set()
+  while (current && !seen.has(current)) {
+    seen.add(current)
+    const status = Number(current?.status)
+    if (status === 0 || status === 408 || status === 409 || status === 425 || status === 429 || status >= 500) {
+      return true
+    }
+    current = current?.cause
+  }
+  return TRANSIENT_WORKFLOW_ERROR_RE.test(errorText(error))
+}
+
+export function runWorkflowStepOnce(step, label, fn) {
+  return step.do(label, WORKFLOW_STEP_ONCE, fn)
+}
+
+export function minimumSpokenWords(pageTarget) {
+  return Math.round(Number(pageTarget) * MIN_SPOKEN_WORDS_PER_PAGE)
+}
+
+export function isSpokenTakeThin(spokenWords, pageTarget) {
+  return Number(spokenWords) < minimumSpokenWords(pageTarget)
+}
+
+export function postProductionIdempotencyScope(dramaId, repairRunId) {
+  return repairRunId ? `${dramaId}-repair-${repairRunId}` : dramaId
+}
+
+/**
+ * Retry a Workflow step only when the caller explicitly guarantees replay
+ * safety (normally with a deterministic Story API idempotency key). A transient
+ * Durable Object failure can happen after an upstream request was accepted, so
+ * replaying an unkeyed POST would risk duplicating paid/non-idempotent work.
+ */
+export async function runHardStep(step, label, fn, {
+  replaySafe = false,
+  maxTransientRetries = 3,
+  cooldown = '6 minutes',
+} = {}) {
+  for (let retry = 0; ; retry++) {
+    try {
+      return await runWorkflowStepOnce(step, retry === 0 ? label : `${label} retry${retry}`, fn)
+    } catch (error) {
+      if (!isTransientWorkflowError(error) || !replaySafe || retry >= maxTransientRetries) throw error
+      await step.sleep(`${label} transient cooldown${retry}`, cooldown)
+    }
+  }
+}
+
+/**
+ * Run one idempotent status probe per Workflow step. Transient errors can come
+ * from the probe itself or from step.do's Durable Object, so both boundaries
+ * are classified as pending before the durable sleep gives the next invocation
+ * a fresh subrequest budget.
+ */
+export async function pollInWorkflowChunks(step, label, maxChunks, probe, {
+  interval = '45 seconds',
+} = {}) {
+  for (let chunk = 0; chunk < maxChunks; chunk++) {
+    let result
+    try {
+      result = await runWorkflowStepOnce(step, `${label} poll#${chunk}`, async () => {
+        try {
+          return await probe()
+        } catch (error) {
+          if (isTransientWorkflowError(error)) return 'pending'
+          throw error
+        }
+      })
+    } catch (error) {
+      if (!isTransientWorkflowError(error)) throw error
+      result = 'pending'
+    }
+
+    if (result !== 'pending') return result
+    await step.sleep(`${label} wait#${chunk}`, interval)
+  }
+  throw new Error(`${label} timed out.`)
+}
+
+export function bookendSceneIndexes(totalScenes) {
+  const total = Number(totalScenes)
+  if (!Number.isInteger(total) || total < 2) {
+    throw new Error(`Sleeper returned invalid totalScenes (${totalScenes}); two jazz bookends are required.`)
+  }
+  return { totalScenes: total, introIndex: 0, outroIndex: total - 1 }
+}
+
+function normalizedStatus(value) {
+  return String(value || '').toLowerCase()
+}
+
+export function hasInFlightMusicClips(music) {
+  return (music?.definedClips ?? []).some((clip) =>
+    ['pending', 'rendering'].includes(normalizedStatus(clip?.status)))
+}
+
+export function audibleMiddleSceneIndexes(music, { introIndex, outroIndex } = {}) {
+  return [...new Set((music?.definedClips ?? [])
+    .filter((clip) => {
+      const sceneIndex = Number(clip?.sceneIndex)
+      return sceneIndex !== introIndex && sceneIndex !== outroIndex && !clip?.disabled
+    })
+    .map((clip) => Number(clip.sceneIndex))
+    .filter(Number.isInteger))]
+}
+
+/**
+ * Verify both required clips. Missing placement data fails closed: publishing
+ * an unverifiable outro is how a scene-start bed previously passed as an ending.
+ */
+export function inspectBookends(music, {
+  introIndex,
+  outroIndex,
+  expectedUrls,
+  checkAnchor = true,
+} = {}) {
+  const clips = Array.isArray(music?.definedClips) ? music.definedClips : []
+  const intro = clips.find((clip) => Number(clip.sceneIndex) === introIndex)
+  const outro = clips.find((clip) => Number(clip.sceneIndex) === outroIndex)
+  const expectedIntroUrl = expectedUrls?.intro
+  const expectedOutroUrl = expectedUrls?.outro
+  const introReady = normalizedStatus(intro?.status) === 'ready' && !intro?.disabled && Boolean(intro?.soundUrl)
+    && (!expectedIntroUrl || intro?.soundUrl === expectedIntroUrl)
+  const outroReady = normalizedStatus(outro?.status) === 'ready' && !outro?.disabled && Boolean(outro?.soundUrl)
+    && (!expectedOutroUrl || outro?.soundUrl === expectedOutroUrl)
+  const anchor = outro?.anchor ?? outro?.placement?.anchor
+  const outroAnchored = !checkAnchor || anchor === 'end'
+  return {
+    intro,
+    outro,
+    ready: Boolean(introReady && outroReady && outroAnchored),
+    failed: [intro, outro].some((clip) => normalizedStatus(clip?.status) === 'failed'),
+    outroAnchored,
+  }
+}
+
+/**
+ * After the first render settles, retry only failed requested ranges once.
+ * The poll callback must return a summary scoped to the requested ranges.
+ */
+export async function ensureRequestedVoiceModsReady({ requestedRanges, poll, retryFailed }) {
+  if (!requestedRanges.length) return { total: 0, ready: 0, pending: 0, failed: 0, failedRanges: [] }
+
+  let summary = await poll(1)
+  if (summary.failed > 0) {
+    await retryFailed(summary.failedRanges)
+    summary = await poll(2)
+  }
+
+  if (summary.ready !== requestedRanges.length || summary.pending > 0 || summary.failed > 0) {
+    throw new Error(
+      `Gruner autotune incomplete: ${summary.ready}/${requestedRanges.length} ready, ` +
+      `${summary.pending} pending, ${summary.failed} failed.`
+    )
+  }
+  return summary
+}

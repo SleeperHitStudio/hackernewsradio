@@ -7,6 +7,8 @@
 import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread } from './store.mjs'
 import { fetchThread } from './hn.mjs'
 import { spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
+import { operatorAuthorization } from './operator-auth.mjs'
+import { runNightlyReconciliation } from './nightly.mjs'
 import {
   claimCommunityGeneration,
   communityConfig,
@@ -77,12 +79,10 @@ async function startGeneration(request, env, url, { force = false, requireEntitl
   }
   try {
     await upsertDrama(env.DB, drama)
-    // A forced take replaces the visible episode immediately. Retiring older
-    // rows here prevents stale failed/running cards from lingering for the full
-    // generation window; stale workflows can no longer recreate deleted rows
-    // because patchDrama only updates records that still exist.
-    if (force) await deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', drama.id)
     await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url } })
+    // Only retire superseded cards after the replacement Workflow exists. If
+    // queue creation fails, the old playable/diagnostic row remains intact.
+    if (force) await deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', drama.id).catch(() => {})
   } catch (err) {
     if (entitlementClaimed) await releaseCommunityGeneration(request, env, thread.id)
     throw err
@@ -95,7 +95,9 @@ async function handleApi(request, env, url) {
   if (pathname === '/api/auth/spotify/start' && request.method === 'GET') return spotifyStart(request, env, url)
   if (pathname === '/api/auth/spotify/callback' && request.method === 'GET') return spotifyCallback(request, env, url)
   if (pathname === '/api/auth/spotify/status' && request.method === 'GET') return json(await spotifyStatus(request, env))
-  if (pathname === '/api/community/config' && request.method === 'GET') return json(communityConfig(env))
+  if (pathname === '/api/community/config' && request.method === 'GET') {
+    return json(communityConfig(env), 200, { 'Cache-Control': 'no-store' })
+  }
   if (pathname === '/api/community/status' && request.method === 'GET') return json(await communityStatus(request, env))
   if (pathname === '/api/community/confirm-follow' && request.method === 'POST') {
     const result = await confirmCommunityFollow(request, env)
@@ -115,27 +117,39 @@ async function handleApi(request, env, url) {
     const drama = await getDrama(env.DB, one[1])
     return drama ? json({ drama }) : json({ error: 'Not found' }, 404)
   }
-  // Resume a failed run whose performance already exists (e.g. the workflow
-  // died at finalize): re-enters the pipeline in resume mode, skipping
-  // straight to finalize on the existing artifact — no generation re-spend.
+  // Resume a failed run whose performance already exists (e.g. the Workflow
+  // died in post-production): reuse the artifact, rerun mandatory autotune and
+  // bookend verification, then finalize/publish — no generation re-spend.
   const resume = pathname.match(/^\/api\/dramas\/([0-9a-f-]{36})\/resume$/)
   if (resume && request.method === 'POST') {
+    const authorization = await operatorAuthorization(request, env.HNR_OPERATOR_TOKEN)
+    if (authorization === 'disabled') return json({ error: 'Not found' }, 404)
+    if (authorization !== 'authorized') return json({ error: 'Unauthorized' }, 401)
     const drama = await getDrama(env.DB, resume[1])
     if (!drama) return json({ error: 'Not found' }, 404)
     if (drama.status !== 'failed' || !drama.artifactId) {
       return json({ error: 'Resume needs a failed episode with an existing performance (artifactId).' }, 400)
     }
+    const workflowId = crypto.randomUUID()
     await env.PIPELINE.create({
-      id: crypto.randomUUID(),
-      params: { dramaId: drama.id, url: drama.url, resumeArtifactId: drama.artifactId },
+      id: workflowId,
+      params: {
+        dramaId: drama.id,
+        url: drama.url,
+        resumeArtifactId: drama.artifactId,
+        resumeRunId: workflowId,
+      },
     })
-    return json({ resumed: drama.id })
+    return json({ resumed: drama.id, workflowId })
   }
   // Re-run post-production against an existing performance without spending
   // on a new script/read. Used to repair optional effects or music that a
   // transient Worker subrequest-budget exhaustion skipped.
   const repair = pathname.match(/^\/api\/dramas\/([0-9a-f-]{36})\/repair$/)
   if (repair && request.method === 'POST') {
+    const authorization = await operatorAuthorization(request, env.HNR_OPERATOR_TOKEN)
+    if (authorization === 'disabled') return json({ error: 'Not found' }, 404)
+    if (authorization !== 'authorized') return json({ error: 'Unauthorized' }, 401)
     const drama = await getDrama(env.DB, repair[1])
     if (!drama?.artifactId) return json({ error: 'Repair needs an existing performance (artifactId).' }, 400)
     let body
@@ -151,7 +165,7 @@ async function handleApi(request, env, url) {
         skipPublish: body?.publish !== true,
       },
     })
-    return json({ repairing: drama.id, publish: body?.publish === true })
+    return json({ repairing: drama.id, publish: body?.publish === true, workflowId: repairRunId })
   }
   if (pathname === '/api/generate' && request.method === 'POST') {
     if (!env.SLEEPERHIT_API_KEY) return json({ error: 'Server is missing SLEEPERHIT_API_KEY.' }, 500)
@@ -199,52 +213,6 @@ async function handleEpisodePage(request, env, url) {
   return withHeaders(new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }))
 }
 
-/** Daily sweep: top 5 discussed front-page threads at 19:00 America/Chicago. */
-async function dailySweep(env) {
-  const { getSetting, setSetting } = await import('./store.mjs')
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Chicago', hour12: false,
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
-  }).formatToParts(new Date())
-  const get = (t) => parts.find((p) => p.type === t)?.value
-  const date = `${get('year')}-${get('month')}-${get('day')}`
-  if (get('hour') !== '19') return
-  if ((await getSetting(env.DB, 'dailyTopLastRun')) === date) return
-  await setSetting(env.DB, 'dailyTopLastRun', date)
-
-  const ids = (await (await fetch('https://hacker-news.firebaseio.com/v0/topstories.json')).json()).slice(0, 30)
-  const picked = []
-  for (const id of ids) {
-    if (picked.length >= 5) break
-    try {
-      const item = await (await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`)).json()
-      if (item?.type === 'story' && (item.descendants ?? 0) >= 10) picked.push(item)
-    } catch { /* pool has slack */ }
-  }
-  let i = 0
-  for (const story of picked) {
-    const url = `https://news.ycombinator.com/item?id=${story.id}`
-    try {
-      const existing = await findByHnIdAndMode(env.DB, story.id, 'podcast')
-      if (existing && existing.status === 'ready') continue
-      const thread = await fetchThread(url)
-      const drama = {
-        id: crypto.randomUUID(), hnId: thread.id, mode: 'podcast', url: thread.url,
-        title: thread.title, commentCount: thread.total, points: thread.points ?? null,
-        status: 'queued',
-        progress: [{ at: new Date().toISOString(), message: `Fetched ${thread.total} comments` }],
-        audioUrl: null, error: null, createdAt: new Date().toISOString(),
-      }
-      await upsertDrama(env.DB, drama)
-      // 10-minute stagger ≈ serialized episodes: keeps platform load flat and
-      // the length-gate rerolls (pipeline.mjs) from stacking up. (The first
-      // sweep's short episodes turned out to be thin WRITING, not truncation.)
-      await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url, staggerSec: i * 600 } })
-      i++
-    } catch { /* next story */ }
-  }
-}
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
@@ -258,6 +226,8 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(dailySweep(env))
+    ctx.waitUntil(runNightlyReconciliation(env, {
+      now: new Date(event?.scheduledTime || Date.now()),
+    }))
   },
 }

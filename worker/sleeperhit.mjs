@@ -23,6 +23,48 @@ export class SleeperHitError extends Error {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+export const STORY_JOB_POLL_ATTEMPTS = 900
+export const STORY_JOB_POLL_INTERVAL_MS = 4_000
+
+const rangeKey = ({ start, end, startEntryIndex, endEntryIndex }) =>
+  `${Number(start ?? startEntryIndex)}-${Number(end ?? endEntryIndex)}`
+
+function latestVoiceMods(modifications) {
+  const latest = new Map()
+  for (const [index, modification] of modifications.entries()) {
+    const key = rangeKey(modification)
+    const parsed = Date.parse(modification.updatedAt || '')
+    const timestamp = Number.isFinite(parsed) ? parsed : 0
+    const previous = latest.get(key)
+    if (!previous || timestamp > previous.timestamp || (timestamp === previous.timestamp && index > previous.index)) {
+      latest.set(key, { modification, timestamp, index })
+    }
+  }
+  return new Map([...latest].map(([key, value]) => [key, value.modification]))
+}
+
+export function summarizeVoiceModifications(modifications, requestedRanges) {
+  const latest = latestVoiceMods(Array.isArray(modifications) ? modifications : [])
+  const failedRanges = []
+  const statuses = []
+  let ready = 0
+  let failed = 0
+  let pending = 0
+
+  for (const range of requestedRanges) {
+    const normalized = { start: Number(range.start), end: Number(range.end) }
+    const modification = latest.get(rangeKey(normalized))
+    const status = String(modification?.status || 'pending').toLowerCase()
+    statuses.push({ ...normalized, status })
+    if (status === 'ready') ready++
+    else if (status === 'failed') {
+      failed++
+      failedRanges.push(normalized)
+    } else pending++
+  }
+
+  return { total: requestedRanges.length, ready, failed, pending, failedRanges, statuses }
+}
 
 export class SleeperHit {
   constructor({ baseUrl, apiKey }) {
@@ -73,9 +115,9 @@ export class SleeperHit {
   }
 
   /** Add the thread as a plain-text source (the planner digests it). */
-  async addTextSource(projectId, { content, label }) {
+  async addTextSource(projectId, { content, label, idempotencyKey }) {
     const res = await this.request(`/story-projects/${projectId}/sources`, {
-      method: 'POST', idempotencyKey: true,
+      method: 'POST', idempotencyKey: idempotencyKey || true,
       body: { type: 'text', content, ...(label ? { label } : {}) },
     })
     return res.source.id
@@ -97,9 +139,18 @@ export class SleeperHit {
   /** `notes` rides on the artifact request and reaches SCRIPT GENERATION
    *  directly as job-level instructions — unlike the creative brief, which the
    *  planner summarizes into a short blueprint (style detail gets lost there). */
-  async createTableReadPlan(projectId, { title, target, creativeBrief, styleConstraints, sourceIds, narrationPolicy = 'auto', notes }) {
+  async createTableReadPlan(projectId, {
+    title,
+    target,
+    creativeBrief,
+    styleConstraints,
+    sourceIds,
+    narrationPolicy = 'auto',
+    notes,
+    idempotencyKey,
+  }) {
     const res = await this.request(`/story-projects/${projectId}/story-plans`, {
-      method: 'POST', idempotencyKey: true,
+      method: 'POST', idempotencyKey: idempotencyKey || true,
       body: {
         title,
         target,
@@ -144,9 +195,9 @@ export class SleeperHit {
   }
 
   async pollJobReady(jobId, { onProgress } = {}) {
-    // 330 × 4s = 22 min — matches the Story API's PERFORMABLE_POLL_TIMEOUT_MS so
-    // hnradio doesn't give up before the server's own budget.
-    for (let i = 0; i < 330; i++) {
+    // Sleeper can spend up to 45 minutes performing a StoryJob. Keep polling
+    // for 60 minutes so HNR also covers queue/startup overhead around that budget.
+    for (let i = 0; i < STORY_JOB_POLL_ATTEMPTS; i++) {
       const res = await this.request(`/story-jobs/${jobId}`)
       const job = res.job
       const status = job?.status
@@ -160,7 +211,7 @@ export class SleeperHit {
       if (status === 'FAILED' || status === 'CANCELED') {
         throw new SleeperHitError(job?.failureMessage || `Table read ${status}.`)
       }
-      await sleep(4000)
+      await sleep(STORY_JOB_POLL_INTERVAL_MS)
     }
     throw new SleeperHitError('Table read generation timed out.')
   }
@@ -205,9 +256,15 @@ export class SleeperHit {
 
   /** Promote a finalized artifact into the series and queue immediate publish.
    *  The series' public RSS feed picks it up (podcast apps poll the feed). */
-  async publishEpisode(seriesId, { title, descriptionDirection, artifactId, seasonNumber = 1 }) {
+  async publishEpisode(seriesId, {
+    title,
+    descriptionDirection,
+    artifactId,
+    seasonNumber = 1,
+    idempotencyKeyPrefix,
+  }) {
     const res = await this.request(`/publishing-series/${seriesId}/releases`, {
-      method: 'POST', idempotencyKey: true,
+      method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-release` : true,
       body: {
         title: title.slice(0, 200),
         sourceArtifactId: artifactId,
@@ -217,13 +274,54 @@ export class SleeperHit {
     })
     const releaseId = (res.release ?? res).id
     await this.request(`/publishing-releases/${releaseId}/description/generate`, {
-      method: 'POST', idempotencyKey: true,
+      method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-description` : true,
       body: { direction: descriptionDirection?.slice(0, 2_000) },
     })
     await this.request(`/publishing-releases/${releaseId}/publish`, {
-      method: 'POST', idempotencyKey: true, body: {},
+      method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-publish` : true, body: {},
     })
     return releaseId
+  }
+
+  async listPublishingReleases(seriesId, { status, limit = 100, cursor } = {}) {
+    const query = new URLSearchParams({ limit: String(limit) })
+    if (status) query.set('status', status)
+    if (cursor) query.set('cursor', cursor)
+    const res = await this.request(
+      `/publishing-series/${encodeURIComponent(seriesId)}/releases?${query.toString()}`
+    )
+    return {
+      releases: Array.isArray(res.releases) ? res.releases : [],
+      nextCursor: res.nextCursor || null,
+    }
+  }
+
+  async findPublishedReleaseForArtifact(seriesId, artifactId) {
+    let cursor
+    do {
+      const page = await this.listPublishingReleases(seriesId, {
+        status: 'published',
+        limit: 100,
+        cursor,
+      })
+      const release = page.releases.find((candidate) =>
+        candidate?.sourceArtifactId === artifactId
+        && String(candidate?.status || '').toLowerCase() === 'published')
+      if (release) return release
+      cursor = page.nextCursor
+    } while (cursor)
+    return null
+  }
+
+  async refreshPublishedEpisodeMedia(seriesId, artifactId, { idempotencyKey } = {}) {
+    const release = await this.findPublishedReleaseForArtifact(seriesId, artifactId)
+    if (!release) return null
+    await this.request(`/publishing-releases/${encodeURIComponent(release.id)}/refresh-media`, {
+      method: 'POST',
+      idempotencyKey: idempotencyKey || true,
+      body: { sourceArtifactId: artifactId },
+    })
+    return release.id
   }
 
 
@@ -242,9 +340,9 @@ export class SleeperHit {
   }
 
   /** Add a timed sound-effect cue at a dialogue entry. */
-  async addSfxCue(artifactId, { entryIndex, label, prompt, volume }) {
+  async addSfxCue(artifactId, { entryIndex, label, prompt, volume, idempotencyKey }) {
     await this.request(`/artifacts/${artifactId}/sfx`, {
-      method: 'POST', idempotencyKey: true,
+      method: 'POST', idempotencyKey: idempotencyKey || true,
       body: { op: 'add', entryIndex, label, prompt, ...(volume !== undefined ? { volume } : {}) },
     })
   }
@@ -294,9 +392,9 @@ export class SleeperHit {
    *  range. Async + queued: returns { modificationId, status }; the tuned audio
    *  projects onto the read when the modification reaches 'ready'. Omitted
    *  params fall back to the API's proven defaults (D / minpent / chapel). */
-  async applyAutotune(artifactId, startEntryIndex, endEntryIndex, params) {
+  async applyAutotune(artifactId, startEntryIndex, endEntryIndex, params, { idempotencyKey } = {}) {
     return this.request(`/artifacts/${artifactId}/voice-modification`, {
-      method: 'POST', idempotencyKey: true,
+      method: 'POST', idempotencyKey: idempotencyKey || true,
       body: {
         startEntryIndex,
         endEntryIndex,
@@ -308,20 +406,30 @@ export class SleeperHit {
 
   /** Re-queue the autotune ranges whose newest record failed (e.g. a queue
    *  consumer with stale env grabbed them). Returns how many were retried. */
-  async retryFailedVoiceMods(artifactId) {
+  async retryFailedVoiceMods(artifactId, { ranges, idempotencyKeyPrefix = `${artifactId}-autotune-retry` } = {}) {
+    let failedRanges = ranges
+    if (!Array.isArray(failedRanges)) {
+      const res = await this.request(`/artifacts/${artifactId}`)
+      const mods = res.artifact?.manifest?.audio?.modifications ?? []
+      failedRanges = [...latestVoiceMods(mods).values()]
+        .filter((modification) => String(modification.status || '').toLowerCase() === 'failed')
+        .map((modification) => ({
+          start: Number(modification.startEntryIndex),
+          end: Number(modification.endEntryIndex),
+        }))
+    }
+    for (const range of failedRanges) {
+      await this.applyAutotune(artifactId, range.start, range.end, undefined, {
+        idempotencyKey: `${idempotencyKeyPrefix}-${range.start}-${range.end}`,
+      })
+    }
+    return failedRanges.length
+  }
+
+  async getVoiceModificationSummary(artifactId, requestedRanges) {
     const res = await this.request(`/artifacts/${artifactId}`)
-    const mods = res.artifact?.manifest?.audio?.modifications ?? []
-    const newest = new Map()
-    for (const m of mods) {
-      const k = `${m.startEntryIndex}-${m.endEntryIndex}`
-      const prev = newest.get(k)
-      if (!prev || Date.parse(m.updatedAt || 0) > Date.parse(prev.updatedAt || 0)) newest.set(k, m)
-    }
-    const failed = [...newest.values()].filter((m) => m.status === 'failed')
-    for (const m of failed) {
-      await this.applyAutotune(artifactId, m.startEntryIndex, m.endEntryIndex)
-    }
-    return failed.length
+    const modifications = res.artifact?.manifest?.audio?.modifications ?? []
+    return summarizeVoiceModifications(modifications, requestedRanges)
   }
 
   /** Wait until every voice modification on the artifact settles (newest record
@@ -398,16 +506,16 @@ export class SleeperHit {
   /** Set a soundtrack directive (e.g. the show's jazz theme, screenplay-wide,
    *  mode 'replace' to overwrite the planner's palette) so subsequent clip
    *  renders use it. */
-  async setMusicDirective(artifactId, { scope = 'screenplay', mode = 'replace', prompt }) {
+  async setMusicDirective(artifactId, { scope = 'screenplay', mode = 'replace', prompt }, { idempotencyKey } = {}) {
     await this.request(`/artifacts/${artifactId}/music`, {
-      method: 'POST', idempotencyKey: true, body: { scope, mode, prompt },
+      method: 'POST', idempotencyKey: idempotencyKey || true, body: { scope, mode, prompt },
     })
   }
 
   /** Mutate a single scene's defined clip (e.g. { disabled: true } to mute it). */
-  async setDefinedClip(artifactId, sceneIndex, clip) {
+  async setDefinedClip(artifactId, sceneIndex, clip, { idempotencyKey } = {}) {
     await this.request(`/artifacts/${artifactId}/music`, {
-      method: 'POST', idempotencyKey: true, body: { sceneIndex, clip },
+      method: 'POST', idempotencyKey: idempotencyKey || true, body: { sceneIndex, clip },
     })
   }
 
