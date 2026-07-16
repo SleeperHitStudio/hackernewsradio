@@ -1,5 +1,6 @@
 import { fetchThread } from './hn.mjs'
 import {
+  appendProgress,
   deleteDrama,
   deleteOtherEpisodesOfThread,
   findByHnIdAndMode,
@@ -12,11 +13,25 @@ import {
 
 export const NIGHTLY_TARGET = 5
 export const NIGHTLY_MAX_ATTEMPTS = 3
+export const NIGHTLY_MUSIC_STALL_TIMEOUT_MS = 60 * 60 * 1000
+export const NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS = 60 * 60 * 1000
+export const NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS = 2
 export const PUBLISHED_PROGRESS_MESSAGE = 'Published to the HNR podcast feed.'
+
+const MUSIC_WRITE_BUDGET_CHECKPOINT = Object.freeze({
+  name: 'music write budget break',
+  type: 'sleep',
+})
+
+const MUSIC_WATCHDOG_RESTART_MESSAGE =
+  'Watchdog: post-production stopped waking after the music budget break; restarting from that checkpoint.'
+const MUSIC_WATCHDOG_RESUME_MESSAGE =
+  'Watchdog: the music wake stalled again; restarting post-production on the existing performance.'
 
 const ACTIVE_WORKFLOW_STATUSES = new Set(['queued', 'running', 'waiting', 'waitingforpause', 'paused'])
 
 const defaultDependencies = {
+  appendProgress,
   deleteDrama,
   deleteOtherEpisodesOfThread,
   findByHnIdAndMode,
@@ -26,6 +41,8 @@ const defaultDependencies = {
   setSetting,
   upsertDrama,
   fetchThread,
+  now: () => new Date(),
+  randomUUID: () => crypto.randomUUID(),
   async fetchJson(url) {
     const response = await fetch(url, { headers: { Accept: 'application/json' } })
     if (!response.ok) throw new Error(`Hacker News returned ${response.status} for ${url}`)
@@ -72,6 +89,32 @@ export function activeBatchItems(batch) {
 
 const nowIso = () => new Date().toISOString()
 
+function dependencyNow(deps) {
+  const value = deps.now?.() ?? new Date()
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isFinite(date.getTime()) ? date : new Date()
+}
+
+function latestEpisodeProgressMs(drama) {
+  const timestamps = (drama?.progress ?? [])
+    .map((entry) => Date.parse(entry?.at))
+    .filter(Number.isFinite)
+  return timestamps.length ? Math.max(...timestamps) : null
+}
+
+function isMissingWorkflowCheckpoint(error) {
+  return /(?:no|could not find)[^.]*step|step[^.]*(?:not found|does not exist)|matching[^.]*step[^.]*not found/i
+    .test(error?.message || String(error))
+}
+
+function watchdogStateFor(item, artifactId) {
+  const current = item.musicWatchdog
+  if (!current || current.artifactId !== artifactId) {
+    return { artifactId, recoveryCount: 0 }
+  }
+  return current
+}
+
 function recordBatchError(batch, message) {
   batch.errors = [...(batch.errors ?? []), { at: nowIso(), message: String(message) }].slice(-20)
 }
@@ -81,9 +124,119 @@ async function persistBatch(db, batch, deps) {
   await deps.setSetting(db, nightlyBatchKey(batch.date), batch)
 }
 
-async function workflowStatus(env, workflowId) {
+async function workflowState(env, workflowId) {
   const instance = await env.PIPELINE.get(workflowId)
-  return (await instance.status())?.status || 'unknown'
+  return {
+    instance,
+    status: (await instance.status())?.status || 'unknown',
+  }
+}
+
+async function appendWatchdogProgress(env, batch, drama, deps, message, eventKey, runId) {
+  await deps.appendProgress(env.DB, drama.id, message, {
+    runId: runId || `nightly:${batch.date}:music-watchdog`,
+    eventKey,
+  })
+}
+
+async function recoverStalledMusicWake(env, batch, item, drama, instance, deps) {
+  if (!drama?.artifactId || !instance) return false
+
+  const now = dependencyNow(deps)
+  const nowMs = now.getTime()
+  const watchdog = watchdogStateFor(item, drama.artifactId)
+  item.musicWatchdog = watchdog
+  watchdog.artifactObservedAt ??= now.toISOString()
+  const lastProgressMs = latestEpisodeProgressMs(drama) ?? Date.parse(watchdog.artifactObservedAt)
+  if (!Number.isFinite(lastProgressMs) || nowMs - lastProgressMs < NIGHTLY_MUSIC_STALL_TIMEOUT_MS) return false
+
+  const lastAttemptMs = Date.parse(watchdog.lastAttemptAt)
+  if (Number.isFinite(lastAttemptMs) && nowMs - lastAttemptMs < NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS) {
+    return false
+  }
+
+  const recoveryCount = Number(watchdog.recoveryCount || 0)
+  if (recoveryCount >= NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS) {
+    watchdog.exhaustedAt ??= now.toISOString()
+    item.lastError = `Music wake watchdog exhausted after ${recoveryCount} recovery actions.`
+    return false
+  }
+
+  watchdog.lastAttemptAt = now.toISOString()
+  watchdog.lastObservedProgressAt = new Date(lastProgressMs).toISOString()
+
+  if (recoveryCount === 0) {
+    try {
+      await instance.restart({ from: MUSIC_WRITE_BUDGET_CHECKPOINT })
+    } catch (error) {
+      if (!isMissingWorkflowCheckpoint(error)) throw error
+      // The Workflow is legitimately still upstream of the checkpoint. Record
+      // the probe so the hourly cron cannot hammer restart(), but do not consume
+      // a recovery action or replace the active instance.
+      watchdog.lastCheckpointMissAt = now.toISOString()
+      watchdog.lastCheckpointError = error?.message || String(error)
+      item.updatedAt = now.toISOString()
+      return false
+    }
+
+    watchdog.recoveryCount = 1
+    watchdog.lastRecoveryAt = now.toISOString()
+    watchdog.lastAction = 'checkpoint-restart'
+    delete watchdog.lastCheckpointError
+    item.lastError = null
+    item.updatedAt = now.toISOString()
+    await appendWatchdogProgress(
+      env,
+      batch,
+      drama,
+      deps,
+      MUSIC_WATCHDOG_RESTART_MESSAGE,
+      'music-watchdog-checkpoint-restart',
+      item.workflowId,
+    )
+    return true
+  }
+
+  // A second stale interval proves that restarting the completed sleep did not
+  // wake this instance. Stop it before starting a fresh resume Workflow so two
+  // post-production writers can never race. Resume mode reuses the same
+  // artifact, skips generation/casting spend, reruns required autotune/music,
+  // and takes the normal first-publish path with stable publication keys.
+  const oldWorkflowId = item.workflowId
+  const resumeRunId = deps.randomUUID()
+  await instance.terminate()
+  const resumed = await env.PIPELINE.create({
+    id: resumeRunId,
+    params: {
+      dramaId: drama.id,
+      url: drama.url,
+      resumeArtifactId: drama.artifactId,
+      resumeRunId,
+      skipPublish: false,
+    },
+  })
+
+  item.workflowId = resumed?.id || resumeRunId
+  item.episodeId = drama.id
+  item.status = 'queued'
+  item.lastWorkflowStatus = 'queued'
+  item.lastError = null
+  item.updatedAt = now.toISOString()
+  watchdog.recoveryCount = recoveryCount + 1
+  watchdog.lastRecoveryAt = now.toISOString()
+  watchdog.lastAction = 'resume-workflow'
+  watchdog.terminatedWorkflowId = oldWorkflowId
+  watchdog.resumeWorkflowId = item.workflowId
+  await appendWatchdogProgress(
+    env,
+    batch,
+    drama,
+    deps,
+    MUSIC_WATCHDOG_RESUME_MESSAGE,
+    'music-watchdog-resume-workflow',
+    resumeRunId,
+  )
+  return true
 }
 
 async function createEpisodeWorkflow(env, thread, {
@@ -203,9 +356,12 @@ async function reconcileItem(env, batch, item, deps) {
   }
 
   let status = 'unknown'
+  let instance = null
   if (item.workflowId) {
     try {
-      status = await workflowStatus(env, item.workflowId)
+      const state = await workflowState(env, item.workflowId)
+      status = state.status
+      instance = state.instance
     } catch (error) {
       const message = error?.message || String(error)
       if (!/not found|does not exist|unknown instance/i.test(message)) {
@@ -220,6 +376,7 @@ async function reconcileItem(env, batch, item, deps) {
   item.updatedAt = nowIso()
   if (isActiveWorkflowStatus(status)) {
     item.status = status
+    await recoverStalledMusicWake(env, batch, item, drama, instance, deps)
     return
   }
 
@@ -349,7 +506,7 @@ export async function runNightlyReconciliation(env, {
   now = new Date(),
   dependencies = {},
 } = {}) {
-  const deps = { ...defaultDependencies, ...dependencies }
+  const deps = { ...defaultDependencies, now: () => new Date(now), ...dependencies }
   const { date, hour } = centralRunContext(now)
   let pendingDates = await deps.getSetting(env.DB, 'dailyTopPendingDates')
   pendingDates = Array.isArray(pendingDates) ? pendingDates : []
