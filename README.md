@@ -78,6 +78,11 @@ Spotify OAuth: set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`, and register
 Everything else has a default (see `.env.example`). `SLEEPERHIT_API_BASE`
 defaults to production.
 
+Public listener requests use an honor-based Spotify follow confirmation and a
+server-issued browser cookie. See [Community episode access](docs/community-episode-access.md)
+for the limitation, abuse controls, and optional Spotify OAuth test path.
+
+
 ## Deploy
 
 It's a plain Node + Vite app, deployable anywhere:

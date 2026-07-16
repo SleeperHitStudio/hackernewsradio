@@ -6,7 +6,14 @@
  */
 import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread } from './store.mjs'
 import { fetchThread } from './hn.mjs'
-import { claimSpotifyGeneration, releaseSpotifyGeneration, spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
+import { spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
+import {
+  claimCommunityGeneration,
+  communityConfig,
+  communityStatus,
+  confirmCommunityFollow,
+  releaseCommunityGeneration,
+} from './community-access.mjs'
 
 export { HnrPipeline } from './pipeline.mjs'
 
@@ -21,8 +28,9 @@ const SECURITY_HEADERS = {
   'Content-Security-Policy':
     "default-src 'self'; img-src 'self' data:; media-src 'self' https://files.sleeperhitlist.com; " +
     "style-src 'self' 'unsafe-inline'; " +
-    "script-src 'self' https://us-assets.i.posthog.com; " +
-    "connect-src 'self' https://us.i.posthog.com https://us-assets.i.posthog.com; frame-ancestors 'none'",
+    "script-src 'self' https://us-assets.i.posthog.com https://challenges.cloudflare.com; " +
+    "connect-src 'self' https://us.i.posthog.com https://us-assets.i.posthog.com https://challenges.cloudflare.com; " +
+    "frame-src https://challenges.cloudflare.com; frame-ancestors 'none'",
 }
 
 function withHeaders(res, extra = {}) {
@@ -31,8 +39,8 @@ function withHeaders(res, extra = {}) {
   return out
 }
 
-const json = (data, status = 200) =>
-  withHeaders(new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } }))
+const json = (data, status = 200, headers = {}) =>
+  withHeaders(new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...headers } }))
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -44,7 +52,7 @@ async function startGeneration(request, env, url, { force = false, requireEntitl
   }
   let entitlementClaimed = false
   if (requireEntitlement) {
-    const claim = await claimSpotifyGeneration(request, env, thread.id)
+    const claim = await claimCommunityGeneration(request, env, thread.id)
     if (!claim.ok) {
       const err = new Error(claim.code)
       err.code = claim.code
@@ -76,7 +84,7 @@ async function startGeneration(request, env, url, { force = false, requireEntitl
     if (force) await deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', drama.id)
     await env.PIPELINE.create({ id: drama.id, params: { dramaId: drama.id, url: thread.url } })
   } catch (err) {
-    if (entitlementClaimed) await releaseSpotifyGeneration(request, env, thread.id)
+    if (entitlementClaimed) await releaseCommunityGeneration(request, env, thread.id)
     throw err
   }
   return { drama, reused: false }
@@ -87,6 +95,13 @@ async function handleApi(request, env, url) {
   if (pathname === '/api/auth/spotify/start' && request.method === 'GET') return spotifyStart(request, env, url)
   if (pathname === '/api/auth/spotify/callback' && request.method === 'GET') return spotifyCallback(request, env, url)
   if (pathname === '/api/auth/spotify/status' && request.method === 'GET') return json(await spotifyStatus(request, env))
+  if (pathname === '/api/community/config' && request.method === 'GET') return json(communityConfig(env))
+  if (pathname === '/api/community/status' && request.method === 'GET') return json(await communityStatus(request, env))
+  if (pathname === '/api/community/confirm-follow' && request.method === 'POST') {
+    const result = await confirmCommunityFollow(request, env)
+    if (!result.ok) return json({ error: result.code, code: result.code }, 403)
+    return json({ confirmed: true, used: result.used, generatedHnId: result.generatedHnId }, 200, { 'Set-Cookie': result.cookie })
+  }
   if (pathname === '/api/health') {
     return json({ ok: true, apiBase: env.SLEEPERHIT_API_BASE, hasKey: Boolean(env.SLEEPERHIT_API_KEY), platform: 'cloudflare' })
   }
@@ -147,7 +162,7 @@ async function handleApi(request, env, url) {
       const result = await startGeneration(request, env, body.url, { force: Boolean(body.force) })
       return json(result)
     } catch (err) {
-      if (String(err?.code || '').startsWith('spotify_')) {
+      if (String(err?.code || '').startsWith('community_')) {
         return json({ error: err.code, code: err.code, generatedHnId: err.generatedHnId || null }, 403)
       }
       return json({ error: err?.message || String(err) }, 400)
