@@ -326,6 +326,8 @@ body {
 .spotify-gate a { color: var(--ink); }
 .spotify-gate__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .spotify-gate__actions img { display: block; width: 165px; height: 40px; }
+.spotify-gate small { display: block; color: var(--muted); margin-top: 10px; line-height: 1.4; }
+.turnstile { margin-top: 12px; min-height: 65px; }
 
 .subscribe--ghost {
   background: var(--panel);

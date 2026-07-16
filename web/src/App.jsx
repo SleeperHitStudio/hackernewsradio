@@ -2,6 +2,23 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import posthog from 'posthog-js'
 
 const TERMINAL = new Set(['ready', 'failed'])
+const SPOTIFY_SHOW_URL = 'https://open.spotify.com/show/033Q5rX4lklQvrQlxikj7Q'
+
+let turnstileLoader
+function loadTurnstile() {
+  if (window.turnstile) return Promise.resolve(window.turnstile)
+  if (turnstileLoader) return turnstileLoader
+  turnstileLoader = new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+    script.async = true
+    script.defer = true
+    script.onload = () => resolve(window.turnstile)
+    script.onerror = reject
+    document.head.appendChild(script)
+  })
+  return turnstileLoader
+}
 
 function timeAgo(iso) {
   if (!iso) return ''
@@ -108,7 +125,10 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
-  const [spotifyGate, setSpotifyGate] = useState(null)
+  const [communityGate, setCommunityGate] = useState(null)
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState(null)
+  const [turnstileToken, setTurnstileToken] = useState('')
+  const turnstileRef = useRef(null)
   const autoFired = useRef(false)
   const [showCreate, setShowCreate] = useState(false)
   // Deep link: /e/<episode id> renders that episode's landing view.
@@ -134,7 +154,7 @@ export default function App() {
     if (!clean) return
     setBusy(true)
     setError(null)
-    setSpotifyGate(null)
+    setCommunityGate(null)
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -142,8 +162,8 @@ export default function App() {
         body: JSON.stringify({ url: clean }),
       })
       const data = await res.json()
-      if (!res.ok && String(data.code || '').startsWith('spotify_')) {
-        setSpotifyGate({ code: data.code, generatedHnId: data.generatedHnId || null, requestedUrl: clean })
+      if (!res.ok && String(data.code || '').startsWith('community_')) {
+        setCommunityGate({ code: data.code, generatedHnId: data.generatedHnId || null, requestedUrl: clean })
         return
       }
       if (!res.ok) throw new Error(data.error || 'Failed to start generation.')
@@ -156,19 +176,59 @@ export default function App() {
     }
   }, [query, refresh])
 
+  useEffect(() => {
+    fetch('/api/community/config').then((res) => res.json()).then((config) => {
+      setTurnstileSiteKey(config.turnstileSiteKey || null)
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!communityGate || !turnstileSiteKey || !turnstileRef.current) return
+    let active = true
+    loadTurnstile().then((turnstile) => {
+      if (!active || !turnstileRef.current) return
+      turnstile.render(turnstileRef.current, {
+        sitekey: turnstileSiteKey,
+        callback: (token) => setTurnstileToken(token),
+        'expired-callback': () => setTurnstileToken(''),
+        'error-callback': () => setTurnstileToken(''),
+        theme: 'dark',
+      })
+    }).catch(() => setError('The anti-bot check could not load. Please refresh and try again.'))
+    return () => { active = false }
+  }, [communityGate, turnstileSiteKey])
+
+  const confirmFollow = useCallback(async () => {
+    const requestedUrl = communityGate?.requestedUrl || url
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/community/confirm-follow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turnstileToken }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.code === 'turnstile_failed' ? 'Please complete the anti-bot check and try again.' : 'Could not unlock this episode.')
+      posthog.capture('spotify_follow_self_attested')
+      if (data.used) {
+        setCommunityGate({ code: 'community_generation_used', generatedHnId: data.generatedHnId || null, requestedUrl })
+        return
+      }
+      await generate(requestedUrl)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }, [communityGate, generate, turnstileToken, url])
+
   // Initial load + auto-generate from a deep link (?url=… or ?id=…).
   useEffect(() => {
     refresh()
     const sp = new URLSearchParams(window.location.search)
     const requested = sp.get('request')
     if (requested) setUrl(requested)
-    if (sp.get('spotify')) {
-      fetch('/api/auth/spotify/status').then((res) => res.json()).then((status) => {
-        if (status.follows && !status.used) setSpotifyGate({ code: 'spotify_verified', requestedUrl: requested || '' })
-        else if (!status.follows) setSpotifyGate({ code: 'spotify_follow_required', requestedUrl: requested || '' })
-        else if (status.used) setSpotifyGate({ code: 'spotify_generation_used', generatedHnId: status.generatedHnId, requestedUrl: requested || '' })
-      }).catch(() => {})
-    }
     let param = sp.get('url')
     const id = sp.get('id')
     if (param && id && /\/item\/?$/.test(param)) param = `${param}?id=${id}`
@@ -220,7 +280,7 @@ export default function App() {
         <div className="masthead__row">
           <h1>📻 HNR</h1>
           <div className="masthead__actions">
-            <a href="https://open.spotify.com/show/033Q5rX4lklQvrQlxikj7Q" target="_blank" rel="noreferrer" className="spotify-badge" onClick={() => posthog.capture('spotify_badge_clicked')}>
+            <a href={SPOTIFY_SHOW_URL} target="_blank" rel="noreferrer" className="spotify-badge" onClick={() => posthog.capture('spotify_badge_clicked')}>
               <img src="/spotify-podcast-badge.svg" alt="Listen on Spotify" width="165" height="40" />
             </a>
             <button type="button" className="subscribe subscribe--ghost" onClick={() => { posthog.capture('create_podcast_modal_opened'); setShowCreate(true) }}>
@@ -293,26 +353,25 @@ export default function App() {
         </button>
       </form>
       {error && <p className="composer__error">{error}</p>}
-      {spotifyGate && (
+      {communityGate && (
         <div className="spotify-gate" role="status">
-          {spotifyGate.code === 'spotify_verified' ? (
-            <>
-              <strong>Follow verified.</strong>
-              <p>You have one community episode. Paste the thread above and click “Make the episode.”</p>
-            </>
-          ) : spotifyGate.code === 'spotify_generation_used' ? (
+          {communityGate.code === 'community_generation_used' ? (
             <>
               <strong>Your community episode has already aired.</strong>
-              <p>{spotifyGate.generatedHnId ? <a href={`/e/${spotifyGate.generatedHnId}`}>Open it here.</a> : 'Each Spotify account can unlock one episode.'}</p>
+              <p>{communityGate.generatedHnId ? <a href={`/e/${communityGate.generatedHnId}`}>Open it here.</a> : 'Each browser can unlock one episode.'}</p>
             </>
           ) : (
             <>
               <strong>Want us to make this thread?</strong>
-              <p>Follow HNR on Spotify, then verify your follow to unlock one community-generated episode.</p>
+              <p>Follow HNR on Spotify, then tell us you did to unlock one community-generated episode in this browser.</p>
               <div className="spotify-gate__actions">
-                <a href="https://open.spotify.com/show/033Q5rX4lklQvrQlxikj7Q" target="_blank" rel="noreferrer"><img src="/spotify-podcast-badge.svg" alt="Follow HNR on Spotify" width="165" height="40" /></a>
-                <a className="subscribe" href={`/api/auth/spotify/start?returnTo=${encodeURIComponent(`/?request=${encodeURIComponent(spotifyGate.requestedUrl || url)}`)}`}>I followed — verify</a>
+                <a href={SPOTIFY_SHOW_URL} target="_blank" rel="noreferrer"><img src="/spotify-podcast-badge.svg" alt="Follow HNR on Spotify" width="165" height="40" /></a>
+                <button className="subscribe" type="button" onClick={confirmFollow} disabled={busy || Boolean(turnstileSiteKey && !turnstileToken)}>
+                  {busy ? 'Unlocking…' : 'I followed — unlock my episode'}
+                </button>
               </div>
+              {turnstileSiteKey && <div className="turnstile" ref={turnstileRef} />}
+              <small>We cannot verify public follows through Spotify, so this confirmation is based on trust.</small>
             </>
           )}
         </div>
