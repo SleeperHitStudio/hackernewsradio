@@ -102,3 +102,87 @@ test('normal publish uses deterministic keys across release, description, and pu
     'episode-publish-publish',
   ])
 })
+
+test('SFX add forwards exact duration and returns the generated cue', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const calls = []
+  const expectedCue = {
+    id: 'cue_1', entryIndex: 17, generatedDurationS: 0.5,
+    soundUrl: 'https://cdn.test/click.mp3', isDraft: false,
+  }
+  client.request = async (path, options) => {
+    calls.push({ path, options })
+    return { cue: expectedCue }
+  }
+
+  const cue = await client.addSfxCue('artifact_1', {
+    entryIndex: 17,
+    label: 'Dial Click',
+    prompt: 'One clear click.',
+    volume: 0.42,
+    generatedDurationS: 0.5,
+    enabled: true,
+    idempotencyKey: 'episode-click-17-add',
+  })
+
+  assert.equal(cue, expectedCue)
+  assert.deepEqual(calls, [{
+    path: '/artifacts/artifact_1/sfx',
+    options: {
+      method: 'POST',
+      idempotencyKey: 'episode-click-17-add',
+      body: {
+        op: 'add',
+        entryIndex: 17,
+        label: 'Dial Click',
+        prompt: 'One clear click.',
+        volume: 0.42,
+        generatedDurationS: 0.5,
+        enabled: true,
+      },
+    },
+  }])
+})
+
+test('SFX repair updates and regenerates the existing cue with its repair key', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const calls = []
+  const expectedCue = {
+    id: 'cue_old', entryIndex: 17, generatedDurationS: 0.5,
+    soundUrl: 'https://cdn.test/repaired-click.mp3', isDraft: false,
+  }
+  client.request = async (path, options) => {
+    calls.push({ path, options })
+    return { cue: expectedCue }
+  }
+
+  const cue = await client.updateSfxCue('artifact_1', 'cue_old', {
+    entryIndex: 17,
+    label: 'Dial Click',
+    prompt: 'One clear click.',
+    volume: 0.42,
+    generatedDurationS: 0.5,
+    enabled: true,
+    regenerate: true,
+  }, { idempotencyKey: 'episode-repair-click-17-update' })
+
+  assert.equal(cue, expectedCue)
+  assert.deepEqual(calls, [{
+    path: '/artifacts/artifact_1/sfx',
+    options: {
+      method: 'POST',
+      idempotencyKey: 'episode-repair-click-17-update',
+      body: {
+        op: 'update',
+        id: 'cue_old',
+        entryIndex: 17,
+        label: 'Dial Click',
+        prompt: 'One clear click.',
+        volume: 0.42,
+        generatedDurationS: 0.5,
+        enabled: true,
+        regenerate: true,
+      },
+    },
+  }])
+})

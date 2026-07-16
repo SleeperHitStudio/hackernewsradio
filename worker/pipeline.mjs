@@ -14,6 +14,7 @@ import {
   STORY_JOB_POLL_CHUNKS,
   audibleMiddleSceneIndexes,
   bookendSceneIndexes,
+  ensureAutotuneClickReady,
   ensureRequestedVoiceModsReady,
   hasInFlightMusicClips,
   inspectBookends,
@@ -417,6 +418,12 @@ export class HnrPipeline extends WorkflowEntrypoint {
       if (last && i === last.end + 1) last.end = i
       else runs.push({ start: i, end: i })
     }
+    let sfxCues = await this.hardStep(
+      step,
+      'autotune sfx state',
+      () => sh.listSfxCues(artifactId),
+      { replaySafe: true }
+    )
     for (const [index, range] of runs.entries()) {
       await this.hardStep(
         step,
@@ -426,24 +433,32 @@ export class HnrPipeline extends WorkflowEntrypoint {
         }),
         { replaySafe: true }
       )
-      try {
-        await this.hardStep(
+      const { cue } = await ensureAutotuneClickReady({
+        cues: sfxCues,
+        entryIndex: range.start,
+        addCue: (fields) => this.hardStep(
           step,
-          `autotune click ${index}`,
+          `autotune click add ${index}`,
           () => sh.addSfxCue(artifactId, {
-            entryIndex: range.start,
-            label: 'Dial Click',
-            prompt: 'exactly one short, dry, definitive mechanical switch click — isolated single transient, no second click, no double-click, no ratchet, no sequence, no tail',
-            volume: 0.42,
-            // The physical click is one cue per artifact/range even when voice
-            // modification recovery gets a fresh operation scope.
-            idempotencyKey: `${dramaId}-autotune-click-${range.start}`,
+            ...fields,
+            idempotencyKey: `${idempotencyScope}-autotune-click-${range.start}-add`,
           }),
           { replaySafe: true }
-        )
-      } catch (err) {
-        await note(`autotune: optional dial click failed (${err?.message || err})`)
-      }
+        ),
+        updateCue: (cueId, fields) => this.hardStep(
+          step,
+          `autotune click regenerate ${index}`,
+          () => sh.updateSfxCue(artifactId, cueId, fields, {
+            idempotencyKey: `${idempotencyScope}-autotune-click-${range.start}-update`,
+          }),
+          { replaySafe: true }
+        ),
+      })
+      sfxCues = [
+        ...sfxCues.filter((candidate) => candidate?.id !== cue.id
+          && Number(candidate?.entryIndex) !== range.start),
+        cue,
+      ]
     }
 
     const poll = (attempt) => this.pollChunked(step, `autotune render a${attempt}`, 24, async () => {
