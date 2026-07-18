@@ -36,6 +36,10 @@
   },
   "vars": {
     "SLEEPERHIT_API_BASE": "https://sleeperhit.studio",
-    "HNRADIO_PROJECT_ID": "cmredn82g00f5i60609aaw3jq"
+    "HNRADIO_PROJECT_ID": "cmredn82g00f5i60609aaw3jq",
+    // Nightly distress alerts (quota cliffs / repeated failures) go here via
+    // Resend; RESEND_API_KEY is a wrangler secret on the same account the
+    // platform uses (verified sender domain updates.sleeperhit.studio).
+    "ALERT_EMAIL": "timheckel@gmail.com"
   }
 }

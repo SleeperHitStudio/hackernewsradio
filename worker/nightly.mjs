@@ -30,6 +30,82 @@ const MUSIC_WATCHDOG_RESUME_MESSAGE =
 
 const ACTIVE_WORKFLOW_STATUSES = new Set(['queued', 'running', 'waiting', 'waitingforpause', 'paused'])
 
+/**
+ * A quota cliff: the provider works, then a spend cap / exhausted balance
+ * makes EVERY call fail instantly until it resets. Distinct from transient
+ * flakes — retrying different stories cannot help, only time or a top-up can.
+ */
+export const QUOTA_CLASS_RE =
+  /usage limits|quota (?:exceeded|reached)|insufficient_credits|insufficient credits|credit balance|exceeded your current|payment required|billing/i
+
+export function isQuotaClassFailure(message) {
+  return QUOTA_CLASS_RE.test(String(message || ''))
+}
+
+const ALERT_FROM = 'HN Radio <noreply@updates.sleeperhit.studio>'
+export const ALERT_MIN_FAILURES = 6
+
+/**
+ * Email the operator when a batch is in distress — either a quota-class
+ * failure (needs a top-up or a rebind, retries alone cannot fix it) or a
+ * pile-up of ordinary failures with nothing published. One email per batch
+ * date per distress type; the hourly cron would otherwise spam.
+ */
+export async function maybeSendDistressAlert(env, batch, deps) {
+  if (!env.RESEND_API_KEY || !env.ALERT_EMAIL) return null
+
+  const recentErrors = [
+    ...(batch.errors ?? []).map((entry) => entry.message),
+    ...(batch.items ?? []).map((item) => item.lastError),
+  ].filter(Boolean)
+  const quota = (batch.items ?? []).some((item) => item.quotaBlockedAt)
+    || recentErrors.some((message) => isQuotaClassFailure(message))
+  const failureCount = (batch.errors ?? []).length
+    + (batch.items ?? []).filter((item) => item.lastError && item.status !== 'published').length
+  const published = (batch.items ?? []).filter((item) => item.status === 'published').length
+
+  let type = null
+  if (quota) type = 'quota'
+  else if (published === 0 && failureCount >= ALERT_MIN_FAILURES) type = 'failing'
+  if (!type) return null
+
+  const sentKey = `distressAlert:${batch.date}:${type}`
+  if (await deps.getSetting(env.DB, sentKey)) return null
+
+  const lines = [
+    `hnradio nightly batch ${batch.date} is in distress (${type}).`,
+    `Published so far: ${published}/${batch.target ?? NIGHTLY_TARGET}.`,
+    '',
+    ...(batch.items ?? []).map((item) =>
+      `- [${item.status}] HN ${item.hnId} "${item.title}"${item.lastError ? ` — ${item.lastError}` : ''}`),
+    '',
+    'Recent batch errors:',
+    ...(batch.errors ?? []).slice(-5).map((entry) => `- ${entry.at}: ${entry.message}`),
+    '',
+    type === 'quota'
+      ? 'A provider quota/funding cliff is blocking generation. Retries continue hourly without burning attempts, but only a top-up, cap reset, or provider rebind will unblock it.'
+      : 'Repeated failures with nothing published tonight. Check the episode progress logs on hnradio.net/api/dramas?includeFailed=true.',
+  ]
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: ALERT_FROM,
+        to: [env.ALERT_EMAIL],
+        subject: `[hnradio] nightly ${batch.date} ${type === 'quota' ? 'blocked by a provider quota cliff' : 'is failing repeatedly'}`,
+        text: lines.join('\n'),
+      }),
+    })
+    if (!res.ok) return null
+    await deps.setSetting(env.DB, sentKey, nowIso())
+    return type
+  } catch {
+    return null
+  }
+}
+
 const defaultDependencies = {
   appendProgress,
   deleteDrama,
@@ -296,16 +372,24 @@ async function resumeArtifactWorkflow(env, drama) {
 }
 
 async function recoverItem(env, batch, item, drama, deps) {
+  // A provider quota/funding outage fails EVERY story identically until the
+  // cap resets or the balance is topped up. Burning the per-story attempt
+  // budget then just churns through replacement stories that fail the same
+  // way (Jul 16-17). Instead: keep retrying the SAME story hourly without
+  // consuming attempts, and let the distress alert tell the operator.
+  const quotaBlocked = isQuotaClassFailure(drama?.error || item.lastError)
+  if (quotaBlocked) item.quotaBlockedAt = nowIso()
+
   if (drama?.artifactId) {
     const recoveryAttempts = Number(item.recoveryAttempts || 0)
-    if (recoveryAttempts >= NIGHTLY_MAX_ATTEMPTS) {
+    if (!quotaBlocked && recoveryAttempts >= NIGHTLY_MAX_ATTEMPTS) {
       item.status = 'exhausted'
       item.lastError = 'Artifact publishing recovery exhausted.'
       return
     }
     item.workflowId = await resumeArtifactWorkflow(env, drama)
     item.episodeId = drama.id
-    item.recoveryAttempts = recoveryAttempts + 1
+    item.recoveryAttempts = quotaBlocked ? recoveryAttempts : recoveryAttempts + 1
     item.status = 'queued'
     item.lastWorkflowStatus = 'queued'
     item.updatedAt = nowIso()
@@ -313,7 +397,7 @@ async function recoverItem(env, batch, item, drama, deps) {
   }
 
   const attempt = Number(item.attempt || 1)
-  if (attempt >= NIGHTLY_MAX_ATTEMPTS) {
+  if (!quotaBlocked && attempt >= NIGHTLY_MAX_ATTEMPTS) {
     item.status = 'exhausted'
     item.lastError = 'Generation attempts exhausted.'
     return
@@ -322,12 +406,12 @@ async function recoverItem(env, batch, item, drama, deps) {
   const thread = await deps.fetchThread(item.url)
   const replacement = await createEpisodeWorkflow(env, thread, {
     batchDate: batch.date,
-    attempt: attempt + 1,
+    attempt: quotaBlocked ? attempt : attempt + 1,
   }, deps)
   const oldEpisodeId = item.episodeId
   item.episodeId = replacement.drama.id
   item.workflowId = replacement.workflowId
-  item.attempt = attempt + 1
+  item.attempt = quotaBlocked ? attempt : attempt + 1
   item.status = 'queued'
   item.lastWorkflowStatus = 'queued'
   item.updatedAt = nowIso()
@@ -499,6 +583,9 @@ export async function reconcileNightlyBatch(env, date, { dependencies = {} } = {
     await deps.setSetting(env.DB, 'dailyTopLastRun', date)
   }
   await persistBatch(env.DB, batch, deps)
+  if (batch.status !== 'complete') {
+    await maybeSendDistressAlert(env, batch, deps).catch(() => {})
+  }
   return batch
 }
 

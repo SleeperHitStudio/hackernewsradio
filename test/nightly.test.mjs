@@ -445,3 +445,133 @@ test('a previously published slot is revalidated before batch completion', async
   assert.equal(reconciled.items[0].recoveryAttempts, 1)
   assert.equal(reconciled.published, 0)
 })
+
+test('a quota-class failure retries the same story without consuming attempts', async () => {
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  h.dramas.set('episode_quota', {
+    id: 'episode_quota',
+    hnId: '77',
+    status: 'failed',
+    error: 'You have reached your specified API usage limits. You will regain access on 2026-08-01 at 00:00 UTC.',
+    url: 'https://news.ycombinator.com/item?id=77',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '77',
+      url: 'https://news.ycombinator.com/item?id=77',
+      title: 'Story 77',
+      episodeId: 'episode_quota',
+      workflowId: 'episode_quota',
+      attempt: 3,
+      recoveryAttempts: 0,
+      status: 'failed',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+  assert.equal(item.status, 'queued')
+  assert.equal(item.attempt, 3, 'quota failures must not consume the attempt budget')
+  assert.ok(item.quotaBlockedAt)
+  assert.equal(h.creates.length, 1, 'the same story is retried')
+})
+
+test('an ordinary failure at the attempt cap still exhausts the story', async () => {
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  h.dramas.set('episode_flaky', {
+    id: 'episode_flaky',
+    hnId: '78',
+    status: 'failed',
+    error: 'Table-read script generation produced empty output.',
+    url: 'https://news.ycombinator.com/item?id=78',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '78',
+      url: 'https://news.ycombinator.com/item?id=78',
+      title: 'Story 78',
+      episodeId: 'episode_flaky',
+      workflowId: 'episode_flaky',
+      attempt: 3,
+      recoveryAttempts: 0,
+      status: 'failed',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(batch.items[0].status, 'exhausted')
+  assert.equal(h.creates.length, 0)
+})
+
+test('a quota-blocked batch emails the operator exactly once', async (t) => {
+  const h = harness({ topIds: [] })
+  h.env.RESEND_API_KEY = 'test_resend_key'
+  h.env.ALERT_EMAIL = 'ops@example.com'
+  const emails = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    emails.push({ url, body: JSON.parse(options.body) })
+    return { ok: true, json: async () => ({ id: 'email_1' }) }
+  }
+  t.after(() => { globalThis.fetch = realFetch })
+
+  const date = '2026-07-17'
+  const seed = () => h.settings.set(nightlyBatchKey(date), structuredClone({
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '77',
+      url: 'https://news.ycombinator.com/item?id=77',
+      title: 'Story 77',
+      episodeId: 'missing',
+      workflowId: null,
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'failed',
+      lastError: 'You have reached your specified API usage limits.',
+      quotaBlockedAt: '2026-07-17T01:00:00.000Z',
+    }],
+    errors: [],
+  }))
+
+  seed()
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(emails.length, 1)
+  assert.match(emails[0].body.subject, /quota cliff/)
+  assert.deepEqual(emails[0].body.to, ['ops@example.com'])
+
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(emails.length, 1, 'the alert is rate-limited to one per date per type')
+})
+
+test('no alert is attempted without Resend configuration', async (t) => {
+  const h = harness({ topIds: [] })
+  let called = false
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => { called = true; return { ok: true, json: async () => ({}) } }
+  t.after(() => { globalThis.fetch = realFetch })
+
+  const date = '2026-07-17'
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{ hnId: '77', url: 'https://news.ycombinator.com/item?id=77', title: 'Story 77', episodeId: 'missing', attempt: 1, status: 'failed', lastError: 'You have reached your specified API usage limits.' }],
+    errors: [],
+  })
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(called, false)
+})
