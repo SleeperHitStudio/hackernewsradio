@@ -122,6 +122,11 @@ export class HnrPipeline extends WorkflowEntrypoint {
 
       // ── Plan + perform with the adaptive page target ───────────────────────
       let pageTarget = pageTargetFor(thread)
+      // The brief allows one optional guest commenter, whose voice can never be
+      // preassigned. Once a blueprint casts one, stop sending the pinned host
+      // map (Sleeper requires it to cover EVERY speaking character) and rely on
+      // automatic casting + the pinHostVoices() repair that follows the artifact.
+      let includePinnedCast = true
       for (let round = 1; artifactId === null; round++) {
         const brief = buildBrief(thread, pageTarget)
         let planId = null
@@ -176,7 +181,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
               jobId = jobId ?? await this.hardStep(step, `create job r${round}j${jobRoll}`, async () => {
                 const artifactRequests = buildStoryJobArtifactRequests({
                   existingArtifactId: artifactId,
-                  pinnedVoices,
+                  pinnedVoices: includePinnedCast ? pinnedVoices : null,
                   narrationPolicy: 'suppress',
                   notes: brief.performanceNotes,
                 })
@@ -231,6 +236,13 @@ export class HnrPipeline extends WorkflowEntrypoint {
               }
             } catch (err) {
               const msg = err?.message || String(err)
+              if (includePinnedCast && attempt < 3 && /voiceMap is missing/i.test(msg)) {
+                includePinnedCast = false
+                jobId = null
+                jobRoll++
+                await note('The blueprint cast a guest commenter — recasting with automatic voice assignment…')
+                continue
+              }
               const overBudget = OUTPUT_BUDGET_RE.test(msg)
               const transient = !/time budget|timed out/i.test(msg)
               if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
