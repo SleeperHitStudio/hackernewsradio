@@ -129,7 +129,7 @@ export class SleeperHit {
   }
 
   async approvePlan(planId) {
-    await this.request(`/story-plans/${planId}/approve`, { method: 'POST', idempotencyKey: true })
+    await this.request(`/story-plans/${planId}/approve`, { method: 'POST', idempotencyKey: true, body: { userConfirmed: true } })
   }
 
   /** artifactRequests OVERRIDE the plan's own requests on the job — this is

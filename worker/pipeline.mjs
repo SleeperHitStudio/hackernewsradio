@@ -158,6 +158,9 @@ export class HnrPipeline extends WorkflowEntrypoint {
                 sh.request(`/story-plans/${plan.id}/approve`, {
                   method: 'POST',
                   idempotencyKey: `${dramaId}-approve-${plan.id}`,
+                  // The nightly pipeline runs with the operator's standing
+                  // approval; Sleeper requires the confirmation flag explicitly.
+                  body: { userConfirmed: true },
                 }), { replaySafe: true })
             }
             planId = plan.id
