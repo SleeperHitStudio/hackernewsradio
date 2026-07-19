@@ -186,8 +186,6 @@ export function podcastBrief(thread, pageTarget) {
         'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
         'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
         'tangents, sudden painful silences, non sequiturs — irreverent all the way down, played completely straight.',
-        'MUSIC IS THE SHOW\'S JAZZ THEME, bookends only: the SAME sleazy late-night jazz identity (~30–40s) opens ' +
-        'and closes every episode, plus at most one or two ~10s stings — otherwise VOICES ONLY, no score under talk.',
       ],
     },
     styleConstraints: SHARED_STYLE_CONSTRAINTS,
