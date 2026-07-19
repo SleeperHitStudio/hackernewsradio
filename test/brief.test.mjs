@@ -7,16 +7,58 @@ import {
   canonicalPinnedVoiceMap,
 } from '../worker/brief.mjs'
 
-test('every must-know instruction stays within the Sleeper plan schema limit', () => {
-  const brief = buildBrief({ title: 'Test thread', total: 100, points: 200 }, 10)
-  const mustKnow = brief.creativeBrief.mustKnowBeforeWriting
-  assert.ok(mustKnow.length > 0)
-  assert.ok(mustKnow.length <= 12, `mustKnowBeforeWriting has ${mustKnow.length} items; Sleeper caps the array at 12`)
-  for (const [index, instruction] of mustKnow.entries()) {
-    assert.ok(
-      instruction.length <= 220,
-      `mustKnowBeforeWriting.${index} is ${instruction.length} characters`,
-    )
+test('the full brief honors every Sleeper plan-schema cap (contract test)', () => {
+  // Mirrors packages/web/src/server/story-plan-schema.ts on the platform:
+  //   storyPlanTargetSchema, storyPlanCreativeBriefSchema, storyPlanStyleConstraintsSchema.
+  // A violation here is a DETERMINISTIC production outage: every plan request
+  // is rejected with a 400 until a fix deploys (2026-07-18: a 13th mustKnow
+  // bullet silently killed a whole night's generation).
+  const caps = {
+    target: { audience: 200, objective: 400, outcome: 400, tone: 120, industry: 120, distributionContext: 300 },
+    creativeBrief: {
+      installmentLabel: 160, seriesContext: 1200, genre: 160, audience: 240,
+      writingStyle: 600, castNotes: 1000, musicStyle: 500, sfxPolicy: 500, replanInstruction: 5000,
+    },
+    styleConstraints: { preferredVisualStyle: 400, voicePreference: 160, musicPolicy: 300 },
+  }
+  const arrayCaps = {
+    creativeBrief: { comps: [8, 160], mustKnowBeforeWriting: [12, 220] },
+    styleConstraints: { forbiddenVisuals: [10, 160], brandSafety: [10, 160] },
+  }
+
+  // Exercise the extremes: giant thread + max page target, tiny thread + min.
+  const briefs = [
+    buildBrief({ title: 'x'.repeat(240), total: 5000, points: 9000 }, 12),
+    buildBrief({ title: 't', total: 5, points: 0 }, 4),
+  ]
+
+  for (const brief of briefs) {
+    assert.ok(String(brief.title).length <= 240, `title is ${String(brief.title).length} chars (cap 240)`)
+    for (const [section, fields] of Object.entries(caps)) {
+      const obj = brief[section] ?? brief.creativeBrief?.[section] ?? {}
+      for (const [field, cap] of Object.entries(fields)) {
+        const value = obj[field]
+        if (value === undefined || value === null) continue
+        assert.ok(
+          String(value).length <= cap,
+          `${section}.${field} is ${String(value).length} chars (Sleeper cap ${cap})`,
+        )
+      }
+    }
+    for (const [section, fields] of Object.entries(arrayCaps)) {
+      const obj = brief[section] ?? {}
+      for (const [field, [maxItems, maxLen]] of Object.entries(fields)) {
+        const value = obj[field]
+        if (!Array.isArray(value)) continue
+        assert.ok(value.length <= maxItems, `${section}.${field} has ${value.length} items (Sleeper cap ${maxItems})`)
+        for (const [index, entry] of value.entries()) {
+          assert.ok(
+            String(entry).length <= maxLen,
+            `${section}.${field}[${index}] is ${String(entry).length} chars (Sleeper cap ${maxLen})`,
+          )
+        }
+      }
+    }
   }
 })
 

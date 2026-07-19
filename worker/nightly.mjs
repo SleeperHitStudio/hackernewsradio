@@ -42,14 +42,42 @@ export function isQuotaClassFailure(message) {
   return QUOTA_CLASS_RE.test(String(message || ''))
 }
 
+/**
+ * Contract-class failures: the platform rejected OUR request shape (schema
+ * caps, invalid fields, incomplete voice maps). Deterministic per deploy —
+ * the same request fails the same way every time, so retries only waste
+ * attempts and a code/config fix is required. Alert on FIRST occurrence.
+ */
+export const CONTRACT_CLASS_RE =
+  /is invalid:|Too big:|Invalid key in record|Supply every speaking character/i
+
+export function isContractClassFailure(message) {
+  return CONTRACT_CLASS_RE.test(String(message || ''))
+}
+
 const ALERT_FROM = 'HN Radio <noreply@updates.sleeperhit.studio>'
-export const ALERT_MIN_FAILURES = 6
+// One full first-wave wipeout (five stories, zero published) is alertable.
+export const ALERT_MIN_FAILURES = 5
+
+const ALERT_SUBJECTS = {
+  contract: 'blocked by a contract/validation error — needs a fix, retries cannot help',
+  quota: 'blocked by a provider quota cliff',
+  failing: 'is failing repeatedly',
+}
+
+const ALERT_FOOTERS = {
+  contract: 'The platform is REJECTING our requests (schema/validation). This is deterministic — hourly retries re-fail identically until a code or config fix ships. Fix the contract violation, deploy, and the next tick recovers automatically.',
+  quota: 'A provider quota/funding cliff is blocking generation. Retries continue hourly without burning attempts, but only a top-up, cap reset, or provider rebind will unblock it.',
+  failing: 'Repeated failures with nothing published tonight. Check the episode progress logs on hnradio.net/api/dramas?includeFailed=true.',
+}
 
 /**
- * Email the operator when a batch is in distress — either a quota-class
- * failure (needs a top-up or a rebind, retries alone cannot fix it) or a
- * pile-up of ordinary failures with nothing published. One email per batch
- * date per distress type; the hourly cron would otherwise spam.
+ * Email the operator when a batch is in distress: a contract/validation
+ * rejection (immediately — deterministic, retries cannot fix it), a
+ * quota-class failure (needs a top-up or rebind), or a pile-up of ordinary
+ * failures with nothing published (cumulative `failureEvents`, so a full
+ * first-wave wipeout alerts on the very next tick). One email per batch date
+ * per distress type; the hourly cron would otherwise spam.
  */
 export async function maybeSendDistressAlert(env, batch, deps) {
   if (!env.RESEND_API_KEY || !env.ALERT_EMAIL) return null
@@ -58,15 +86,16 @@ export async function maybeSendDistressAlert(env, batch, deps) {
     ...(batch.errors ?? []).map((entry) => entry.message),
     ...(batch.items ?? []).map((item) => item.lastError),
   ].filter(Boolean)
+  const contract = (batch.items ?? []).some((item) => item.contractBlockedAt)
+    || recentErrors.some((message) => isContractClassFailure(message))
   const quota = (batch.items ?? []).some((item) => item.quotaBlockedAt)
     || recentErrors.some((message) => isQuotaClassFailure(message))
-  const failureCount = (batch.errors ?? []).length
-    + (batch.items ?? []).filter((item) => item.lastError && item.status !== 'published').length
   const published = (batch.items ?? []).filter((item) => item.status === 'published').length
 
   let type = null
-  if (quota) type = 'quota'
-  else if (published === 0 && failureCount >= ALERT_MIN_FAILURES) type = 'failing'
+  if (contract) type = 'contract'
+  else if (quota) type = 'quota'
+  else if (published === 0 && Number(batch.failureEvents || 0) >= ALERT_MIN_FAILURES) type = 'failing'
   if (!type) return null
 
   const sentKey = `distressAlert:${batch.date}:${type}`
@@ -82,9 +111,7 @@ export async function maybeSendDistressAlert(env, batch, deps) {
     'Recent batch errors:',
     ...(batch.errors ?? []).slice(-5).map((entry) => `- ${entry.at}: ${entry.message}`),
     '',
-    type === 'quota'
-      ? 'A provider quota/funding cliff is blocking generation. Retries continue hourly without burning attempts, but only a top-up, cap reset, or provider rebind will unblock it.'
-      : 'Repeated failures with nothing published tonight. Check the episode progress logs on hnradio.net/api/dramas?includeFailed=true.',
+    ALERT_FOOTERS[type],
   ]
 
   try {
@@ -94,7 +121,7 @@ export async function maybeSendDistressAlert(env, batch, deps) {
       body: JSON.stringify({
         from: ALERT_FROM,
         to: [env.ALERT_EMAIL],
-        subject: `[hnradio] nightly ${batch.date} ${type === 'quota' ? 'blocked by a provider quota cliff' : 'is failing repeatedly'}`,
+        subject: `[hnradio] nightly ${batch.date} ${ALERT_SUBJECTS[type]}`,
         text: lines.join('\n'),
       }),
     })
@@ -372,24 +399,29 @@ async function resumeArtifactWorkflow(env, drama) {
 }
 
 async function recoverItem(env, batch, item, drama, deps) {
-  // A provider quota/funding outage fails EVERY story identically until the
-  // cap resets or the balance is topped up. Burning the per-story attempt
-  // budget then just churns through replacement stories that fail the same
-  // way (Jul 16-17). Instead: keep retrying the SAME story hourly without
-  // consuming attempts, and let the distress alert tell the operator.
-  const quotaBlocked = isQuotaClassFailure(drama?.error || item.lastError)
+  // Systemic failures fail EVERY story identically: a quota/funding outage
+  // (until the cap resets or the balance is topped up) or a contract/schema
+  // rejection (until a code/config fix deploys). Burning the per-story
+  // attempt budget then just churns through replacement stories that fail
+  // the same way (Jul 16-17). Instead: keep retrying the SAME story hourly
+  // without consuming attempts, and let the distress alert tell the operator.
+  const failureMessage = drama?.error || item.lastError
+  const quotaBlocked = isQuotaClassFailure(failureMessage)
+  const contractBlocked = !quotaBlocked && isContractClassFailure(failureMessage)
+  const blocked = quotaBlocked || contractBlocked
   if (quotaBlocked) item.quotaBlockedAt = nowIso()
+  if (contractBlocked) item.contractBlockedAt = nowIso()
 
   if (drama?.artifactId) {
     const recoveryAttempts = Number(item.recoveryAttempts || 0)
-    if (!quotaBlocked && recoveryAttempts >= NIGHTLY_MAX_ATTEMPTS) {
+    if (!blocked && recoveryAttempts >= NIGHTLY_MAX_ATTEMPTS) {
       item.status = 'exhausted'
       item.lastError = 'Artifact publishing recovery exhausted.'
       return
     }
     item.workflowId = await resumeArtifactWorkflow(env, drama)
     item.episodeId = drama.id
-    item.recoveryAttempts = quotaBlocked ? recoveryAttempts : recoveryAttempts + 1
+    item.recoveryAttempts = blocked ? recoveryAttempts : recoveryAttempts + 1
     item.status = 'queued'
     item.lastWorkflowStatus = 'queued'
     item.updatedAt = nowIso()
@@ -397,7 +429,7 @@ async function recoverItem(env, batch, item, drama, deps) {
   }
 
   const attempt = Number(item.attempt || 1)
-  if (!quotaBlocked && attempt >= NIGHTLY_MAX_ATTEMPTS) {
+  if (!blocked && attempt >= NIGHTLY_MAX_ATTEMPTS) {
     item.status = 'exhausted'
     item.lastError = 'Generation attempts exhausted.'
     return
@@ -406,12 +438,12 @@ async function recoverItem(env, batch, item, drama, deps) {
   const thread = await deps.fetchThread(item.url)
   const replacement = await createEpisodeWorkflow(env, thread, {
     batchDate: batch.date,
-    attempt: quotaBlocked ? attempt : attempt + 1,
+    attempt: blocked ? attempt : attempt + 1,
   }, deps)
   const oldEpisodeId = item.episodeId
   item.episodeId = replacement.drama.id
   item.workflowId = replacement.workflowId
-  item.attempt = quotaBlocked ? attempt : attempt + 1
+  item.attempt = blocked ? attempt : attempt + 1
   item.status = 'queued'
   item.lastWorkflowStatus = 'queued'
   item.updatedAt = nowIso()
@@ -435,6 +467,10 @@ async function reconcileItem(env, batch, item, deps) {
   }
 
   if (drama?.status === 'failed') {
+    // Cumulative across the whole night — item.lastError alone undercounts
+    // (a five-story batch shows at most five concurrent errors no matter how
+    // many waves have failed), which kept the 'failing' alert from ever firing.
+    batch.failureEvents = Number(batch.failureEvents || 0) + 1
     await recoverItem(env, batch, item, drama, deps)
     return
   }
@@ -467,6 +503,9 @@ async function reconcileItem(env, batch, item, deps) {
   // READY is not batch-complete until the feed publish progress event exists.
   // If a Workflow ended in that gap, resume the same artifact and its stable
   // publishing idempotency keys instead of buying another performance.
+  // A ready episode resuming for publish is not a failure; a dead workflow
+  // on an unfinished episode is.
+  if (drama?.status !== 'ready') batch.failureEvents = Number(batch.failureEvents || 0) + 1
   await recoverItem(env, batch, item, drama, deps)
 }
 

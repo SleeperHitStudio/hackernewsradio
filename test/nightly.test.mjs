@@ -575,3 +575,95 @@ test('no alert is attempted without Resend configuration', async (t) => {
   await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
   assert.equal(called, false)
 })
+
+test('a contract-class failure alerts immediately and preserves attempts', async (t) => {
+  const h = harness({ topIds: [] })
+  h.env.RESEND_API_KEY = 'test_resend_key'
+  h.env.ALERT_EMAIL = 'ops@example.com'
+  const emails = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    emails.push(JSON.parse(options.body))
+    return { ok: true, json: async () => ({ id: 'email_1' }) }
+  }
+  t.after(() => { globalThis.fetch = realFetch })
+
+  const date = '2026-07-18'
+  h.dramas.set('episode_contract', {
+    id: 'episode_contract',
+    hnId: '90',
+    status: 'failed',
+    error: 'SleeperHitError: `creativeBrief` is invalid: mustKnowBeforeWriting - Too big: expected array to have <=12 items',
+    url: 'https://news.ycombinator.com/item?id=90',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '90',
+      url: 'https://news.ycombinator.com/item?id=90',
+      title: 'Story 90',
+      episodeId: 'episode_contract',
+      workflowId: 'episode_contract',
+      attempt: 3,
+      recoveryAttempts: 0,
+      status: 'failed',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+  assert.equal(item.attempt, 3, 'contract failures must not consume the attempt budget')
+  assert.ok(item.contractBlockedAt)
+  assert.equal(item.status, 'queued', 'the same story retries after the fix deploys')
+  assert.equal(emails.length, 1, 'contract failures alert on FIRST occurrence')
+  assert.match(emails[0].subject, /contract\/validation error/)
+})
+
+test('cumulative failure events fire the failing alert after one full wave', async (t) => {
+  const h = harness({ topIds: [] })
+  h.env.RESEND_API_KEY = 'test_resend_key'
+  h.env.ALERT_EMAIL = 'ops@example.com'
+  const emails = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    emails.push(JSON.parse(options.body))
+    return { ok: true, json: async () => ({ id: 'email_1' }) }
+  }
+  t.after(() => { globalThis.fetch = realFetch })
+
+  const date = '2026-07-18'
+  const items = []
+  for (let i = 0; i < 5; i++) {
+    const id = `episode_flaky_${i}`
+    h.dramas.set(id, {
+      id,
+      hnId: String(100 + i),
+      status: 'failed',
+      error: 'Table-read script generation produced empty output.',
+      url: `https://news.ycombinator.com/item?id=${100 + i}`,
+      progress: [],
+    })
+    items.push({
+      hnId: String(100 + i),
+      url: `https://news.ycombinator.com/item?id=${100 + i}`,
+      title: `Story ${100 + i}`,
+      episodeId: id,
+      workflowId: id,
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'failed',
+    })
+  }
+  h.settings.set(nightlyBatchKey(date), {
+    date, status: 'running', target: 5, items, errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(batch.failureEvents, 5)
+  assert.equal(emails.length, 1, 'one full-wave wipeout with zero published alerts on the next tick')
+  assert.match(emails[0].subject, /failing repeatedly/)
+})
