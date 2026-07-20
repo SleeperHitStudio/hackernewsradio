@@ -93,8 +93,12 @@ quota, and deterministic contract failures. The first systemic failure stops
 new generation immediately. While the circuit is open, the hourly reconciler
 permits at most one probe globally and resumes the existing Sleeper Hit plan or
 job under the same HNR episode id. Producing an artifact closes the circuit;
-the following tick restores normal batch filling. Post-production recovery for
-an already-created artifact remains independent from this generation circuit.
+the following tick may start the next episode. Even with the circuit closed,
+each reconciliation starts or resumes at most one pre-artifact generation
+globally, and only the newest pending nightly batch may own that work. Older
+batches drain already-active work and artifact publishing without minting
+duplicates. Post-production recovery for an already-created artifact remains
+independent from this generation circuit.
 
 See [Community episode access](docs/community-episode-access.md) for the public
 gate's limitation, abuse controls, Turnstile behavior, and optional Spotify

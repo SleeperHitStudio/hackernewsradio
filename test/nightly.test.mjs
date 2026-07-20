@@ -346,7 +346,7 @@ test('music wake recovery is bounded after the replacement resume Workflow', asy
   assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS)
 })
 
-test('nightly selection scans past already-published stories until five slots are queued', async () => {
+test('nightly selection adopts active work and starts one globally serialized generator', async () => {
   const published = {
     id: 'published_1', hnId: '1', status: 'ready', audioUrl: 'one.mp3',
     progress: [{ message: PUBLISHED_PROGRESS_MESSAGE }],
@@ -366,9 +366,10 @@ test('nightly selection scans past already-published stories until five slots ar
     dependencies: h.dependencies,
   })
 
-  assert.equal(batch.items.length, 5)
-  assert.deepEqual(batch.items.map((item) => item.hnId), ['2', '3', '4', '5', '6'])
-  assert.equal(h.creates.length, 4)
+  assert.equal(batch.items.length, 2)
+  assert.deepEqual(batch.items.map((item) => item.hnId), ['2', '3'])
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.staggerSec, 0)
   assert.equal(h.settings.get('dailyTopLastRun'), undefined)
 })
 
@@ -456,7 +457,7 @@ test('a quota-class failure opens the circuit, then retries the same job on the 
     id: 'episode_quota',
     hnId: '77',
     status: 'failed',
-    error: 'You have reached your specified API usage limits. You will regain access on 2026-08-01 at 00:00 UTC.',
+    error: 'Planning failed after the first completed generation. This request requires more credits, or fewer max_tokens. You requested up to 24000 tokens, but can only afford 7900. To increase, visit https://openrouter.ai/settings/credits and add more credits.',
     jobId: 'job_quota',
     url: 'https://news.ycombinator.com/item?id=77',
     progress: [],
@@ -706,7 +707,7 @@ test('provider policy throttles use the stable failure code and get their own al
   assert.match(emails[0].subject, /provider policy throttle/)
 })
 
-test('one due generation circuit permits exactly one probe across multiple pending dates', async () => {
+test('one due generation circuit gives the single probe to the newest pending date', async () => {
   const firstDate = '2026-07-17'
   const secondDate = '2026-07-18'
   const now = '2026-07-19T06:00:00.000Z'
@@ -763,13 +764,103 @@ test('one due generation circuit permits exactly one probe across multiple pendi
 
   assert.equal(batches.length, 2)
   assert.equal(h.creates.length, 1)
-  assert.equal(h.creates[0].params.resumeJobId, 'job_global_1')
-  assert.equal(batches[0].items[0].status, 'queued')
-  assert.equal(batches[1].items[0].status, 'blocked')
+  assert.equal(h.creates[0].params.resumeJobId, 'job_global_2')
+  assert.equal(batches[0].items[0].status, 'superseded')
+  assert.equal(batches[0].status, 'superseded')
+  assert.equal(batches[1].items[0].status, 'queued')
   const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
-  assert.equal(circuit.probeEpisodeId, 'episode_global_1')
+  assert.equal(circuit.probeEpisodeId, 'episode_global_2')
   assert.equal(circuit.probeWorkflowId, 'global_probe_1')
   assert.equal(circuit.probeCount, 1)
+  assert.deepEqual(h.settings.get('dailyTopPendingDates'), [secondDate])
+})
+
+test('closed-circuit reconciliation starts only one generator across pending dates', async () => {
+  const firstDate = '2026-07-17'
+  const secondDate = '2026-07-18'
+  const h = harness({
+    now: '2026-07-19T06:00:00.000Z',
+    topIds: [301, 302, 303],
+  })
+  h.settings.set('dailyTopPendingDates', [firstDate, secondDate])
+  h.settings.set(nightlyBatchKey(firstDate), {
+    date: firstDate,
+    status: 'running',
+    target: 5,
+    items: [],
+    errors: [],
+  })
+  h.settings.set(nightlyBatchKey(secondDate), {
+    date: secondDate,
+    status: 'running',
+    target: 5,
+    items: [],
+    errors: [],
+  })
+
+  const batches = await runNightlyReconciliation(h.env, {
+    now: new Date('2026-07-19T06:00:00.000Z'),
+    dependencies: h.dependencies,
+  })
+
+  assert.equal(h.creates.length, 1)
+  assert.equal(batches[0].status, 'superseded')
+  assert.equal(batches[0].items.length, 0)
+  assert.equal(batches[1].status, 'running')
+  assert.deepEqual(batches[1].items.map((item) => item.hnId), ['301'])
+  assert.deepEqual(h.settings.get('dailyTopPendingDates'), [secondDate])
+})
+
+test('the same failed episode is resumed only once when two dates reference it', async () => {
+  const firstDate = '2026-07-17'
+  const secondDate = '2026-07-18'
+  const episode = {
+    id: 'episode_shared',
+    hnId: '401',
+    status: 'failed',
+    error: 'temporary upstream failure',
+    planId: 'plan_shared',
+    url: 'https://news.ycombinator.com/item?id=401',
+    title: 'Story 401',
+    progress: [],
+  }
+  const sharedItem = {
+    hnId: episode.hnId,
+    url: episode.url,
+    title: episode.title,
+    episodeId: episode.id,
+    workflowId: episode.id,
+    attempt: 1,
+    recoveryAttempts: 0,
+    status: 'failed',
+  }
+  const h = harness({
+    now: '2026-07-19T06:00:00.000Z',
+    dramas: new Map([[episode.id, episode]]),
+    topIds: [],
+    randomIds: ['shared_resume_1'],
+  })
+  h.settings.set('dailyTopPendingDates', [firstDate, secondDate])
+  for (const date of [firstDate, secondDate]) {
+    h.settings.set(nightlyBatchKey(date), {
+      date,
+      status: 'running',
+      target: 5,
+      items: [structuredClone(sharedItem)],
+      errors: [],
+    })
+  }
+
+  const batches = await runNightlyReconciliation(h.env, {
+    now: new Date('2026-07-19T06:00:00.000Z'),
+    dependencies: h.dependencies,
+  })
+
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.resumePlanId, episode.planId)
+  assert.equal(batches[0].items[0].status, 'superseded')
+  assert.equal(batches[1].items[0].status, 'queued')
+  assert.equal(h.dramas.get(episode.id).status, 'queued')
 })
 
 test('a due probe resumes the same plan when failure happened before job creation', async () => {
