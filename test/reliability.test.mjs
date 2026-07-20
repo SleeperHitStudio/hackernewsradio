@@ -16,11 +16,14 @@ import {
   hasInFlightMusicClips,
   inspectBookends,
   isSpokenTakeThin,
+  isTerminalStoryJobFailureOutcome,
   isTransientWorkflowError,
   minimumSpokenWords,
   pollInWorkflowChunks,
   postProductionIdempotencyScope,
   runHardStep,
+  shouldRollFailedStoryJob,
+  storyJobPollOutcome,
 } from '../worker/reliability.mjs'
 
 test('spoken-word floor accepts valid 56-60 word/page takes', () => {
@@ -33,6 +36,42 @@ test('spoken-word floor accepts valid 56-60 word/page takes', () => {
 
 test('StoryJob chunk budget exceeds one hour', () => {
   assert.ok(STORY_JOB_POLL_CHUNKS * 45 >= 60 * 60)
+})
+
+test('StoryJob polling preserves terminal state across the Workflow step boundary', () => {
+  assert.equal(storyJobPollOutcome({ status: 'RUNNING' }), 'pending')
+  assert.equal(storyJobPollOutcome({
+    status: 'READY',
+    artifacts: [
+      { id: 'other_1', type: 'pitch_deck' },
+      { id: 'artifact_1', type: 'table_read' },
+    ],
+  }), 'artifact_1')
+
+  const emptyOutput = storyJobPollOutcome({
+    status: 'FAILED',
+    failureCode: 'artifact_generation_failed',
+    failureMessage: 'Table-read script generation produced empty output.',
+  })
+  assert.equal(isTerminalStoryJobFailureOutcome(emptyOutput), true)
+  assert.deepEqual(emptyOutput, {
+    kind: 'terminal-story-job-failure',
+    status: 'FAILED',
+    code: 'artifact_generation_failed',
+    message: 'Table-read script generation produced empty output.',
+  })
+
+  const rehydrated = Object.assign(new Error(emptyOutput.message), {
+    terminalStoryJobFailure: true,
+  })
+  assert.equal(shouldRollFailedStoryJob(rehydrated), true)
+  assert.equal(shouldRollFailedStoryJob(new Error('Network error reaching Sleeper Hit')), false)
+})
+
+test('READY StoryJobs without artifacts roll a fresh performance', () => {
+  const outcome = storyJobPollOutcome({ status: 'READY', artifacts: [] })
+  assert.equal(isTerminalStoryJobFailureOutcome(outcome), true)
+  assert.equal(outcome.code, 'artifact_missing')
 })
 
 test('repair post-production keys are fresh per repair run but stable within it', () => {
