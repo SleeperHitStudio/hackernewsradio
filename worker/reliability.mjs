@@ -97,6 +97,15 @@ export function shouldRollFailedStoryJob(error) {
     || /\b(?:FAILED|CANCELED)\b|generation failed/i.test(errorText(error))
 }
 
+export function terminalStoryJobFallbackPlanId(error, planId) {
+  if (!planId || !shouldRollFailedStoryJob(error)) return null
+  return planId
+}
+
+export function storyJobIdempotencyScope(dramaId, recoveryRunId) {
+  return recoveryRunId ? `${dramaId}-recovery-${recoveryRunId}` : dramaId
+}
+
 export function postProductionIdempotencyScope(dramaId, repairRunId) {
   return repairRunId ? `${dramaId}-repair-${repairRunId}` : dramaId
 }

@@ -36,7 +36,9 @@ import {
   runHardStep,
   runWorkflowStepOnce,
   shouldRollFailedStoryJob,
+  storyJobIdempotencyScope,
   storyJobPollOutcome,
+  terminalStoryJobFallbackPlanId,
 } from './reliability.mjs'
 
 export class HnrPipeline extends WorkflowEntrypoint {
@@ -192,16 +194,27 @@ export class HnrPipeline extends WorkflowEntrypoint {
           }), { replaySafe: true })
       }
 
+      let pendingResumePlanId = resumePlanId
       if (resumeJobId) {
-        await this.hardStep(step, `resume job ${resumeJobId}`, () =>
-          sh.resumeJob(
-            resumeJobId,
-            `${event.payload.recoveryRunId || dramaId}-resume-job-${resumeJobId}`,
-          ), { replaySafe: true })
-        await patchDrama(db, dramaId, { jobId: resumeJobId })
-        artifactId = await pollJobArtifact(`resumed job ${resumeJobId}`, resumeJobId)
-      } else {
-        let pendingResumePlanId = resumePlanId
+        try {
+          await this.hardStep(step, `resume job ${resumeJobId}`, () =>
+            sh.resumeJob(
+              resumeJobId,
+              `${event.payload.recoveryRunId || dramaId}-resume-job-${resumeJobId}`,
+            ), { replaySafe: true })
+          await patchDrama(db, dramaId, { jobId: resumeJobId })
+          artifactId = await pollJobArtifact(`resumed job ${resumeJobId}`, resumeJobId)
+        } catch (error) {
+          pendingResumePlanId = terminalStoryJobFallbackPlanId(error, recoveryOriginal?.planId)
+          if (!pendingResumePlanId) throw error
+          await note(
+            `The resumed Sleeper Hit job is terminal — rolling a fresh take from plan ${pendingResumePlanId}…`,
+            `terminal-job-fallback:${resumeJobId}`,
+          )
+        }
+      }
+      if (!artifactId) {
+        const jobScope = storyJobIdempotencyScope(dramaId, event.payload.recoveryRunId)
         for (let round = 1; artifactId === null; round++) {
           const brief = buildBrief(thread, pageTarget)
           let planId = null
@@ -263,7 +276,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
                   if (!artifactRequests) throw new Error('Existing artifacts must use resume/repair, not createJob.')
                   return sh.request('/story-jobs', {
                     method: 'POST',
-                    idempotencyKey: `${dramaId}-job-r${round}-j${jobRoll}`,
+                    idempotencyKey: `${jobScope}-job-r${round}-j${jobRoll}`,
                     body: {
                       storyPlanId: planId,
                       artifactRequests,
