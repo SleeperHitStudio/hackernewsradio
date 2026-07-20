@@ -19,6 +19,10 @@ import {
   isProviderBlockedFailure,
   isQuotaClassFailure,
 } from './failure-classification.mjs'
+import {
+  WORKFLOW_DEPLOY_GATE_KEY,
+  activeWorkflowDeployGate,
+} from './deploy-gate.mjs'
 
 export {
   CONTRACT_CLASS_RE,
@@ -944,6 +948,11 @@ export async function runNightlyReconciliation(env, {
   dependencies = {},
 } = {}) {
   const deps = { ...defaultDependencies, now: () => new Date(now), ...dependencies }
+  const deployGate = activeWorkflowDeployGate(
+    await deps.getSetting(env.DB, WORKFLOW_DEPLOY_GATE_KEY),
+    now,
+  )
+  if (deployGate) return []
   const { date, hour } = centralRunContext(now)
   let pendingDates = await deps.getSetting(env.DB, 'dailyTopPendingDates')
   pendingDates = Array.isArray(pendingDates) ? pendingDates : []

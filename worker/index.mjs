@@ -10,6 +10,10 @@ import { spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
 import { operatorAuthorization } from './operator-auth.mjs'
 import { runNightlyReconciliation } from './nightly.mjs'
 import {
+  getActiveWorkflowDeployGate,
+  workflowDeployRetryAfterSeconds,
+} from './deploy-gate.mjs'
+import {
   claimCommunityGeneration,
   communityConfig,
   communityStatus,
@@ -45,6 +49,18 @@ const json = (data, status = 200, headers = {}) =>
   withHeaders(new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...headers } }))
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+async function workflowDeployGateResponse(env) {
+  const now = new Date()
+  const gate = await getActiveWorkflowDeployGate(env.DB, { now })
+  if (!gate) return null
+  const retryAfter = workflowDeployRetryAfterSeconds(gate, now)
+  return json({
+    error: 'Workflow starts are briefly paused while the Worker deploy stabilizes.',
+    code: 'workflow_deploying',
+    retryAfterSeconds: retryAfter,
+  }, 503, { 'Retry-After': String(retryAfter) })
+}
 
 async function startGeneration(request, env, url, { force = false, requireEntitlement = true } = {}) {
   const thread = await fetchThread(url)
@@ -125,6 +141,8 @@ async function handleApi(request, env, url) {
     const authorization = await operatorAuthorization(request, env.HNR_OPERATOR_TOKEN)
     if (authorization === 'disabled') return json({ error: 'Not found' }, 404)
     if (authorization !== 'authorized') return json({ error: 'Unauthorized' }, 401)
+    const deployGate = await workflowDeployGateResponse(env)
+    if (deployGate) return deployGate
     const drama = await getDrama(env.DB, resume[1])
     if (!drama) return json({ error: 'Not found' }, 404)
     if (drama.status !== 'failed' || !drama.artifactId) {
@@ -150,6 +168,8 @@ async function handleApi(request, env, url) {
     const authorization = await operatorAuthorization(request, env.HNR_OPERATOR_TOKEN)
     if (authorization === 'disabled') return json({ error: 'Not found' }, 404)
     if (authorization !== 'authorized') return json({ error: 'Unauthorized' }, 401)
+    const deployGate = await workflowDeployGateResponse(env)
+    if (deployGate) return deployGate
     const drama = await getDrama(env.DB, repair[1])
     if (!drama?.artifactId) return json({ error: 'Repair needs an existing performance (artifactId).' }, 400)
     let body
@@ -172,6 +192,8 @@ async function handleApi(request, env, url) {
     let body
     try { body = await request.json() } catch { body = {} }
     if (!body?.url) return json({ error: 'Provide a Hacker News thread "url".' }, 400)
+    const deployGate = await workflowDeployGateResponse(env)
+    if (deployGate) return deployGate
     try {
       const result = await startGeneration(request, env, body.url, { force: Boolean(body.force) })
       return json(result)
