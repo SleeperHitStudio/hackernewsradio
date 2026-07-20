@@ -88,6 +88,14 @@ and require `Authorization: Bearer <token>`. Configure production with
 `npx wrangler secret put HNR_OPERATOR_TOKEN`; do secret/config updates outside
 the nightly run window because they can restart live Worker/Workflow state.
 
+Nightly generation uses one persisted, cross-date circuit for provider-policy,
+quota, and deterministic contract failures. The first systemic failure stops
+new generation immediately. While the circuit is open, the hourly reconciler
+permits at most one probe globally and resumes the existing Sleeper Hit plan or
+job under the same HNR episode id. Producing an artifact closes the circuit;
+the following tick restores normal batch filling. Post-production recovery for
+an already-created artifact remains independent from this generation circuit.
+
 See [Community episode access](docs/community-episode-access.md) for the public
 gate's limitation, abuse controls, Turnstile behavior, and optional Spotify
 OAuth test path.

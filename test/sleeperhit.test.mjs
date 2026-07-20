@@ -12,6 +12,33 @@ test('Sleeper client StoryJob polling budget is at least 60 minutes', () => {
   assert.ok(STORY_JOB_POLL_ATTEMPTS * STORY_JOB_POLL_INTERVAL_MS >= 60 * 60 * 1000)
 })
 
+test('plan and job recovery call the same-resource resume endpoints with stable keys', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const calls = []
+  client.request = async (path, options = {}) => {
+    calls.push({ path, options })
+    return path.includes('/story-plans/')
+      ? { plan: { id: 'plan_1', status: 'PENDING' } }
+      : { action: 'generation_requeued', job: { id: 'job_1', status: 'RESERVED' } }
+  }
+
+  const plan = await client.resumePlan('plan_1', 'probe-plan-key')
+  const job = await client.resumeJob('job_1', 'probe-job-key')
+
+  assert.equal(plan.id, 'plan_1')
+  assert.equal(job.job.id, 'job_1')
+  assert.deepEqual(calls, [
+    {
+      path: '/story-plans/plan_1/resume',
+      options: { method: 'POST', idempotencyKey: 'probe-plan-key' },
+    },
+    {
+      path: '/story-jobs/job_1/resume',
+      options: { method: 'POST', idempotencyKey: 'probe-job-key' },
+    },
+  ])
+})
+
 test('voice modification summaries track the newest requested range records', () => {
   const summary = summarizeVoiceModifications([
     { startEntryIndex: 4, endEntryIndex: 6, status: 'ready', updatedAt: '2026-07-15T00:00:00Z' },

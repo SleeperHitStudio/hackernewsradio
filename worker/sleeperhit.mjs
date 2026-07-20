@@ -177,7 +177,9 @@ export class SleeperHit {
       onProgress?.(`plan: ${status ?? 'generating'}`)
       if (status === 'REQUIRES_APPROVAL' || status === 'APPROVED' || status === 'READY') return res.plan
       if (status === 'FAILED' || status === 'REJECTED') {
-        throw new SleeperHitError(res.plan?.failureMessage || 'Plan generation failed.')
+        throw new SleeperHitError(res.plan?.failureMessage || 'Plan generation failed.', {
+          code: res.plan?.failureCode,
+        })
       }
       await sleep(3000)
     }
@@ -186,6 +188,14 @@ export class SleeperHit {
 
   async approvePlan(planId) {
     await this.request(`/story-plans/${planId}/approve`, { method: 'POST', idempotencyKey: true, body: { userConfirmed: true } })
+  }
+
+  async resumePlan(planId, idempotencyKey) {
+    const res = await this.request(`/story-plans/${planId}/resume`, {
+      method: 'POST',
+      idempotencyKey: idempotencyKey || true,
+    })
+    return res.plan
   }
 
   /** artifactRequests OVERRIDE the plan's own requests on the job — this is
@@ -197,6 +207,13 @@ export class SleeperHit {
       body: { storyPlanId, ...(artifactRequests ? { artifactRequests } : {}) },
     })
     return res.job.id
+  }
+
+  async resumeJob(jobId, idempotencyKey) {
+    return this.request(`/story-jobs/${jobId}/resume`, {
+      method: 'POST',
+      idempotencyKey: idempotencyKey || true,
+    })
   }
 
   async pollJobReady(jobId, { onProgress } = {}) {
@@ -214,7 +231,9 @@ export class SleeperHit {
         return art.id
       }
       if (status === 'FAILED' || status === 'CANCELED') {
-        throw new SleeperHitError(job?.failureMessage || `Table read ${status}.`)
+        throw new SleeperHitError(job?.failureMessage || `Table read ${status}.`, {
+          code: job?.failureCode,
+        })
       }
       await sleep(STORY_JOB_POLL_INTERVAL_MS)
     }

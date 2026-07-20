@@ -6,8 +6,9 @@
  * can never double-spend.
  */
 import { WorkflowEntrypoint } from 'cloudflare:workers'
-import { SleeperHit } from './sleeperhit.mjs'
+import { SleeperHit, SleeperHitError } from './sleeperhit.mjs'
 import { fetchThread, threadToTranscript } from './hn.mjs'
+import { classifySystemicFailure } from './failure-classification.mjs'
 import {
   AVATAR_STYLE,
   HOSTS,
@@ -41,12 +42,21 @@ export class HnrPipeline extends WorkflowEntrypoint {
     const env = this.env
     const db = env.DB
     const sh = new SleeperHit({ baseUrl: env.SLEEPERHIT_API_BASE, apiKey: env.SLEEPERHIT_API_KEY })
-    const progressRunId = event.instanceId || event.payload.repairRunId || event.payload.resumeRunId || dramaId
+    const progressRunId = event.instanceId
+      || event.payload.repairRunId
+      || event.payload.resumeRunId
+      || event.payload.recoveryRunId
+      || dramaId
     const note = (message, eventKey = message) =>
       appendProgress(db, dramaId, message, { runId: progressRunId, eventKey }).catch(() => {})
     const isRepair = Boolean(event.payload.repairArtifactId)
     const isResume = Boolean(event.payload.resumeArtifactId)
-    const recoveryOriginal = (isRepair || isResume) ? await getDrama(db, dramaId) : null
+    const resumePlanId = event.payload.resumePlanId ?? null
+    const resumeJobId = event.payload.resumeJobId ?? null
+    const isUpstreamRecovery = Boolean(resumePlanId || resumeJobId)
+    const recoveryOriginal = (isRepair || isResume || isUpstreamRecovery)
+      ? await getDrama(db, dramaId)
+      : null
 
     try {
       if (staggerSec > 0) await step.sleep('stagger', `${staggerSec} seconds`)
@@ -55,7 +65,13 @@ export class HnrPipeline extends WorkflowEntrypoint {
       // A published episode remains playable while a repair is in flight. Its
       // replacement media is promoted only after finalize succeeds.
       if (!(recoveryOriginal?.status === 'ready' && recoveryOriginal?.audioUrl)) {
-        await patchDrama(db, dramaId, { status: 'running' })
+        await patchDrama(db, dramaId, {
+          status: 'running',
+          error: null,
+          failureClass: null,
+          failureCode: null,
+          failureMessage: null,
+        })
       }
 
       // ── Source ─────────────────────────────────────────────────────────────
@@ -74,46 +90,57 @@ export class HnrPipeline extends WorkflowEntrypoint {
 
       if (!artifactId) {
 
-      // Project cast canon: pinned host portraits + the show's portrait style,
-      // inherited by every episode at creation (the platform seeds them before
-      // generation, so hosts are never re-rendered). One GET, PATCH only when
-      // out of date; tolerant of platform builds that predate the endpoint —
-      // the per-episode 'pin headshots' step stays as the fallback.
-      await runWorkflowStepOnce(step, 'ensure cast canon', async () => {
-        try {
-          const canon = await sh.getCastCanon(projectId)
-          const have = new Map((canon?.content?.characters ?? []).map((c) => [c.name.toUpperCase(), c.avatarUrl]))
-          const current = canon?.content?.avatarStyle === AVATAR_STYLE
-            && HOSTS.every((h) => have.get(h.name) === hostAvatarUrl(h.name))
-          if (!current) {
-            await sh.patchCastCanon(projectId, {
-              avatarStyle: AVATAR_STYLE,
-              characters: HOSTS.map((h) => ({ name: h.name, avatarUrl: hostAvatarUrl(h.name) })),
-            })
-            await note('Refreshed the show cast canon (portraits + style)')
-          }
-        } catch { /* endpoint not deployed yet — pin step covers the hosts */ }
-      })
+      let sourceId = null
+      if (!isUpstreamRecovery) {
+        // Project cast canon: pinned host portraits + the show's portrait style,
+        // inherited by every episode at creation (the platform seeds them before
+        // generation, so hosts are never re-rendered). One GET, PATCH only when
+        // out of date; tolerant of platform builds that predate the endpoint —
+        // the per-episode 'pin headshots' step stays as the fallback.
+        await runWorkflowStepOnce(step, 'ensure cast canon', async () => {
+          try {
+            const canon = await sh.getCastCanon(projectId)
+            const have = new Map((canon?.content?.characters ?? []).map((c) => [c.name.toUpperCase(), c.avatarUrl]))
+            const current = canon?.content?.avatarStyle === AVATAR_STYLE
+              && HOSTS.every((h) => have.get(h.name) === hostAvatarUrl(h.name))
+            if (!current) {
+              await sh.patchCastCanon(projectId, {
+                avatarStyle: AVATAR_STYLE,
+                characters: HOSTS.map((h) => ({ name: h.name, avatarUrl: hostAvatarUrl(h.name) })),
+              })
+              await note('Refreshed the show cast canon (portraits + style)')
+            }
+          } catch { /* endpoint not deployed yet — pin step covers the hosts */ }
+        })
 
-      await note('Adding this episode to HNRadio…')
-      const sourceId = await this.hardStep(step, 'add source', () =>
-        sh.addTextSource(projectId, {
-          content: threadToTranscript(thread),
-          label: `HN thread ${thread.id}`,
-          idempotencyKey: `${dramaId}-source`,
-        }), { replaySafe: true })
-      await this.pollChunked(step, 'source', 8, async () => {
-        const res = await sh.request(`/story-projects/${projectId}/sources/${sourceId}`)
-        const status = res.source?.status
-        if (status === 'READY' || status === undefined) return 'done'
-        if (status === 'FAILED') throw new Error(res.source?.failureMessage || 'Source extraction failed.')
-        return 'pending'
-      })
+        await note('Adding this episode to HNRadio…')
+        sourceId = await this.hardStep(step, 'add source', () =>
+          sh.addTextSource(projectId, {
+            content: threadToTranscript(thread),
+            label: `HN thread ${thread.id}`,
+            idempotencyKey: `${dramaId}-source`,
+          }), { replaySafe: true })
+        await this.pollChunked(step, 'source', 8, async () => {
+          const res = await sh.request(`/story-projects/${projectId}/sources/${sourceId}`)
+          const status = res.source?.status
+          if (status === 'READY' || status === undefined) return 'done'
+          if (status === 'FAILED') throw new SleeperHitError(
+            res.source?.failureMessage || 'Source extraction failed.',
+            { code: res.source?.failureCode },
+          )
+          return 'pending'
+        })
+      } else {
+        await note(resumeJobId
+          ? `Resuming existing Sleeper Hit job ${resumeJobId}…`
+          : `Resuming existing Sleeper Hit plan ${resumePlanId}…`)
+      }
 
       // Preassign the complete recurring cast before Sleeper starts the table
       // read. First-run/incomplete settings deliberately omit voiceMap so the
       // existing AI assignment + post-artifact pinHostVoices bootstrap remains
-      // intact. This generation block is skipped entirely on resume/repair.
+      // intact. Upstream recovery reads this setting only when a resumed plan
+      // still needs its first job; it never creates another source.
       const pinnedVoices = await runWorkflowStepOnce(
         step,
         'load pinned voices',
@@ -127,142 +154,181 @@ export class HnrPipeline extends WorkflowEntrypoint {
       // map (Sleeper requires it to cover EVERY speaking character) and rely on
       // automatic casting + the pinHostVoices() repair that follows the artifact.
       let includePinnedCast = true
-      for (let round = 1; artifactId === null; round++) {
-        const brief = buildBrief(thread, pageTarget)
-        let planId = null
-        for (let attempt = 1; attempt <= 4 && !planId; attempt++) {
-          await note(attempt === 1
-            ? `Planning the podcast at ${pageTarget} pages (cast, scenes, music, SFX)…`
-            : `Re-planning (attempt ${attempt})…`)
-          try {
-            const plan = await this.hardStep(step, `create plan r${round}a${attempt}`, () => sh.createTableReadPlan(projectId, {
-              title: brief.title,
-              target: brief.target,
-              creativeBrief: brief.creativeBrief,
-              styleConstraints: brief.styleConstraints,
-              sourceIds: [sourceId],
-              narrationPolicy: 'suppress',
-              idempotencyKey: `${dramaId}-plan-r${round}-a${attempt}`,
-            }), { replaySafe: true })
-            await patchDrama(db, dramaId, { planId: plan.id })
-            const status = await this.pollChunked(step, `plan r${round}a${attempt}`, 25, async () => {
-              const res = await sh.request(`/story-plans/${plan.id}`)
-              const s = res.plan?.status
-              if (s === 'REQUIRES_APPROVAL' || s === 'APPROVED' || s === 'READY') return s
-              if (s === 'FAILED' || s === 'REJECTED') throw new Error(res.plan?.failureMessage || 'Plan generation failed.')
-              return 'pending'
+      const pollPlanStatus = (label, planId) =>
+        this.pollChunked(step, label, 25, async () => {
+          const res = await sh.request(`/story-plans/${planId}`)
+          const status = res.plan?.status
+          if (status === 'REQUIRES_APPROVAL' || status === 'APPROVED' || status === 'READY') return status
+          if (status === 'FAILED' || status === 'REJECTED') {
+            throw new SleeperHitError(res.plan?.failureMessage || 'Plan generation failed.', {
+              code: res.plan?.failureCode,
             })
-            if (status === 'REQUIRES_APPROVAL') {
-              await note('Approving the blueprint…')
-              await this.hardStep(step, `approve r${round}a${attempt}`, () =>
-                sh.request(`/story-plans/${plan.id}/approve`, {
-                  method: 'POST',
-                  idempotencyKey: `${dramaId}-approve-${plan.id}`,
-                  // The nightly pipeline runs with the operator's standing
-                  // approval; Sleeper requires the confirmation flag explicitly.
-                  body: { userConfirmed: true },
-                }), { replaySafe: true })
-            }
-            planId = plan.id
-          } catch (err) {
-            if (attempt === 4) throw err
-            await note(`Plan attempt ${attempt} failed (${err?.message || err}); retrying…`)
           }
-        }
+          return 'pending'
+        })
+      const pollJobArtifact = (label, jobId) =>
+        this.pollChunked(step, label, STORY_JOB_POLL_CHUNKS, async () => {
+          const res = await sh.request(`/story-jobs/${jobId}`)
+          const job = res.job
+          if (job?.status === 'READY') {
+            const art = (job.artifacts ?? []).find((candidate) => candidate.type === 'table_read')
+              ?? (job.artifacts ?? [])[0]
+            if (!art?.id) throw new SleeperHitError('Job finished but produced no artifact.')
+            return art.id
+          }
+          if (job?.status === 'FAILED' || job?.status === 'CANCELED') {
+            throw new SleeperHitError(job?.failureMessage || `Table read ${job?.status}.`, {
+              code: job?.failureCode,
+            })
+          }
+          return 'pending'
+        })
+      const approvePlanForNightly = async (label, planId, status) => {
+        if (status !== 'REQUIRES_APPROVAL') return
+        await note('Approving the blueprint…')
+        await this.hardStep(step, label, () =>
+          sh.request(`/story-plans/${planId}/approve`, {
+            method: 'POST',
+            idempotencyKey: `${dramaId}-approve-${planId}`,
+            // The nightly pipeline runs with the operator's standing approval;
+            // Sleeper requires the confirmation flag explicitly.
+            body: { userConfirmed: true },
+          }), { replaySafe: true })
+      }
 
-        await note('Performing the podcast — writing, voicing, scoring…')
-        try {
-          let jobId = null
-          let jobRoll = 0
-          for (let attempt = 1; attempt <= 3 && artifactId === null; attempt++) {
+      if (resumeJobId) {
+        await this.hardStep(step, `resume job ${resumeJobId}`, () =>
+          sh.resumeJob(
+            resumeJobId,
+            `${event.payload.recoveryRunId || dramaId}-resume-job-${resumeJobId}`,
+          ), { replaySafe: true })
+        await patchDrama(db, dramaId, { jobId: resumeJobId })
+        artifactId = await pollJobArtifact(`resumed job ${resumeJobId}`, resumeJobId)
+      } else {
+        let pendingResumePlanId = resumePlanId
+        for (let round = 1; artifactId === null; round++) {
+          const brief = buildBrief(thread, pageTarget)
+          let planId = null
+          if (pendingResumePlanId) {
+            planId = pendingResumePlanId
+            await this.hardStep(step, `resume plan ${planId}`, () =>
+              sh.resumePlan(
+                planId,
+                `${event.payload.recoveryRunId || dramaId}-resume-plan-${planId}`,
+              ), { replaySafe: true })
+            await patchDrama(db, dramaId, { planId })
+            const status = await pollPlanStatus(`resumed plan ${planId}`, planId)
+            await approvePlanForNightly(`approve resumed plan ${planId}`, planId, status)
+            pendingResumePlanId = null
+          }
+          for (let attempt = 1; attempt <= 4 && !planId; attempt++) {
+            await note(attempt === 1
+              ? `Planning the podcast at ${pageTarget} pages (cast, scenes, music, SFX)…`
+              : `Re-planning (attempt ${attempt})…`)
             try {
-              // Resume the round's existing job on retry — a client-side poll
-              // failure does NOT mean the server-side job failed, and a fresh
-              // job would double-spend credits. jobRoll bumps only when we
-              // DELIBERATELY abandon a job (terminal failure / thin script);
-              // without it the idempotency key would hand back the corpse.
-              jobId = jobId ?? await this.hardStep(step, `create job r${round}j${jobRoll}`, async () => {
-                const artifactRequests = buildStoryJobArtifactRequests({
-                  existingArtifactId: artifactId,
-                  pinnedVoices: includePinnedCast ? pinnedVoices : null,
-                  narrationPolicy: 'suppress',
-                  notes: brief.performanceNotes,
-                })
-                if (!artifactRequests) throw new Error('Existing artifacts must use resume/repair, not createJob.')
-                return sh.request('/story-jobs', {
-                  method: 'POST',
-                  idempotencyKey: `${dramaId}-job-r${round}-j${jobRoll}`,
-                  body: {
-                    storyPlanId: planId,
-                    artifactRequests,
-                  },
-                }).then((r) => r.job.id)
-              }, { replaySafe: true })
-              await patchDrama(db, dramaId, { jobId })
-              artifactId = await this.pollChunked(step, `job r${round}a${attempt}`, STORY_JOB_POLL_CHUNKS, async () => {
-                const res = await sh.request(`/story-jobs/${jobId}`)
-                const job = res.job
-                if (job?.status === 'READY') {
-                  const art = (job.artifacts ?? []).find((a) => a.type === 'table_read') ?? (job.artifacts ?? [])[0]
-                  if (!art?.id) throw new Error('Job finished but produced no artifact.')
-                  return art.id
-                }
-                if (job?.status === 'FAILED' || job?.status === 'CANCELED') {
-                  throw new Error(job?.failureMessage || `Table read ${job?.status}.`)
-                }
-                return 'pending'
-              })
+              const plan = await this.hardStep(step, `create plan r${round}a${attempt}`, () => sh.createTableReadPlan(projectId, {
+                title: brief.title,
+                target: brief.target,
+                creativeBrief: brief.creativeBrief,
+                styleConstraints: brief.styleConstraints,
+                sourceIds: [sourceId],
+                narrationPolicy: 'suppress',
+                idempotencyKey: `${dramaId}-plan-r${round}-a${attempt}`,
+              }), { replaySafe: true })
+              await patchDrama(db, dramaId, { planId: plan.id })
+              const status = await pollPlanStatus(`plan r${round}a${attempt}`, plan.id)
+              await approvePlanForNightly(`approve r${round}a${attempt}`, plan.id, status)
+              planId = plan.id
+            } catch (err) {
+              if (classifySystemicFailure(err)) throw err
+              if (attempt === 4) throw err
+              await note(`Plan attempt ${attempt} failed (${err?.message || err}); retrying…`)
+            }
+          }
 
-              // Length gate: the writer is high-variance — some rolls produce
-              // 100+ dialogue entries (~9 min spoken), others 40 (~4 min) from
-              // the SAME brief. The audio is always fine; thin episodes were
-              // under-WRITTEN, not truncated. Measure actual SPOKEN words and
-              // reroll a fresh performance when far under the page target
-              // A valid fast panel take lands around 56-60 spoken words/page;
-              // reject only below 55/page so we stop discarding good audio.
-              const spokenWords = await runWorkflowStepOnce(step, `measure r${round}a${attempt}`, async () => {
-                const res = await sh.request(`/artifacts/${artifactId}/script?limit=500`)
-                const entries = res.script?.selection?.entries ?? res.script?.entries ?? []
-                return entries.reduce(
-                  (sum, e) => sum + String(e.text ?? '').trim().split(/\s+/).filter(Boolean).length, 0)
-              }).catch(() => null)
-              const minSpoken = minimumSpokenWords(pageTarget)
-              if (spokenWords !== null && isSpokenTakeThin(spokenWords, pageTarget)) {
-                if (attempt < 3) {
-                  await note(`Script came in thin (${spokenWords} spoken words, want ${minSpoken}+) — rolling a fresh take…`)
+          await note('Performing the podcast — writing, voicing, scoring…')
+          try {
+            let jobId = null
+            let jobRoll = 0
+            for (let attempt = 1; attempt <= 3 && artifactId === null; attempt++) {
+              try {
+                // Resume the round's existing job on retry — a client-side poll
+                // failure does NOT mean the server-side job failed, and a fresh
+                // job would double-spend credits. jobRoll bumps only when we
+                // DELIBERATELY abandon a job (terminal failure / thin script);
+                // without it the idempotency key would hand back the corpse.
+                jobId = jobId ?? await this.hardStep(step, `create job r${round}j${jobRoll}`, async () => {
+                  const artifactRequests = buildStoryJobArtifactRequests({
+                    existingArtifactId: artifactId,
+                    pinnedVoices: includePinnedCast ? pinnedVoices : null,
+                    narrationPolicy: 'suppress',
+                    notes: brief.performanceNotes,
+                  })
+                  if (!artifactRequests) throw new Error('Existing artifacts must use resume/repair, not createJob.')
+                  return sh.request('/story-jobs', {
+                    method: 'POST',
+                    idempotencyKey: `${dramaId}-job-r${round}-j${jobRoll}`,
+                    body: {
+                      storyPlanId: planId,
+                      artifactRequests,
+                    },
+                  }).then((r) => r.job.id)
+                }, { replaySafe: true })
+                await patchDrama(db, dramaId, { jobId })
+                artifactId = await pollJobArtifact(`job r${round}a${attempt}`, jobId)
+
+                // Length gate: the writer is high-variance — some rolls produce
+                // 100+ dialogue entries (~9 min spoken), others 40 (~4 min) from
+                // the SAME brief. The audio is always fine; thin episodes were
+                // under-WRITTEN, not truncated. Measure actual SPOKEN words and
+                // reroll a fresh performance when far under the page target
+                // A valid fast panel take lands around 56-60 spoken words/page;
+                // reject only below 55/page so we stop discarding good audio.
+                const spokenWords = await runWorkflowStepOnce(step, `measure r${round}a${attempt}`, async () => {
+                  const res = await sh.request(`/artifacts/${artifactId}/script?limit=500`)
+                  const entries = res.script?.selection?.entries ?? res.script?.entries ?? []
+                  return entries.reduce(
+                    (sum, e) => sum + String(e.text ?? '').trim().split(/\s+/).filter(Boolean).length, 0)
+                }).catch(() => null)
+                const minSpoken = minimumSpokenWords(pageTarget)
+                if (spokenWords !== null && isSpokenTakeThin(spokenWords, pageTarget)) {
+                  if (attempt < 3) {
+                    await note(`Script came in thin (${spokenWords} spoken words, want ${minSpoken}+) — rolling a fresh take…`)
+                    jobId = null
+                    jobRoll++
+                    artifactId = null
+                    continue
+                  }
+                  await note(`Accepting a thin take (${spokenWords} spoken words) — retries exhausted`)
+                }
+              } catch (err) {
+                const msg = err?.message || String(err)
+                if (classifySystemicFailure(err)) throw err
+                if (includePinnedCast && attempt < 3 && /voiceMap is missing/i.test(msg)) {
+                  includePinnedCast = false
                   jobId = null
                   jobRoll++
-                  artifactId = null
+                  await note('The blueprint cast a guest commenter — recasting with automatic voice assignment…')
                   continue
                 }
-                await note(`Accepting a thin take (${spokenWords} spoken words) — retries exhausted`)
+                const overBudget = OUTPUT_BUDGET_RE.test(msg)
+                const transient = !/time budget|timed out/i.test(msg)
+                if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
+                // Server-side terminal failure → new job next attempt; anything
+                // else (network/poll trouble) resumes the same job.
+                if (/FAILED|CANCELED|generation failed/i.test(msg)) { jobId = null; jobRoll++ }
+                await note(`Performance attempt ${attempt} failed (${msg}); retrying…`)
               }
-            } catch (err) {
-              const msg = err?.message || String(err)
-              if (includePinnedCast && attempt < 3 && /voiceMap is missing/i.test(msg)) {
-                includePinnedCast = false
-                jobId = null
-                jobRoll++
-                await note('The blueprint cast a guest commenter — recasting with automatic voice assignment…')
-                continue
-              }
-              const overBudget = OUTPUT_BUDGET_RE.test(msg)
-              const transient = !/time budget|timed out/i.test(msg)
-              if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
-              // Server-side terminal failure → new job next attempt; anything
-              // else (network/poll trouble) resumes the same job.
-              if (/FAILED|CANCELED|generation failed/i.test(msg)) { jobId = null; jobRoll++ }
-              await note(`Performance attempt ${attempt} failed (${msg}); retrying…`)
             }
+          } catch (err) {
+            const msg = err?.message || String(err)
+            if (!isUpstreamRecovery && round < 3 && pageTarget > 4 && OUTPUT_BUDGET_RE.test(msg)) {
+              pageTarget = Math.max(4, pageTarget - 3)
+              await note(`Script blew the writer's output budget — re-planning tighter at ${pageTarget} pages…`)
+              continue
+            }
+            throw err
           }
-        } catch (err) {
-          const msg = err?.message || String(err)
-          if (round < 3 && pageTarget > 4 && OUTPUT_BUDGET_RE.test(msg)) {
-            pageTarget = Math.max(4, pageTarget - 3)
-            await note(`Script blew the writer's output budget — re-planning tighter at ${pageTarget} pages…`)
-            continue
-          }
-          throw err
         }
       }
       await patchDrama(db, dramaId, { artifactId })
@@ -272,7 +338,9 @@ export class HnrPipeline extends WorkflowEntrypoint {
       // ── Post-production ────────────────────────────────────────────────────
       // Recovery gets a fresh operation scope so it can replace a previously
       // failed keyed render, while retries of this same Workflow stay safe.
-      const recoveryRunId = event.payload.repairRunId || event.payload.resumeRunId
+      const recoveryRunId = event.payload.repairRunId
+        || event.payload.resumeRunId
+        || event.payload.recoveryRunId
       const postProductionScope = postProductionIdempotencyScope(dramaId, recoveryRunId)
       await step.sleep('post-prod break 1', '2 seconds')
       await runWorkflowStepOnce(step, 'pin voices', async () => {
@@ -337,7 +405,14 @@ export class HnrPipeline extends WorkflowEntrypoint {
         })
       }
 
-      await patchDrama(db, dramaId, { status: 'ready', audioUrl, error: null })
+      await patchDrama(db, dramaId, {
+        status: 'ready',
+        audioUrl,
+        error: null,
+        failureClass: null,
+        failureCode: null,
+        failureMessage: null,
+      })
       await note('Done — your podcast is ready.')
 
       await step.sleep('post-ready break', '2 seconds')
@@ -387,12 +462,23 @@ export class HnrPipeline extends WorkflowEntrypoint {
       }
     } catch (err) {
       const message = err?.message || String(err)
+      const failureClass = classifySystemicFailure(err)
+      const failure = {
+        error: message,
+        failureClass,
+        failureCode: err?.code || null,
+        failureMessage: message,
+      }
       if ((isRepair || isResume) && recoveryOriginal?.status === 'ready' && recoveryOriginal?.audioUrl) {
         // Do not take the currently published/playable episode offline merely
         // because replacement post-production or feed refresh failed.
-        await patchDrama(db, dramaId, { status: 'ready', error: `Repair failed: ${message}` })
+        await patchDrama(db, dramaId, {
+          ...failure,
+          status: 'ready',
+          error: `Repair failed: ${message}`,
+        })
       } else {
-        await patchDrama(db, dramaId, { status: 'failed', error: message })
+        await patchDrama(db, dramaId, { ...failure, status: 'failed' })
       }
       await note(`Failed: ${err?.message || err}`)
       throw err
