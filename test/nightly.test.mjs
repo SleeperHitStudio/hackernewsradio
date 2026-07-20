@@ -863,6 +863,57 @@ test('the same failed episode is resumed only once when two dates reference it',
   assert.equal(h.dramas.get(episode.id).status, 'queued')
 })
 
+test('the newest batch exclusively owns artifact recovery for a shared episode', async () => {
+  const firstDate = '2026-07-17'
+  const secondDate = '2026-07-18'
+  const episode = {
+    id: 'episode_shared_artifact',
+    hnId: '402',
+    status: 'ready',
+    artifactId: 'artifact_shared',
+    audioUrl: 'https://audio.example/shared.mp3',
+    url: 'https://news.ycombinator.com/item?id=402',
+    title: 'Story 402',
+    progress: [{ at: '2026-07-19T05:00:00.000Z', message: 'Done — your podcast is ready.' }],
+  }
+  const sharedItem = {
+    hnId: episode.hnId,
+    url: episode.url,
+    title: episode.title,
+    episodeId: episode.id,
+    workflowId: 'terminal_shared_workflow',
+    attempt: 1,
+    recoveryAttempts: 0,
+    status: 'ready',
+  }
+  const h = harness({
+    now: '2026-07-19T06:00:00.000Z',
+    dramas: new Map([[episode.id, episode]]),
+    topIds: [],
+  })
+  h.workflowStatuses.set('terminal_shared_workflow', 'errored')
+  h.settings.set('dailyTopPendingDates', [firstDate, secondDate])
+  for (const date of [firstDate, secondDate]) {
+    h.settings.set(nightlyBatchKey(date), {
+      date,
+      status: 'running',
+      target: 5,
+      items: [structuredClone(sharedItem)],
+      errors: [],
+    })
+  }
+
+  const batches = await runNightlyReconciliation(h.env, {
+    now: new Date('2026-07-19T06:00:00.000Z'),
+    dependencies: h.dependencies,
+  })
+
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.resumeArtifactId, episode.artifactId)
+  assert.equal(batches[0].items[0].status, 'superseded')
+  assert.equal(batches[1].items[0].status, 'queued')
+})
+
 test('a due probe resumes the same plan when failure happened before job creation', async () => {
   const date = '2026-07-18'
   const h = harness({
