@@ -187,8 +187,10 @@ export function isPublishedEpisode(drama) {
 
 export function activeBatchItems(batch) {
   // Published items still occupy one of the five promised slots; only an
-  // exhausted item is replaced by a lower-ranked candidate.
-  return (batch?.items ?? []).filter((item) => item.status !== 'exhausted')
+  // exhausted/superseded item is replaced by a lower-ranked candidate.
+  return (batch?.items ?? []).filter(
+    (item) => !['exhausted', 'superseded'].includes(item.status),
+  )
 }
 
 const nowIso = () => new Date().toISOString()
@@ -213,6 +215,10 @@ async function loadGenerationController(env, deps) {
     // invocation remains restricted. The following hourly tick can then refill
     // normally without a single success releasing a same-tick fan-out.
     restrictedForRun: Boolean(circuit),
+    // Starting/resuming pre-artifact work is globally serialized even while
+    // the circuit is closed. Existing active work and artifact recovery do not
+    // consume this slot.
+    generationStarted: false,
     probeStarted: false,
     probeStatusChecked: false,
     probeStillActive: false,
@@ -275,9 +281,11 @@ async function acquireGenerationSlot(env, controller, deps, {
 }) {
   const circuit = controller.circuit
   if (!circuit) {
-    return controller.restrictedForRun
-      ? { allowed: false, probe: false }
-      : { allowed: true, probe: false }
+    if (controller.restrictedForRun || controller.generationStarted) {
+      return { allowed: false, probe: false }
+    }
+    controller.generationStarted = true
+    return { allowed: true, probe: false }
   }
   if (controller.probeStarted) return { allowed: false, probe: false }
 
@@ -301,6 +309,7 @@ async function acquireGenerationSlot(env, controller, deps, {
   if (controller.probeStillActive) return { allowed: false, probe: false }
 
   controller.probeStarted = true
+  controller.generationStarted = true
   const reserved = {
     ...circuit,
     updatedAt: now.toISOString(),
@@ -559,7 +568,15 @@ async function resumeGenerationWorkflow(env, drama, deps) {
   return workflowId
 }
 
-async function recoverItem(env, batch, item, drama, deps, generationController) {
+async function recoverItem(
+  env,
+  batch,
+  item,
+  drama,
+  deps,
+  generationController,
+  { allowGeneration = true } = {},
+) {
   const failureMessage = drama?.failureMessage || drama?.error || item.lastError
   const failureClass = ['provider', 'quota', 'contract'].includes(drama?.failureClass)
     ? drama.failureClass
@@ -599,6 +616,16 @@ async function recoverItem(env, batch, item, drama, deps, generationController) 
       failureClass,
       message: failureMessage,
     })
+  }
+
+  if (!allowGeneration) {
+    item.status = 'superseded'
+    item.lastWorkflowStatus = 'superseded'
+    item.lastError = failureMessage
+      ? `Generation superseded by a newer nightly batch. Last failure: ${failureMessage}`
+      : 'Generation superseded by a newer nightly batch.'
+    item.updatedAt = nowIso()
+    return
   }
 
   const attempt = Number(item.attempt || 1)
@@ -655,8 +682,15 @@ async function recoverItem(env, batch, item, drama, deps, generationController) 
   }
 }
 
-async function reconcileItem(env, batch, item, deps, generationController) {
-  if (item.status === 'exhausted') return
+async function reconcileItem(
+  env,
+  batch,
+  item,
+  deps,
+  generationController,
+  { allowGeneration = true } = {},
+) {
+  if (['exhausted', 'superseded'].includes(item.status)) return
   const drama = item.episodeId ? await deps.getDrama(env.DB, item.episodeId) : null
   if (drama?.artifactId || isPublishedEpisode(drama)) {
     await closeGenerationCircuitForProbe(env, generationController, deps, item, drama)
@@ -673,7 +707,15 @@ async function reconcileItem(env, batch, item, deps, generationController) {
     // (a five-story batch shows at most five concurrent errors no matter how
     // many waves have failed), which kept the 'failing' alert from ever firing.
     batch.failureEvents = Number(batch.failureEvents || 0) + 1
-    await recoverItem(env, batch, item, drama, deps, generationController)
+    await recoverItem(
+      env,
+      batch,
+      item,
+      drama,
+      deps,
+      generationController,
+      { allowGeneration },
+    )
     return
   }
 
@@ -708,7 +750,15 @@ async function reconcileItem(env, batch, item, deps, generationController) {
   // A ready episode resuming for publish is not a failure; a dead workflow
   // on an unfinished episode is.
   if (drama?.status !== 'ready') batch.failureEvents = Number(batch.failureEvents || 0) + 1
-  await recoverItem(env, batch, item, drama, deps, generationController)
+  await recoverItem(
+    env,
+    batch,
+    item,
+    drama,
+    deps,
+    generationController,
+    { allowGeneration },
+  )
 }
 
 async function topStories(deps) {
@@ -717,7 +767,8 @@ async function topStories(deps) {
   return ids.slice(0, 100)
 }
 
-async function fillBatch(env, batch, deps, generationController) {
+async function fillBatch(env, batch, deps, generationController, { allowGeneration = true } = {}) {
+  if (!allowGeneration) return
   if (activeBatchItems(batch).length >= NIGHTLY_TARGET) return
   if (generationController.restrictedForRun || generationController.circuit) return
   const attempted = new Set((batch.items ?? []).map((item) => String(item.hnId)))
@@ -751,12 +802,18 @@ async function fillBatch(env, batch, deps, generationController) {
           updatedAt: nowIso(),
         }
       } else {
+        const generationSlot = await acquireGenerationSlot(
+          env,
+          generationController,
+          deps,
+          { batch, item: { hnId, episodeId: null } },
+        )
+        if (!generationSlot.allowed) continue
         const thread = await deps.fetchThread(`https://news.ycombinator.com/item?id=${hnId}`)
-        const slot = activeBatchItems(batch).length
         const created = await createEpisodeWorkflow(env, thread, {
           batchDate: batch.date,
           attempt: 1,
-          staggerSec: slot * 600,
+          staggerSec: 0,
         }, deps)
         item = {
           hnId,
@@ -775,8 +832,16 @@ async function fillBatch(env, batch, deps, generationController) {
       attempted.add(hnId)
       await persistBatch(env.DB, batch, deps)
       if (existing && ['ready', 'failed'].includes(existing.status)) {
-        await reconcileItem(env, batch, item, deps, generationController)
+        await reconcileItem(
+          env,
+          batch,
+          item,
+          deps,
+          generationController,
+          { allowGeneration },
+        )
       }
+      if (generationController.generationStarted) break
     } catch (error) {
       recordBatchError(batch, `HN ${hnId}: ${error?.message || error}`)
       await persistBatch(env.DB, batch, deps)
@@ -787,6 +852,8 @@ async function fillBatch(env, batch, deps, generationController) {
 export async function reconcileNightlyBatch(env, date, {
   dependencies = {},
   generationController: suppliedGenerationController = null,
+  allowGeneration = true,
+  supersededByDate = null,
 } = {}) {
   const deps = { ...defaultDependencies, ...dependencies }
   const generationController = suppliedGenerationController
@@ -805,10 +872,21 @@ export async function reconcileNightlyBatch(env, date, {
     await persistBatch(env.DB, batch, deps)
   }
   if (batch.status === 'complete') return batch
+  if (!allowGeneration) {
+    batch.generationSupersededAt ??= nowIso()
+    batch.supersededByDate ??= supersededByDate
+  }
 
   for (const item of batch.items) {
     try {
-      await reconcileItem(env, batch, item, deps, generationController)
+      await reconcileItem(
+        env,
+        batch,
+        item,
+        deps,
+        generationController,
+        { allowGeneration },
+      )
     } catch (error) {
       item.lastError = error?.message || String(error)
       item.updatedAt = nowIso()
@@ -818,20 +896,28 @@ export async function reconcileNightlyBatch(env, date, {
   }
 
   try {
-    await fillBatch(env, batch, deps, generationController)
+    await fillBatch(env, batch, deps, generationController, { allowGeneration })
   } catch (error) {
     recordBatchError(batch, error?.message || error)
   }
 
   const published = batch.items.filter((item) => item.status === 'published').length
   batch.published = published
-  batch.status = published >= NIGHTLY_TARGET ? 'complete' : 'running'
+  if (published >= NIGHTLY_TARGET) {
+    batch.status = 'complete'
+  } else if (!allowGeneration) {
+    batch.status = batch.items.some((item) => isActiveWorkflowStatus(item.status))
+      ? 'draining'
+      : 'superseded'
+  } else {
+    batch.status = 'running'
+  }
   if (batch.status === 'complete') {
     batch.completedAt = nowIso()
     await deps.setSetting(env.DB, 'dailyTopLastRun', date)
   }
   await persistBatch(env.DB, batch, deps)
-  if (batch.status !== 'complete') {
+  if (batch.status === 'running') {
     await maybeSendDistressAlert(env, batch, deps).catch(() => {})
   }
   return batch
@@ -854,6 +940,15 @@ export async function runNightlyReconciliation(env, {
   pendingDates = [...new Set(pendingDates)].sort()
   await deps.setSetting(env.DB, 'dailyTopPendingDates', pendingDates)
 
+  let generationBatchDate = null
+  for (const candidateDate of [...pendingDates].reverse()) {
+    const candidateBatch = await deps.getSetting(env.DB, nightlyBatchKey(candidateDate))
+    if (!candidateBatch?.generationSupersededAt) {
+      generationBatchDate = candidateDate
+      break
+    }
+  }
+
   const generationController = await loadGenerationController(env, deps)
   const stillPending = []
   const batches = []
@@ -862,9 +957,11 @@ export async function runNightlyReconciliation(env, {
       const batch = await reconcileNightlyBatch(env, batchDate, {
         dependencies: deps,
         generationController,
+        allowGeneration: batchDate === generationBatchDate,
+        supersededByDate: generationBatchDate,
       })
       batches.push(batch)
-      if (batch.status !== 'complete') stillPending.push(batchDate)
+      if (!['complete', 'superseded'].includes(batch.status)) stillPending.push(batchDate)
     } catch {
       // Keep the date pending so the next hourly cron retries reconciliation.
       stillPending.push(batchDate)

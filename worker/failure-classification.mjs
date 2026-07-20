@@ -8,7 +8,7 @@ export const PROVIDER_BLOCK_RE =
   /high[- ]frequency non[- ]compliant requests|detected high[- ]frequency|temporarily blocked/i
 
 export const QUOTA_CLASS_RE =
-  /usage limits|quota (?:exceeded|reached)|insufficient_credits|insufficient credits|credit balance|exceeded your current|payment required|billing|incorrect api key|rate limit/i
+  /usage limits|quota (?:exceeded|reached)|insufficient_credits|insufficient credits|credit balance|requires more credits|can only afford|add more credits|exceeded your current|payment required|billing|incorrect api key|rate limit/i
 
 export const CONTRACT_CLASS_RE =
   /is invalid:|Too big:|Invalid key in record|Supply every speaking character|Table-read outline page budgets total|scriptBlueprint\.pageTarget|Schema validation failed|response did not match schema/i
