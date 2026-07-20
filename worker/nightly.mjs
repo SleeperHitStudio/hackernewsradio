@@ -10,12 +10,33 @@ import {
   setSetting,
   upsertDrama,
 } from './store.mjs'
+import {
+  CONTRACT_CLASS_RE,
+  PROVIDER_BLOCK_RE,
+  QUOTA_CLASS_RE,
+  classifySystemicFailure,
+  isContractClassFailure,
+  isProviderBlockedFailure,
+  isQuotaClassFailure,
+} from './failure-classification.mjs'
+
+export {
+  CONTRACT_CLASS_RE,
+  PROVIDER_BLOCK_RE,
+  QUOTA_CLASS_RE,
+  classifySystemicFailure,
+  isContractClassFailure,
+  isProviderBlockedFailure,
+  isQuotaClassFailure,
+} from './failure-classification.mjs'
 
 export const NIGHTLY_TARGET = 5
 export const NIGHTLY_MAX_ATTEMPTS = 3
 export const NIGHTLY_MUSIC_STALL_TIMEOUT_MS = 60 * 60 * 1000
 export const NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS = 60 * 60 * 1000
 export const NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS = 2
+export const NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS = 60 * 60 * 1000
+export const NIGHTLY_GENERATION_CIRCUIT_KEY = 'nightlyGenerationCircuit'
 export const PUBLISHED_PROGRESS_MESSAGE = 'Published to the HNR podcast feed.'
 
 const MUSIC_WRITE_BUDGET_CHECKPOINT = Object.freeze({
@@ -30,44 +51,21 @@ const MUSIC_WATCHDOG_RESUME_MESSAGE =
 
 const ACTIVE_WORKFLOW_STATUSES = new Set(['queued', 'running', 'waiting', 'waitingforpause', 'paused'])
 
-/**
- * A quota cliff: the provider works, then a spend cap / exhausted balance
- * makes EVERY call fail instantly until it resets. Distinct from transient
- * flakes — retrying different stories cannot help, only time or a top-up can.
- */
-export const QUOTA_CLASS_RE =
-  /usage limits|quota (?:exceeded|reached)|insufficient_credits|insufficient credits|credit balance|exceeded your current|payment required|billing/i
-
-export function isQuotaClassFailure(message) {
-  return QUOTA_CLASS_RE.test(String(message || ''))
-}
-
-/**
- * Contract-class failures: the platform rejected OUR request shape (schema
- * caps, invalid fields, incomplete voice maps). Deterministic per deploy —
- * the same request fails the same way every time, so retries only waste
- * attempts and a code/config fix is required. Alert on FIRST occurrence.
- */
-export const CONTRACT_CLASS_RE =
-  /is invalid:|Too big:|Invalid key in record|Supply every speaking character/i
-
-export function isContractClassFailure(message) {
-  return CONTRACT_CLASS_RE.test(String(message || ''))
-}
-
 const ALERT_FROM = 'HN Radio <noreply@updates.sleeperhit.studio>'
 // One full first-wave wipeout (five stories, zero published) is alertable.
 export const ALERT_MIN_FAILURES = 5
 
 const ALERT_SUBJECTS = {
   contract: 'blocked by a contract/validation error — needs a fix, retries cannot help',
+  provider: 'blocked by a provider policy throttle',
   quota: 'blocked by a provider quota cliff',
   failing: 'is failing repeatedly',
 }
 
 const ALERT_FOOTERS = {
-  contract: 'The platform is REJECTING our requests (schema/validation). This is deterministic — hourly retries re-fail identically until a code or config fix ships. Fix the contract violation, deploy, and the next tick recovers automatically.',
-  quota: 'A provider quota/funding cliff is blocking generation. Retries continue hourly without burning attempts, but only a top-up, cap reset, or provider rebind will unblock it.',
+  contract: 'The platform is REJECTING our requests (schema/validation). This is deterministic. The global generation circuit is open and permits only one hourly recovery probe until a fix deploys.',
+  provider: 'The configured writer/planner provider is policy-throttling requests. The global generation circuit is open and permits only one hourly recovery probe; provider failover or the reset window must clear it.',
+  quota: 'A provider quota/funding cliff is blocking generation. The global generation circuit is open and permits only one hourly recovery probe; a top-up, cap reset, or provider rebind must clear it.',
   failing: 'Repeated failures with nothing published tonight. Check the episode progress logs on hnradio.net/api/dramas?includeFailed=true.',
 }
 
@@ -88,12 +86,15 @@ export async function maybeSendDistressAlert(env, batch, deps) {
   ].filter(Boolean)
   const contract = (batch.items ?? []).some((item) => item.contractBlockedAt)
     || recentErrors.some((message) => isContractClassFailure(message))
+  const provider = (batch.items ?? []).some((item) => item.providerBlockedAt)
+    || recentErrors.some((message) => isProviderBlockedFailure(message))
   const quota = (batch.items ?? []).some((item) => item.quotaBlockedAt)
     || recentErrors.some((message) => isQuotaClassFailure(message))
   const published = (batch.items ?? []).filter((item) => item.status === 'published').length
 
   let type = null
   if (contract) type = 'contract'
+  else if (provider) type = 'provider'
   else if (quota) type = 'quota'
   else if (published === 0 && Number(batch.failureEvents || 0) >= ALERT_MIN_FAILURES) type = 'failing'
   if (!type) return null
@@ -196,6 +197,146 @@ function dependencyNow(deps) {
   const value = deps.now?.() ?? new Date()
   const date = value instanceof Date ? value : new Date(value)
   return Number.isFinite(date.getTime()) ? date : new Date()
+}
+
+function openCircuitValue(value) {
+  return value?.state === 'open' ? value : null
+}
+
+async function loadGenerationController(env, deps) {
+  const circuit = openCircuitValue(
+    await deps.getSetting(env.DB, NIGHTLY_GENERATION_CIRCUIT_KEY),
+  )
+  return {
+    circuit,
+    // A successful probe closes the persisted circuit immediately, but this
+    // invocation remains restricted. The following hourly tick can then refill
+    // normally without a single success releasing a same-tick fan-out.
+    restrictedForRun: Boolean(circuit),
+    probeStarted: false,
+    probeStatusChecked: false,
+    probeStillActive: false,
+  }
+}
+
+async function saveGenerationCircuit(env, controller, circuit, deps) {
+  controller.circuit = circuit
+  controller.restrictedForRun = true
+  await deps.setSetting(env.DB, NIGHTLY_GENERATION_CIRCUIT_KEY, circuit)
+}
+
+function probeMatches(circuit, item, drama) {
+  if (!circuit) return false
+  return (
+    (circuit.probeEpisodeId && circuit.probeEpisodeId === (drama?.id || item?.episodeId))
+    || (circuit.probeWorkflowId && circuit.probeWorkflowId === item?.workflowId)
+  )
+}
+
+async function openGenerationCircuit(env, controller, deps, {
+  batch,
+  item,
+  drama,
+  failureClass,
+  message,
+}) {
+  const now = dependencyNow(deps)
+  const current = controller.circuit
+  const failedProbe = probeMatches(current, item, drama)
+  const resetProbeWindow = !current
+    || failedProbe
+    || !Number.isFinite(Date.parse(current.nextProbeAt))
+  const circuit = {
+    ...(current ?? {}),
+    state: 'open',
+    failureClass,
+    failureMessage: String(message || 'Nightly generation is systemically blocked.'),
+    openedAt: current?.openedAt ?? now.toISOString(),
+    updatedAt: now.toISOString(),
+    nextProbeAt: resetProbeWindow
+      ? new Date(now.getTime() + NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS).toISOString()
+      : current.nextProbeAt,
+    lastFailureAt: now.toISOString(),
+    lastFailureBatchDate: batch.date,
+    lastFailureHnId: item.hnId,
+    lastFailureEpisodeId: drama?.id || item.episodeId || null,
+    ...(failedProbe ? {
+      lastProbeFailureAt: now.toISOString(),
+      lastProbeFailureEpisodeId: drama?.id || item.episodeId || null,
+    } : {}),
+  }
+  await saveGenerationCircuit(env, controller, circuit, deps)
+  return circuit
+}
+
+async function acquireGenerationSlot(env, controller, deps, {
+  batch,
+  item,
+}) {
+  const circuit = controller.circuit
+  if (!circuit) {
+    return controller.restrictedForRun
+      ? { allowed: false, probe: false }
+      : { allowed: true, probe: false }
+  }
+  if (controller.probeStarted) return { allowed: false, probe: false }
+
+  const now = dependencyNow(deps)
+  const nextProbeMs = Date.parse(circuit.nextProbeAt)
+  if (Number.isFinite(nextProbeMs) && now.getTime() < nextProbeMs) {
+    return { allowed: false, probe: false }
+  }
+  if (!controller.probeStatusChecked && circuit.probeWorkflowId) {
+    controller.probeStatusChecked = true
+    try {
+      const { status } = await workflowState(env, circuit.probeWorkflowId)
+      controller.probeStillActive = isActiveWorkflowStatus(status)
+    } catch (error) {
+      // A missing/expired Workflow is not active and may be replaced by the
+      // due probe. Other inspection failures are retried on the next tick.
+      controller.probeStillActive = !/not found|does not exist|unknown instance/i
+        .test(error?.message || String(error))
+    }
+  }
+  if (controller.probeStillActive) return { allowed: false, probe: false }
+
+  controller.probeStarted = true
+  const reserved = {
+    ...circuit,
+    updatedAt: now.toISOString(),
+    lastProbeAt: now.toISOString(),
+    nextProbeAt: new Date(now.getTime() + NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS).toISOString(),
+    probeCount: Number(circuit.probeCount || 0) + 1,
+    probeBatchDate: batch.date,
+    probeHnId: item.hnId,
+    probeEpisodeId: item.episodeId || null,
+    probeWorkflowId: null,
+  }
+  await saveGenerationCircuit(env, controller, reserved, deps)
+  return { allowed: true, probe: true }
+}
+
+async function recordGenerationProbe(env, controller, deps, {
+  batch,
+  item,
+}) {
+  if (!controller.circuit) return
+  await saveGenerationCircuit(env, controller, {
+    ...controller.circuit,
+    updatedAt: dependencyNow(deps).toISOString(),
+    probeBatchDate: batch.date,
+    probeHnId: item.hnId,
+    probeEpisodeId: item.episodeId || null,
+    probeWorkflowId: item.workflowId || null,
+  }, deps)
+}
+
+async function closeGenerationCircuitForProbe(env, controller, deps, item, drama) {
+  if (!probeMatches(controller.circuit, item, drama)) return false
+  controller.circuit = null
+  controller.restrictedForRun = true
+  await deps.setSetting(env.DB, NIGHTLY_GENERATION_CIRCUIT_KEY, null)
+  return true
 }
 
 function latestEpisodeProgressMs(drama) {
@@ -398,20 +539,42 @@ async function resumeArtifactWorkflow(env, drama) {
   return workflowId
 }
 
-async function recoverItem(env, batch, item, drama, deps) {
-  // Systemic failures fail EVERY story identically: a quota/funding outage
-  // (until the cap resets or the balance is topped up) or a contract/schema
-  // rejection (until a code/config fix deploys). Burning the per-story
-  // attempt budget then just churns through replacement stories that fail
-  // the same way (Jul 16-17). Instead: keep retrying the SAME story hourly
-  // without consuming attempts, and let the distress alert tell the operator.
-  const failureMessage = drama?.error || item.lastError
-  const quotaBlocked = isQuotaClassFailure(failureMessage)
-  const contractBlocked = !quotaBlocked && isContractClassFailure(failureMessage)
-  const blocked = quotaBlocked || contractBlocked
-  if (quotaBlocked) item.quotaBlockedAt = nowIso()
-  if (contractBlocked) item.contractBlockedAt = nowIso()
+async function resumeGenerationWorkflow(env, drama, deps) {
+  const workflowId = deps.randomUUID()
+  const resource = drama?.jobId
+    ? { resumeJobId: drama.jobId }
+    : drama?.planId
+      ? { resumePlanId: drama.planId }
+      : null
+  if (!resource) return null
+  await env.PIPELINE.create({
+    id: workflowId,
+    params: {
+      dramaId: drama.id,
+      url: drama.url,
+      ...resource,
+      recoveryRunId: workflowId,
+    },
+  })
+  return workflowId
+}
 
+async function recoverItem(env, batch, item, drama, deps, generationController) {
+  const failureMessage = drama?.failureMessage || drama?.error || item.lastError
+  const failureClass = ['provider', 'quota', 'contract'].includes(drama?.failureClass)
+    ? drama.failureClass
+    : classifySystemicFailure({
+      failureCode: drama?.failureCode,
+      failureMessage,
+    })
+  const blocked = Boolean(failureClass)
+  if (failureClass === 'provider') item.providerBlockedAt = nowIso()
+  if (failureClass === 'quota') item.quotaBlockedAt = nowIso()
+  if (failureClass === 'contract') item.contractBlockedAt = nowIso()
+
+  // An existing performance is already past generation. Keep its
+  // post-production/publishing recovery independent from the generation
+  // circuit so an MP3 can finish while writer/planner probes are restricted.
   if (drama?.artifactId) {
     const recoveryAttempts = Number(item.recoveryAttempts || 0)
     if (!blocked && recoveryAttempts >= NIGHTLY_MAX_ATTEMPTS) {
@@ -428,6 +591,16 @@ async function recoverItem(env, batch, item, drama, deps) {
     return
   }
 
+  if (blocked) {
+    await openGenerationCircuit(env, generationController, deps, {
+      batch,
+      item,
+      drama,
+      failureClass,
+      message: failureMessage,
+    })
+  }
+
   const attempt = Number(item.attempt || 1)
   if (!blocked && attempt >= NIGHTLY_MAX_ATTEMPTS) {
     item.status = 'exhausted'
@@ -435,30 +608,59 @@ async function recoverItem(env, batch, item, drama, deps) {
     return
   }
 
-  const thread = await deps.fetchThread(item.url)
-  const replacement = await createEpisodeWorkflow(env, thread, {
-    batchDate: batch.date,
-    attempt: blocked ? attempt : attempt + 1,
-  }, deps)
-  const oldEpisodeId = item.episodeId
-  item.episodeId = replacement.drama.id
-  item.workflowId = replacement.workflowId
+  const slot = await acquireGenerationSlot(env, generationController, deps, { batch, item })
+  if (!slot.allowed) {
+    item.status = 'blocked'
+    item.lastWorkflowStatus = 'blocked'
+    item.lastError = failureMessage || generationController.circuit?.failureMessage || 'Nightly generation circuit is open.'
+    item.updatedAt = nowIso()
+    return
+  }
+
+  const resumedWorkflowId = await resumeGenerationWorkflow(env, drama, deps)
+  if (resumedWorkflowId) {
+    item.episodeId = drama.id
+    item.workflowId = resumedWorkflowId
+    await deps.patchDrama(env.DB, drama.id, {
+      status: 'queued',
+      error: null,
+      failureClass: null,
+      failureCode: null,
+      failureMessage: null,
+    })
+  } else {
+    const thread = await deps.fetchThread(item.url)
+    const replacement = await createEpisodeWorkflow(env, thread, {
+      batchDate: batch.date,
+      attempt: blocked ? attempt : attempt + 1,
+    }, deps)
+    const oldEpisodeId = item.episodeId
+    item.episodeId = replacement.drama.id
+    item.workflowId = replacement.workflowId
+    await deps.deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', replacement.drama.id).catch(() => {})
+    if (oldEpisodeId && oldEpisodeId !== replacement.drama.id) {
+      // The created_at guard above normally removes it; this is only a no-op
+      // cleanup for a row whose timestamp was malformed or absent.
+      const old = await deps.getDrama(env.DB, oldEpisodeId)
+      if (old?.status === 'failed') await deps.deleteDrama(env.DB, oldEpisodeId).catch(() => {})
+    }
+  }
   item.attempt = blocked ? attempt : attempt + 1
   item.status = 'queued'
   item.lastWorkflowStatus = 'queued'
+  item.lastError = null
   item.updatedAt = nowIso()
-  await deps.deleteOtherEpisodesOfThread(env.DB, thread.id, 'podcast', replacement.drama.id).catch(() => {})
-  if (oldEpisodeId && oldEpisodeId !== replacement.drama.id) {
-    // The created_at guard above normally removes it; this is only a no-op
-    // cleanup for a row whose timestamp was malformed or absent.
-    const old = await deps.getDrama(env.DB, oldEpisodeId)
-    if (old?.status === 'failed') await deps.deleteDrama(env.DB, oldEpisodeId).catch(() => {})
+  if (slot.probe) {
+    await recordGenerationProbe(env, generationController, deps, { batch, item })
   }
 }
 
-async function reconcileItem(env, batch, item, deps) {
+async function reconcileItem(env, batch, item, deps, generationController) {
   if (item.status === 'exhausted') return
   const drama = item.episodeId ? await deps.getDrama(env.DB, item.episodeId) : null
+  if (drama?.artifactId || isPublishedEpisode(drama)) {
+    await closeGenerationCircuitForProbe(env, generationController, deps, item, drama)
+  }
   if (isPublishedEpisode(drama)) {
     item.status = 'published'
     item.lastWorkflowStatus = 'complete'
@@ -471,7 +673,7 @@ async function reconcileItem(env, batch, item, deps) {
     // (a five-story batch shows at most five concurrent errors no matter how
     // many waves have failed), which kept the 'failing' alert from ever firing.
     batch.failureEvents = Number(batch.failureEvents || 0) + 1
-    await recoverItem(env, batch, item, drama, deps)
+    await recoverItem(env, batch, item, drama, deps, generationController)
     return
   }
 
@@ -506,7 +708,7 @@ async function reconcileItem(env, batch, item, deps) {
   // A ready episode resuming for publish is not a failure; a dead workflow
   // on an unfinished episode is.
   if (drama?.status !== 'ready') batch.failureEvents = Number(batch.failureEvents || 0) + 1
-  await recoverItem(env, batch, item, drama, deps)
+  await recoverItem(env, batch, item, drama, deps, generationController)
 }
 
 async function topStories(deps) {
@@ -515,11 +717,13 @@ async function topStories(deps) {
   return ids.slice(0, 100)
 }
 
-async function fillBatch(env, batch, deps) {
+async function fillBatch(env, batch, deps, generationController) {
   if (activeBatchItems(batch).length >= NIGHTLY_TARGET) return
+  if (generationController.restrictedForRun || generationController.circuit) return
   const attempted = new Set((batch.items ?? []).map((item) => String(item.hnId)))
   const seenThisPass = new Set()
   for (const id of await topStories(deps)) {
+    if (generationController.restrictedForRun || generationController.circuit) break
     if (activeBatchItems(batch).length >= NIGHTLY_TARGET) break
     const hnId = String(id)
     if (attempted.has(hnId) || seenThisPass.has(hnId)) continue
@@ -571,7 +775,7 @@ async function fillBatch(env, batch, deps) {
       attempted.add(hnId)
       await persistBatch(env.DB, batch, deps)
       if (existing && ['ready', 'failed'].includes(existing.status)) {
-        await reconcileItem(env, batch, item, deps)
+        await reconcileItem(env, batch, item, deps, generationController)
       }
     } catch (error) {
       recordBatchError(batch, `HN ${hnId}: ${error?.message || error}`)
@@ -580,8 +784,13 @@ async function fillBatch(env, batch, deps) {
   }
 }
 
-export async function reconcileNightlyBatch(env, date, { dependencies = {} } = {}) {
+export async function reconcileNightlyBatch(env, date, {
+  dependencies = {},
+  generationController: suppliedGenerationController = null,
+} = {}) {
   const deps = { ...defaultDependencies, ...dependencies }
+  const generationController = suppliedGenerationController
+    ?? await loadGenerationController(env, deps)
   let batch = await deps.getSetting(env.DB, nightlyBatchKey(date))
   if (!batch) {
     batch = {
@@ -599,7 +808,7 @@ export async function reconcileNightlyBatch(env, date, { dependencies = {} } = {
 
   for (const item of batch.items) {
     try {
-      await reconcileItem(env, batch, item, deps)
+      await reconcileItem(env, batch, item, deps, generationController)
     } catch (error) {
       item.lastError = error?.message || String(error)
       item.updatedAt = nowIso()
@@ -609,7 +818,7 @@ export async function reconcileNightlyBatch(env, date, { dependencies = {} } = {
   }
 
   try {
-    await fillBatch(env, batch, deps)
+    await fillBatch(env, batch, deps, generationController)
   } catch (error) {
     recordBatchError(batch, error?.message || error)
   }
@@ -645,11 +854,15 @@ export async function runNightlyReconciliation(env, {
   pendingDates = [...new Set(pendingDates)].sort()
   await deps.setSetting(env.DB, 'dailyTopPendingDates', pendingDates)
 
+  const generationController = await loadGenerationController(env, deps)
   const stillPending = []
   const batches = []
   for (const batchDate of pendingDates) {
     try {
-      const batch = await reconcileNightlyBatch(env, batchDate, { dependencies: deps })
+      const batch = await reconcileNightlyBatch(env, batchDate, {
+        dependencies: deps,
+        generationController,
+      })
       batches.push(batch)
       if (batch.status !== 'complete') stillPending.push(batchDate)
     } catch {

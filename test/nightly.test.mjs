@@ -2,11 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  NIGHTLY_GENERATION_CIRCUIT_KEY,
   NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS,
   NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS,
   NIGHTLY_MUSIC_STALL_TIMEOUT_MS,
+  NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS,
   PUBLISHED_PROGRESS_MESSAGE,
   centralRunContext,
+  classifySystemicFailure,
   hasPublishedProgress,
   isActiveWorkflowStatus,
   isPublishedEpisode,
@@ -446,7 +449,7 @@ test('a previously published slot is revalidated before batch completion', async
   assert.equal(reconciled.published, 0)
 })
 
-test('a quota-class failure retries the same story without consuming attempts', async () => {
+test('a quota-class failure opens the circuit, then retries the same job on the hourly probe', async () => {
   const h = harness({ topIds: [] })
   const date = '2026-07-17'
   h.dramas.set('episode_quota', {
@@ -454,6 +457,7 @@ test('a quota-class failure retries the same story without consuming attempts', 
     hnId: '77',
     status: 'failed',
     error: 'You have reached your specified API usage limits. You will regain access on 2026-08-01 at 00:00 UTC.',
+    jobId: 'job_quota',
     url: 'https://news.ycombinator.com/item?id=77',
     progress: [],
   })
@@ -474,12 +478,29 @@ test('a quota-class failure retries the same story without consuming attempts', 
     errors: [],
   })
 
-  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
-  const item = batch.items[0]
-  assert.equal(item.status, 'queued')
+  let batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  let item = batch.items[0]
+  assert.equal(item.status, 'blocked')
   assert.equal(item.attempt, 3, 'quota failures must not consume the attempt budget')
   assert.ok(item.quotaBlockedAt)
-  assert.equal(h.creates.length, 1, 'the same story is retried')
+  assert.equal(h.creates.length, 0, 'opening the circuit does not fan out immediately')
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).failureClass, 'quota')
+
+  h.clock.now = new Date(h.clock.now.getTime() + NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS)
+  batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  item = batch.items[0]
+  assert.equal(item.status, 'queued')
+  assert.equal(item.attempt, 3)
+  assert.equal(item.episodeId, 'episode_quota')
+  assert.equal(h.creates.length, 1)
+  assert.deepEqual(h.creates[0].params, {
+    dramaId: 'episode_quota',
+    url: 'https://news.ycombinator.com/item?id=77',
+    resumeJobId: 'job_quota',
+    recoveryRunId: 'resume_watchdog_1',
+  })
+  assert.equal(h.dramas.get('episode_quota').status, 'queued')
+  assert.equal(h.dramas.get('episode_quota').error, null)
 })
 
 test('an ordinary failure at the attempt cap still exhausts the story', async () => {
@@ -576,7 +597,7 @@ test('no alert is attempted without Resend configuration', async (t) => {
   assert.equal(called, false)
 })
 
-test('a contract-class failure alerts immediately and preserves attempts', async (t) => {
+test('a contract-class failure alerts immediately, opens the circuit, and preserves attempts', async (t) => {
   const h = harness({ topIds: [] })
   h.env.RESEND_API_KEY = 'test_resend_key'
   h.env.ALERT_EMAIL = 'ops@example.com'
@@ -618,9 +639,285 @@ test('a contract-class failure alerts immediately and preserves attempts', async
   const item = batch.items[0]
   assert.equal(item.attempt, 3, 'contract failures must not consume the attempt budget')
   assert.ok(item.contractBlockedAt)
-  assert.equal(item.status, 'queued', 'the same story retries after the fix deploys')
+  assert.equal(item.status, 'blocked', 'the circuit waits for its hourly probe')
+  assert.equal(h.creates.length, 0)
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).failureClass, 'contract')
   assert.equal(emails.length, 1, 'contract failures alert on FIRST occurrence')
   assert.match(emails[0].subject, /contract\/validation error/)
+})
+
+test('provider policy throttles use the stable failure code and get their own alert class', async (t) => {
+  assert.equal(classifySystemicFailure({
+    failureCode: 'provider_capacity_blocked',
+    failureMessage: 'opaque provider response',
+  }), 'provider')
+  assert.equal(classifySystemicFailure(
+    'Detected high-frequency non-compliant requests from you. Please retry later.',
+  ), 'provider')
+  assert.equal(classifySystemicFailure(
+    'Table-read outline page budgets total 18, but scriptBlueprint.pageTarget is 20.',
+  ), 'contract')
+
+  const h = harness({ topIds: [] })
+  h.env.RESEND_API_KEY = 'test_resend_key'
+  h.env.ALERT_EMAIL = 'ops@example.com'
+  const emails = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (_url, options) => {
+    emails.push(JSON.parse(options.body))
+    return { ok: true, json: async () => ({ id: 'email_provider' }) }
+  }
+  t.after(() => { globalThis.fetch = realFetch })
+
+  const date = '2026-07-18'
+  h.dramas.set('episode_provider', {
+    id: 'episode_provider',
+    hnId: '91',
+    status: 'failed',
+    error: 'writer failed',
+    failureCode: 'provider_capacity_blocked',
+    failureMessage: 'Detected high-frequency non-compliant requests from you.',
+    jobId: 'job_provider',
+    url: 'https://news.ycombinator.com/item?id=91',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '91',
+      url: 'https://news.ycombinator.com/item?id=91',
+      title: 'Story 91',
+      episodeId: 'episode_provider',
+      workflowId: 'episode_provider',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'failed',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(batch.items[0].status, 'blocked')
+  assert.ok(batch.items[0].providerBlockedAt)
+  assert.equal(h.creates.length, 0)
+  assert.equal(emails.length, 1)
+  assert.match(emails[0].subject, /provider policy throttle/)
+})
+
+test('one due generation circuit permits exactly one probe across multiple pending dates', async () => {
+  const firstDate = '2026-07-17'
+  const secondDate = '2026-07-18'
+  const now = '2026-07-19T06:00:00.000Z'
+  const h = harness({
+    now,
+    topIds: [],
+    randomIds: ['global_probe_1'],
+  })
+  h.settings.set('dailyTopPendingDates', [firstDate, secondDate])
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'provider',
+    failureMessage: 'provider blocked',
+    openedAt: '2026-07-19T04:00:00.000Z',
+    nextProbeAt: '2026-07-19T05:00:00.000Z',
+  })
+
+  for (const [index, date] of [firstDate, secondDate].entries()) {
+    const episodeId = `episode_global_${index + 1}`
+    h.dramas.set(episodeId, {
+      id: episodeId,
+      hnId: String(201 + index),
+      status: 'failed',
+      failureClass: 'provider',
+      failureCode: 'provider_capacity_blocked',
+      failureMessage: 'Detected high-frequency non-compliant requests from you.',
+      error: 'Detected high-frequency non-compliant requests from you.',
+      jobId: `job_global_${index + 1}`,
+      url: `https://news.ycombinator.com/item?id=${201 + index}`,
+      progress: [],
+    })
+    h.settings.set(nightlyBatchKey(date), {
+      date,
+      status: 'running',
+      target: 5,
+      items: [{
+        hnId: String(201 + index),
+        url: `https://news.ycombinator.com/item?id=${201 + index}`,
+        title: `Story ${201 + index}`,
+        episodeId,
+        workflowId: episodeId,
+        attempt: 1,
+        recoveryAttempts: 0,
+        status: 'blocked',
+      }],
+      errors: [],
+    })
+  }
+
+  const batches = await runNightlyReconciliation(h.env, {
+    now: new Date(now),
+    dependencies: h.dependencies,
+  })
+
+  assert.equal(batches.length, 2)
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.resumeJobId, 'job_global_1')
+  assert.equal(batches[0].items[0].status, 'queued')
+  assert.equal(batches[1].items[0].status, 'blocked')
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.probeEpisodeId, 'episode_global_1')
+  assert.equal(circuit.probeWorkflowId, 'global_probe_1')
+  assert.equal(circuit.probeCount, 1)
+})
+
+test('a due probe resumes the same plan when failure happened before job creation', async () => {
+  const date = '2026-07-18'
+  const h = harness({
+    now: '2026-07-19T06:00:00.000Z',
+    topIds: [],
+    randomIds: ['plan_probe_1'],
+  })
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'contract',
+    failureMessage: 'page budget mismatch',
+    openedAt: '2026-07-19T04:00:00.000Z',
+    nextProbeAt: '2026-07-19T05:00:00.000Z',
+  })
+  h.dramas.set('episode_plan_probe', {
+    id: 'episode_plan_probe',
+    hnId: '250',
+    status: 'failed',
+    failureClass: 'contract',
+    failureMessage: 'Table-read outline page budgets total 18, but scriptBlueprint.pageTarget is 20.',
+    error: 'Table-read outline page budgets total 18, but scriptBlueprint.pageTarget is 20.',
+    planId: 'plan_existing',
+    url: 'https://news.ycombinator.com/item?id=250',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '250',
+      url: 'https://news.ycombinator.com/item?id=250',
+      title: 'Story 250',
+      episodeId: 'episode_plan_probe',
+      workflowId: 'episode_plan_probe',
+      attempt: 2,
+      recoveryAttempts: 0,
+      status: 'blocked',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.creates.length, 1)
+  assert.deepEqual(h.creates[0].params, {
+    dramaId: 'episode_plan_probe',
+    url: 'https://news.ycombinator.com/item?id=250',
+    resumePlanId: 'plan_existing',
+    recoveryRunId: 'plan_probe_1',
+  })
+  assert.equal(batch.items[0].episodeId, 'episode_plan_probe')
+  assert.equal(batch.items[0].attempt, 2)
+})
+
+test('an hourly probe is not overlapped while its Workflow is still active', async () => {
+  const date = '2026-07-18'
+  const h = harness({ now: '2026-07-19T06:00:00.000Z', topIds: [] })
+  h.workflowStatuses.set('active_probe_workflow', 'waiting')
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'provider',
+    failureMessage: 'provider blocked',
+    openedAt: '2026-07-19T03:00:00.000Z',
+    nextProbeAt: '2026-07-19T05:00:00.000Z',
+    probeEpisodeId: 'different_probe_episode',
+    probeWorkflowId: 'active_probe_workflow',
+  })
+  h.dramas.set('episode_waiting_for_probe', {
+    id: 'episode_waiting_for_probe',
+    hnId: '260',
+    status: 'failed',
+    failureClass: 'provider',
+    failureCode: 'provider_capacity_blocked',
+    failureMessage: 'Detected high-frequency non-compliant requests from you.',
+    jobId: 'job_waiting_for_probe',
+    url: 'https://news.ycombinator.com/item?id=260',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '260',
+      url: 'https://news.ycombinator.com/item?id=260',
+      title: 'Story 260',
+      episodeId: 'episode_waiting_for_probe',
+      workflowId: 'old_failed_workflow',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'blocked',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.creates.length, 0)
+  assert.equal(batch.items[0].status, 'blocked')
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).probeWorkflowId, 'active_probe_workflow')
+})
+
+test('a probe producing an artifact closes the circuit without same-tick fan-out', async () => {
+  const date = '2026-07-18'
+  const h = harness({ topIds: [301, 302, 303, 304] })
+  const drama = {
+    id: 'episode_probe_success',
+    hnId: '300',
+    status: 'running',
+    artifactId: 'artifact_probe_success',
+    url: 'https://news.ycombinator.com/item?id=300',
+    progress: [{ at: h.clock.now.toISOString(), message: 'Performance created.' }],
+  }
+  h.dramas.set(drama.id, drama)
+  h.workflowStatuses.set('workflow_probe_success', 'waiting')
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'provider',
+    openedAt: '2026-07-16T00:00:00.000Z',
+    nextProbeAt: '2026-07-16T01:00:00.000Z',
+    probeEpisodeId: drama.id,
+    probeWorkflowId: 'workflow_probe_success',
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: drama.hnId,
+      url: drama.url,
+      title: 'Story 300',
+      episodeId: drama.id,
+      workflowId: 'workflow_probe_success',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'waiting',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY), null)
+  assert.equal(batch.items.length, 1)
+  assert.equal(h.creates.length, 0)
 })
 
 test('cumulative failure events fire the failing alert after one full wave', async (t) => {
