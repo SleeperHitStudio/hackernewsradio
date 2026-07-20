@@ -15,6 +15,7 @@ import {
   ensureRequestedVoiceModsReady,
   hasInFlightMusicClips,
   inspectBookends,
+  isDefinitiveStoryJobResumeRejection,
   isSpokenTakeThin,
   isTerminalStoryJobFailureOutcome,
   isTransientWorkflowError,
@@ -23,6 +24,7 @@ import {
   postProductionIdempotencyScope,
   runHardStep,
   shouldRollFailedStoryJob,
+  shouldReuseResumedStoryJob,
   storyJobIdempotencyScope,
   storyJobPollOutcome,
   terminalStoryJobFallbackPlanId,
@@ -74,6 +76,38 @@ test('READY StoryJobs without artifacts roll a fresh performance', () => {
   const outcome = storyJobPollOutcome({ status: 'READY', artifacts: [] })
   assert.equal(isTerminalStoryJobFailureOutcome(outcome), true)
   assert.equal(outcome.code, 'artifact_missing')
+})
+
+test('terminal StoryJobs reuse a successful checkpoint resume before rolling fresh', () => {
+  assert.equal(shouldReuseResumedStoryJob({
+    action: 'generation_requeued',
+    job: { id: 'job_1', status: 'RESERVED' },
+  }), true)
+  assert.equal(shouldReuseResumedStoryJob({
+    action: 'noop',
+    job: { id: 'job_1', status: 'READY' },
+  }), true)
+  assert.equal(shouldReuseResumedStoryJob({ action: 'generation_requeued' }), true)
+  assert.equal(shouldReuseResumedStoryJob({
+    action: 'noop',
+    job: { id: 'job_1', status: 'FAILED' },
+  }), false)
+  assert.equal(shouldReuseResumedStoryJob({
+    action: 'noop',
+    job: { id: 'job_1', status: 'CANCELED' },
+  }), false)
+})
+
+test('only authoritative resume rejections permit a fresh paid StoryJob', () => {
+  assert.equal(isDefinitiveStoryJobResumeRejection({ status: 400 }), true)
+  assert.equal(isDefinitiveStoryJobResumeRejection({ status: 404 }), true)
+  assert.equal(isDefinitiveStoryJobResumeRejection({ status: 409 }), true)
+  assert.equal(isDefinitiveStoryJobResumeRejection({ status: 422 }), true)
+  assert.equal(isDefinitiveStoryJobResumeRejection({ status: 408 }), false)
+  assert.equal(isDefinitiveStoryJobResumeRejection({ status: 429 }), false)
+  assert.equal(isDefinitiveStoryJobResumeRejection({ status: 503 }), false)
+  assert.equal(isDefinitiveStoryJobResumeRejection({ status: 0 }), false)
+  assert.equal(isDefinitiveStoryJobResumeRejection(new Error('network reset')), false)
 })
 
 test('terminal resumed jobs fall back to their plan under a fresh recovery scope', () => {

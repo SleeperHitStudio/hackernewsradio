@@ -28,6 +28,7 @@ import {
   ensureRequestedVoiceModsReady,
   hasInFlightMusicClips,
   inspectBookends,
+  isDefinitiveStoryJobResumeRejection,
   isSpokenTakeThin,
   isTerminalStoryJobFailureOutcome,
   minimumSpokenWords,
@@ -36,6 +37,7 @@ import {
   runHardStep,
   runWorkflowStepOnce,
   shouldRollFailedStoryJob,
+  shouldReuseResumedStoryJob,
   storyJobIdempotencyScope,
   storyJobPollOutcome,
   terminalStoryJobFallbackPlanId,
@@ -323,9 +325,54 @@ export class HnrPipeline extends WorkflowEntrypoint {
                 const overBudget = OUTPUT_BUDGET_RE.test(msg)
                 const transient = !/time budget|timed out/i.test(msg)
                 if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
-                // Server-side terminal failure → new job next attempt; anything
-                // else (network/poll trouble) resumes the same job.
-                if (shouldRollFailedStoryJob(err)) { jobId = null; jobRoll++ }
+                // Ask Sleeper Hit to recover a terminal job from its own durable
+                // checkpoint before creating another paid performance. This is
+                // especially important for a late Lyria/finalize failure: the
+                // screenplay, cast, and successful clips already exist.
+                if (shouldRollFailedStoryJob(err) && jobId) {
+                  const failedJobId = jobId
+                  const resumeOutcome = await this.hardStep(
+                    step,
+                    `resume failed job r${round}a${attempt}`,
+                    async () => {
+                      try {
+                        return {
+                          kind: 'response',
+                          response: await sh.resumeJob(
+                            failedJobId,
+                            `${jobScope}-resume-job-${failedJobId}-a${attempt}`,
+                          ),
+                        }
+                      } catch (resumeError) {
+                        if (isDefinitiveStoryJobResumeRejection(resumeError)) {
+                          return {
+                            kind: 'rejected',
+                            message: resumeError?.message || String(resumeError),
+                          }
+                        }
+                        // Ambiguous delivery failures must stop this run. The
+                        // resume may have landed, so a fresh job is unsafe.
+                        throw resumeError
+                      }
+                    },
+                    { replaySafe: true },
+                  )
+                  const reusable = resumeOutcome.kind === 'response'
+                    && shouldReuseResumedStoryJob(resumeOutcome.response)
+                  if (reusable) {
+                    await note(
+                      `Sleeper Hit resumed job ${failedJobId} from its durable checkpoint — keeping the same performance…`,
+                      `story-job-resumed:${failedJobId}:a${attempt}`,
+                    )
+                  } else {
+                    jobId = null
+                    jobRoll++
+                    await note(
+                      `Sleeper Hit could not resume job ${failedJobId} (${resumeOutcome.message || 'job remained terminal'}) — rolling a fresh take…`,
+                      `story-job-resume-rejected:${failedJobId}:a${attempt}`,
+                    )
+                  }
+                }
                 await note(`Performance attempt ${attempt} failed (${msg}); retrying…`)
               }
             }
