@@ -23,7 +23,9 @@ import {
   postProductionIdempotencyScope,
   runHardStep,
   shouldRollFailedStoryJob,
+  storyJobIdempotencyScope,
   storyJobPollOutcome,
+  terminalStoryJobFallbackPlanId,
 } from '../worker/reliability.mjs'
 
 test('spoken-word floor accepts valid 56-60 word/page takes', () => {
@@ -72,6 +74,21 @@ test('READY StoryJobs without artifacts roll a fresh performance', () => {
   const outcome = storyJobPollOutcome({ status: 'READY', artifacts: [] })
   assert.equal(isTerminalStoryJobFailureOutcome(outcome), true)
   assert.equal(outcome.code, 'artifact_missing')
+})
+
+test('terminal resumed jobs fall back to their plan under a fresh recovery scope', () => {
+  const terminal = Object.assign(new Error('Table read FAILED.'), {
+    terminalStoryJobFailure: true,
+  })
+
+  assert.equal(terminalStoryJobFallbackPlanId(terminal, 'plan_1'), 'plan_1')
+  assert.equal(terminalStoryJobFallbackPlanId(new Error('Network error'), 'plan_1'), null)
+  assert.equal(terminalStoryJobFallbackPlanId(terminal, null), null)
+  assert.equal(storyJobIdempotencyScope('drama_1'), 'drama_1')
+  assert.equal(
+    storyJobIdempotencyScope('drama_1', 'recovery_1'),
+    'drama_1-recovery-recovery_1',
+  )
 })
 
 test('repair post-production keys are fresh per repair run but stable within it', () => {
