@@ -854,6 +854,7 @@ export async function reconcileNightlyBatch(env, date, {
   generationController: suppliedGenerationController = null,
   allowGeneration = true,
   supersededByDate = null,
+  itemOwnerDateByKey = null,
 } = {}) {
   const deps = { ...defaultDependencies, ...dependencies }
   const generationController = suppliedGenerationController
@@ -878,6 +879,21 @@ export async function reconcileNightlyBatch(env, date, {
   }
 
   for (const item of batch.items) {
+    const ownerDates = itemOwnerDateByKey
+      ? [
+          item.episodeId ? itemOwnerDateByKey.get(`episode:${item.episodeId}`) : null,
+          item.hnId ? itemOwnerDateByKey.get(`hn:${item.hnId}`) : null,
+        ].filter(Boolean).sort()
+      : []
+    const ownerDate = ownerDates.at(-1)
+    if (ownerDate && ownerDate !== date) {
+      item.status = 'superseded'
+      item.lastWorkflowStatus = 'superseded'
+      item.lastError = `Superseded by newer nightly batch ${ownerDate} for the same episode.`
+      item.updatedAt = nowIso()
+      await persistBatch(env.DB, batch, deps)
+      continue
+    }
     try {
       await reconcileItem(
         env,
@@ -940,9 +956,25 @@ export async function runNightlyReconciliation(env, {
   pendingDates = [...new Set(pendingDates)].sort()
   await deps.setSetting(env.DB, 'dailyTopPendingDates', pendingDates)
 
+  // A thread can be adopted by adjacent dates while a long Workflow is still
+  // running. Assign the shared episode/thread to the newest pending batch
+  // before reconciling the oldest one, otherwise both dates can independently
+  // resume the same artifact for post-production.
+  const pendingBatches = new Map()
+  const itemOwnerDateByKey = new Map()
+  for (const batchDate of pendingDates) {
+    const batch = await deps.getSetting(env.DB, nightlyBatchKey(batchDate))
+    pendingBatches.set(batchDate, batch)
+    for (const item of batch?.items ?? []) {
+      if (['exhausted', 'superseded'].includes(item.status)) continue
+      if (item.episodeId) itemOwnerDateByKey.set(`episode:${item.episodeId}`, batchDate)
+      if (item.hnId) itemOwnerDateByKey.set(`hn:${item.hnId}`, batchDate)
+    }
+  }
+
   let generationBatchDate = null
   for (const candidateDate of [...pendingDates].reverse()) {
-    const candidateBatch = await deps.getSetting(env.DB, nightlyBatchKey(candidateDate))
+    const candidateBatch = pendingBatches.get(candidateDate)
     if (!candidateBatch?.generationSupersededAt) {
       generationBatchDate = candidateDate
       break
@@ -959,6 +991,7 @@ export async function runNightlyReconciliation(env, {
         generationController,
         allowGeneration: batchDate === generationBatchDate,
         supersededByDate: generationBatchDate,
+        itemOwnerDateByKey,
       })
       batches.push(batch)
       if (!['complete', 'superseded'].includes(batch.status)) stillPending.push(batchDate)
