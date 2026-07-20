@@ -97,6 +97,30 @@ export function shouldRollFailedStoryJob(error) {
     || /\b(?:FAILED|CANCELED)\b|generation failed/i.test(errorText(error))
 }
 
+/**
+ * A successful resume response is reusable unless Sleeper explicitly reports
+ * that the same job is still terminal. Missing status is treated as reusable:
+ * older compatible servers returned only an action name.
+ */
+export function shouldReuseResumedStoryJob(response) {
+  const status = String(response?.job?.status || '').toUpperCase()
+  return status !== 'FAILED' && status !== 'CANCELED'
+}
+
+/**
+ * Only an authoritative client error proves Sleeper rejected the resume. A
+ * transport error, timeout, 408, or 429 is ambiguous: the request may already
+ * have been accepted, so rolling a fresh paid job would risk duplication.
+ */
+export function isDefinitiveStoryJobResumeRejection(error) {
+  const status = Number(error?.status)
+  return Number.isInteger(status)
+    && status >= 400
+    && status < 500
+    && status !== 408
+    && status !== 429
+}
+
 export function terminalStoryJobFallbackPlanId(error, planId) {
   if (!planId || !shouldRollFailedStoryJob(error)) return null
   return planId
