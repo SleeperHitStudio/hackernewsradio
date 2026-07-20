@@ -55,6 +55,48 @@ export function isSpokenTakeThin(spokenWords, pageTarget) {
   return Number(spokenWords) < minimumSpokenWords(pageTarget)
 }
 
+const TERMINAL_STORY_JOB_FAILURE = 'terminal-story-job-failure'
+
+/**
+ * Convert StoryJob status into a Workflow-serializable polling outcome.
+ *
+ * Terminal failures are returned as data instead of thrown inside step.do.
+ * Cloudflare can otherwise rehydrate the thrown error without its custom
+ * failureCode/state fields, forcing callers to guess terminality from prose.
+ */
+export function storyJobPollOutcome(job) {
+  const status = String(job?.status || '').toUpperCase()
+  if (status === 'READY') {
+    const artifact = (job?.artifacts ?? []).find((candidate) => candidate?.type === 'table_read')
+      ?? (job?.artifacts ?? [])[0]
+    if (artifact?.id) return artifact.id
+    return {
+      kind: TERMINAL_STORY_JOB_FAILURE,
+      status,
+      code: 'artifact_missing',
+      message: 'Job finished but produced no artifact.',
+    }
+  }
+  if (status === 'FAILED' || status === 'CANCELED') {
+    return {
+      kind: TERMINAL_STORY_JOB_FAILURE,
+      status,
+      code: job?.failureCode || null,
+      message: job?.failureMessage || `Table read ${status}.`,
+    }
+  }
+  return 'pending'
+}
+
+export function isTerminalStoryJobFailureOutcome(value) {
+  return value?.kind === TERMINAL_STORY_JOB_FAILURE
+}
+
+export function shouldRollFailedStoryJob(error) {
+  return error?.terminalStoryJobFailure === true
+    || /\b(?:FAILED|CANCELED)\b|generation failed/i.test(errorText(error))
+}
+
 export function postProductionIdempotencyScope(dramaId, repairRunId) {
   return repairRunId ? `${dramaId}-repair-${repairRunId}` : dramaId
 }

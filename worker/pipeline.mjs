@@ -29,11 +29,14 @@ import {
   hasInFlightMusicClips,
   inspectBookends,
   isSpokenTakeThin,
+  isTerminalStoryJobFailureOutcome,
   minimumSpokenWords,
   pollInWorkflowChunks,
   postProductionIdempotencyScope,
   runHardStep,
   runWorkflowStepOnce,
+  shouldRollFailedStoryJob,
+  storyJobPollOutcome,
 } from './reliability.mjs'
 
 export class HnrPipeline extends WorkflowEntrypoint {
@@ -169,19 +172,12 @@ export class HnrPipeline extends WorkflowEntrypoint {
       const pollJobArtifact = (label, jobId) =>
         this.pollChunked(step, label, STORY_JOB_POLL_CHUNKS, async () => {
           const res = await sh.request(`/story-jobs/${jobId}`)
-          const job = res.job
-          if (job?.status === 'READY') {
-            const art = (job.artifacts ?? []).find((candidate) => candidate.type === 'table_read')
-              ?? (job.artifacts ?? [])[0]
-            if (!art?.id) throw new SleeperHitError('Job finished but produced no artifact.')
-            return art.id
-          }
-          if (job?.status === 'FAILED' || job?.status === 'CANCELED') {
-            throw new SleeperHitError(job?.failureMessage || `Table read ${job?.status}.`, {
-              code: job?.failureCode,
-            })
-          }
-          return 'pending'
+          return storyJobPollOutcome(res.job)
+        }).then((outcome) => {
+          if (!isTerminalStoryJobFailureOutcome(outcome)) return outcome
+          const error = new SleeperHitError(outcome.message, { code: outcome.code })
+          error.terminalStoryJobFailure = true
+          throw error
         })
       const approvePlanForNightly = async (label, planId, status) => {
         if (status !== 'REQUIRES_APPROVAL') return
@@ -316,7 +312,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
                 if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
                 // Server-side terminal failure → new job next attempt; anything
                 // else (network/poll trouble) resumes the same job.
-                if (/FAILED|CANCELED|generation failed/i.test(msg)) { jobId = null; jobRoll++ }
+                if (shouldRollFailedStoryJob(err)) { jobId = null; jobRoll++ }
                 await note(`Performance attempt ${attempt} failed (${msg}); retrying…`)
               }
             }
