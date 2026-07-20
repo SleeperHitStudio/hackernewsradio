@@ -17,6 +17,11 @@ import {
   reconcileNightlyBatch,
   runNightlyReconciliation,
 } from '../worker/nightly.mjs'
+import {
+  WORKFLOW_DEPLOY_GATE_KEY,
+  activeWorkflowDeployGate,
+  workflowDeployRetryAfterSeconds,
+} from '../worker/deploy-gate.mjs'
 
 function harness({
   settings = new Map(),
@@ -165,6 +170,45 @@ function activeArtifactFixture({
   h.workflowStatuses.set(item.workflowId, 'waiting')
   return { batch, date, drama, h, item, nowMs }
 }
+
+test('an expiring deploy gate blocks only during its live lock window', () => {
+  const now = new Date('2026-07-20T17:00:00.000Z')
+  const gate = {
+    state: 'locked',
+    runId: '123',
+    expiresAt: '2026-07-20T17:02:00.000Z',
+  }
+  assert.deepEqual(activeWorkflowDeployGate(gate, now), gate)
+  assert.equal(workflowDeployRetryAfterSeconds(gate, now), 60)
+  assert.equal(activeWorkflowDeployGate(gate, new Date(gate.expiresAt)), null)
+  assert.equal(activeWorkflowDeployGate({ ...gate, state: 'released' }, now), null)
+  assert.equal(activeWorkflowDeployGate({ state: 'locked', expiresAt: 'invalid' }, now), null)
+})
+
+test('nightly reconciliation makes no state changes while a deploy gate is active', async () => {
+  const now = '2026-07-20T19:01:00.000Z'
+  const h = harness({
+    now,
+    settings: new Map([[
+      WORKFLOW_DEPLOY_GATE_KEY,
+      {
+        state: 'locked',
+        runId: '123',
+        expiresAt: '2026-07-20T20:00:00.000Z',
+      },
+    ]]),
+    topIds: [123],
+  })
+
+  const batches = await runNightlyReconciliation(h.env, {
+    now: new Date(now),
+    dependencies: h.dependencies,
+  })
+
+  assert.deepEqual(batches, [])
+  assert.deepEqual(h.creates, [])
+  assert.equal(h.settings.has('dailyTopPendingDates'), false)
+})
 
 test('nightly helpers distinguish active Workflows and feed-published episodes', () => {
   assert.equal(isActiveWorkflowStatus('Waiting'), true)
