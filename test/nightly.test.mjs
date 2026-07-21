@@ -548,6 +548,74 @@ test('a quota-class failure opens the circuit, then retries the same job on the 
   assert.equal(h.dramas.get('episode_quota').error, null)
 })
 
+test('a recorded failed probe is rearmed when its next recovery window arrives', async () => {
+  const now = '2026-07-19T06:00:00.000Z'
+  const date = '2026-07-18'
+  const h = harness({
+    now,
+    topIds: [],
+    randomIds: ['replacement_probe_1'],
+  })
+  h.workflowStatuses.set('failed_probe_workflow', 'errored')
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'provider',
+    failureMessage: 'provider blocked',
+    openedAt: '2026-07-19T02:00:00.000Z',
+    lastProbeAt: '2026-07-19T04:00:00.000Z',
+    lastProbeFailureAt: '2026-07-19T05:00:00.000Z',
+    nextProbeAt: now,
+    probeEpisodeId: 'episode_failed_probe',
+    probeWorkflowId: 'failed_probe_workflow',
+  })
+  h.dramas.set('episode_failed_probe', {
+    id: 'episode_failed_probe',
+    hnId: '78',
+    status: 'failed',
+    failureClass: 'provider',
+    failureCode: 'provider_capacity_blocked',
+    failureMessage: 'Detected high-frequency non-compliant requests from you.',
+    error: 'Detected high-frequency non-compliant requests from you.',
+    jobId: 'job_failed_probe',
+    url: 'https://news.ycombinator.com/item?id=78',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '78',
+      url: 'https://news.ycombinator.com/item?id=78',
+      title: 'Story 78',
+      episodeId: 'episode_failed_probe',
+      workflowId: 'failed_probe_workflow',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'blocked',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(batch.items[0].status, 'queued')
+  assert.equal(h.creates.length, 1)
+  assert.deepEqual(h.creates[0].params, {
+    dramaId: 'episode_failed_probe',
+    url: 'https://news.ycombinator.com/item?id=78',
+    resumeJobId: 'job_failed_probe',
+    recoveryRunId: 'replacement_probe_1',
+  })
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.probeWorkflowId, 'replacement_probe_1')
+  assert.equal(circuit.lastProbeAt, now)
+  assert.equal(
+    circuit.nextProbeAt,
+    new Date(Date.parse(now) + NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS).toISOString(),
+  )
+})
+
 test('an ordinary failure at the attempt cap still exhausts the story', async () => {
   const h = harness({ topIds: [] })
   const date = '2026-07-17'

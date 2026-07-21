@@ -253,8 +253,14 @@ async function openGenerationCircuit(env, controller, deps, {
   const now = dependencyNow(deps)
   const current = controller.circuit
   const failedProbe = probeMatches(current, item, drama)
+  const lastProbeAtMs = Date.parse(current?.lastProbeAt)
+  const lastProbeFailureAtMs = Date.parse(current?.lastProbeFailureAt)
+  const failedProbeAlreadyRecorded = failedProbe
+    && Number.isFinite(lastProbeAtMs)
+    && Number.isFinite(lastProbeFailureAtMs)
+    && lastProbeFailureAtMs >= lastProbeAtMs
   const resetProbeWindow = !current
-    || failedProbe
+    || (failedProbe && !failedProbeAlreadyRecorded)
     || !Number.isFinite(Date.parse(current.nextProbeAt))
   const circuit = {
     ...(current ?? {}),
@@ -270,7 +276,7 @@ async function openGenerationCircuit(env, controller, deps, {
     lastFailureBatchDate: batch.date,
     lastFailureHnId: item.hnId,
     lastFailureEpisodeId: drama?.id || item.episodeId || null,
-    ...(failedProbe ? {
+    ...(failedProbe && !failedProbeAlreadyRecorded ? {
       lastProbeFailureAt: now.toISOString(),
       lastProbeFailureEpisodeId: drama?.id || item.episodeId || null,
     } : {}),
