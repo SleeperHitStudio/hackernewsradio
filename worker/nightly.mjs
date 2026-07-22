@@ -229,6 +229,14 @@ async function loadGenerationController(env, deps) {
   }
 }
 
+function generationSelectionBlocked(controller) {
+  // An open circuit must still be allowed to reach acquireGenerationSlot(),
+  // which is the single authority for due/active probe decisions. Once a
+  // successful probe closes the circuit, restrictedForRun remains true and
+  // this helper prevents a same-invocation refill fan-out.
+  return controller.restrictedForRun && !controller.circuit
+}
+
 async function saveGenerationCircuit(env, controller, circuit, deps) {
   controller.circuit = circuit
   controller.restrictedForRun = true
@@ -780,11 +788,11 @@ async function topStories(deps) {
 async function fillBatch(env, batch, deps, generationController, { allowGeneration = true } = {}) {
   if (!allowGeneration) return
   if (activeBatchItems(batch).length >= NIGHTLY_TARGET) return
-  if (generationController.restrictedForRun || generationController.circuit) return
+  if (generationSelectionBlocked(generationController)) return
   const attempted = new Set((batch.items ?? []).map((item) => String(item.hnId)))
   const seenThisPass = new Set()
   for (const id of await topStories(deps)) {
-    if (generationController.restrictedForRun || generationController.circuit) break
+    if (generationSelectionBlocked(generationController)) break
     if (activeBatchItems(batch).length >= NIGHTLY_TARGET) break
     const hnId = String(id)
     if (attempted.has(hnId) || seenThisPass.has(hnId)) continue
@@ -818,7 +826,13 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
           deps,
           { batch, item: { hnId, episodeId: null } },
         )
-        if (!generationSlot.allowed) continue
+        // A circuit can grant at most one probe. If it declined this eligible
+        // candidate (cooldown or active prior probe), scanning the remaining
+        // HN list cannot change that decision during this invocation.
+        if (!generationSlot.allowed) {
+          if (generationController.circuit) break
+          continue
+        }
         const thread = await deps.fetchThread(`https://news.ycombinator.com/item?id=${hnId}`)
         const created = await createEpisodeWorkflow(env, thread, {
           batchDate: batch.date,
@@ -836,6 +850,9 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
           status: 'queued',
           createdAt: nowIso(),
           updatedAt: nowIso(),
+        }
+        if (generationSlot.probe) {
+          await recordGenerationProbe(env, generationController, deps, { batch, item })
         }
       }
       batch.items.push(item)

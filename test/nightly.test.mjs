@@ -616,6 +616,81 @@ test('a recorded failed probe is rearmed when its next recovery window arrives',
   )
 })
 
+test('an empty nightly batch launches exactly one due generation-circuit probe', async () => {
+  const now = '2026-07-22T00:10:00.000Z'
+  const date = '2026-07-21'
+  const h = harness({ now, topIds: [501, 502, 503] })
+  h.workflowStatuses.set('failed_probe_workflow', 'errored')
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'provider',
+    failureMessage: 'provider blocked',
+    openedAt: '2026-07-21T20:00:00.000Z',
+    nextProbeAt: '2026-07-21T23:00:00.000Z',
+    probeCount: 1,
+    probeEpisodeId: 'failed_probe_episode',
+    probeWorkflowId: 'failed_probe_workflow',
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.creates.length, 1)
+  assert.equal(batch.items.length, 1)
+  assert.equal(batch.items[0].hnId, '501')
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.probeCount, 2)
+  assert.equal(circuit.probeEpisodeId, batch.items[0].episodeId)
+  assert.equal(circuit.probeWorkflowId, batch.items[0].workflowId)
+  assert.equal(circuit.probeWorkflowId, h.creates[0].id)
+})
+
+test('an empty batch waits when the generation-circuit probe cooldown is not due', async () => {
+  const now = '2026-07-22T00:10:00.000Z'
+  const date = '2026-07-21'
+  const h = harness({ now, topIds: [511, 512] })
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'provider',
+    failureMessage: 'provider blocked',
+    openedAt: '2026-07-21T20:00:00.000Z',
+    nextProbeAt: '2026-07-22T00:30:00.000Z',
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.creates.length, 0)
+  assert.equal(batch.items.length, 0)
+  assert.equal(
+    h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).nextProbeAt,
+    '2026-07-22T00:30:00.000Z',
+  )
+})
+
+test('an empty batch does not overlap an active generation-circuit probe', async () => {
+  const now = '2026-07-22T00:10:00.000Z'
+  const date = '2026-07-21'
+  const h = harness({ now, topIds: [521, 522] })
+  h.workflowStatuses.set('active_probe_workflow', 'waiting')
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'provider',
+    failureMessage: 'provider blocked',
+    openedAt: '2026-07-21T20:00:00.000Z',
+    nextProbeAt: '2026-07-21T23:00:00.000Z',
+    probeEpisodeId: 'active_probe_episode',
+    probeWorkflowId: 'active_probe_workflow',
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.creates.length, 0)
+  assert.equal(batch.items.length, 0)
+  assert.equal(
+    h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).probeWorkflowId,
+    'active_probe_workflow',
+  )
+})
+
 test('an ordinary failure at the attempt cap still exhausts the story', async () => {
   const h = harness({ topIds: [] })
   const date = '2026-07-17'
@@ -1172,6 +1247,10 @@ test('a probe producing an artifact closes the circuit without same-tick fan-out
   assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY), null)
   assert.equal(batch.items.length, 1)
   assert.equal(h.creates.length, 0)
+
+  const nextTick = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(nextTick.items.length, 2)
+  assert.equal(h.creates.length, 1, 'the next invocation may refill, but remains globally serialized')
 })
 
 test('cumulative failure events fire the failing alert after one full wave', async (t) => {

@@ -8,6 +8,7 @@ import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisod
 import { fetchThread } from './hn.mjs'
 import { spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
 import { operatorAuthorization } from './operator-auth.mjs'
+import { operatorNightlyReconcile } from './operator-nightly.mjs'
 import { runNightlyReconciliation } from './nightly.mjs'
 import {
   getActiveWorkflowDeployGate,
@@ -122,6 +123,13 @@ async function handleApi(request, env, url) {
   }
   if (pathname === '/api/health') {
     return json({ ok: true, apiBase: env.SLEEPERHIT_API_BASE, hasKey: Boolean(env.SLEEPERHIT_API_KEY), platform: 'cloudflare' })
+  }
+  // Safe operational backstop for a missed/stalled hourly tick. It runs the
+  // exact same idempotent reconciler as the cron and remains invisible unless
+  // the existing operator credential has been configured.
+  if (pathname === '/api/operator/nightly/reconcile' && request.method === 'POST') {
+    const result = await operatorNightlyReconcile(request, env)
+    return json(result.body, result.status, result.headers)
   }
   if (pathname === '/api/dramas' && request.method === 'GET') {
     const q = url.searchParams.get('q') ?? ''
