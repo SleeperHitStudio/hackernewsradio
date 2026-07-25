@@ -29,11 +29,13 @@ import {
   hasInFlightMusicClips,
   inspectBookends,
   isDefinitiveStoryJobResumeRejection,
+  isSalvagedStoryJobOutcome,
   isSpokenTakeThin,
   isTerminalStoryJobFailureOutcome,
   minimumSpokenWords,
   pollInWorkflowChunks,
   postProductionIdempotencyScope,
+  resumedStoryJobArtifactId,
   runHardStep,
   runWorkflowStepOnce,
   shouldRollFailedStoryJob,
@@ -173,16 +175,25 @@ export class HnrPipeline extends WorkflowEntrypoint {
           }
           return 'pending'
         })
-      const pollJobArtifact = (label, jobId) =>
-        this.pollChunked(step, label, STORY_JOB_POLL_CHUNKS, async () => {
+      const adoptSalvagedArtifact = async (jobId, outcome) => {
+        await note(
+          `The table read is finished; only its planned soundtrack failed (${outcome.message}) — `
+          + 'continuing with the banked jazz bookends.',
+          `music-only-salvage:${jobId}`,
+        )
+        return outcome.artifactId
+      }
+      const pollJobArtifact = async (label, jobId) => {
+        const outcome = await this.pollChunked(step, label, STORY_JOB_POLL_CHUNKS, async () => {
           const res = await sh.request(`/story-jobs/${jobId}`)
           return storyJobPollOutcome(res.job)
-        }).then((outcome) => {
-          if (!isTerminalStoryJobFailureOutcome(outcome)) return outcome
-          const error = new SleeperHitError(outcome.message, { code: outcome.code })
-          error.terminalStoryJobFailure = true
-          throw error
         })
+        if (isSalvagedStoryJobOutcome(outcome)) return adoptSalvagedArtifact(jobId, outcome)
+        if (!isTerminalStoryJobFailureOutcome(outcome)) return outcome
+        const error = new SleeperHitError(outcome.message, { code: outcome.code })
+        error.terminalStoryJobFailure = true
+        throw error
+      }
       const approvePlanForNightly = async (label, planId, status) => {
         if (status !== 'REQUIRES_APPROVAL') return
         await note('Approving the blueprint…')
@@ -199,13 +210,22 @@ export class HnrPipeline extends WorkflowEntrypoint {
       let pendingResumePlanId = resumePlanId
       if (resumeJobId) {
         try {
-          await this.hardStep(step, `resume job ${resumeJobId}`, () =>
+          const resumeResponse = await this.hardStep(step, `resume job ${resumeJobId}`, () =>
             sh.resumeJob(
               resumeJobId,
               `${event.payload.recoveryRunId || dramaId}-resume-job-${resumeJobId}`,
             ), { replaySafe: true })
           await patchDrama(db, dramaId, { jobId: resumeJobId })
-          artifactId = await pollJobArtifact(`resumed job ${resumeJobId}`, resumeJobId)
+          const completedArtifactId = resumedStoryJobArtifactId(resumeResponse)
+          if (completedArtifactId) {
+            await note(
+              `Sleeper Hit reports job ${resumeJobId} already complete — adopting its performance.`,
+              `resume-already-complete:${resumeJobId}`,
+            )
+            artifactId = completedArtifactId
+          } else {
+            artifactId = await pollJobArtifact(`resumed job ${resumeJobId}`, resumeJobId)
+          }
         } catch (error) {
           pendingResumePlanId = terminalStoryJobFallbackPlanId(error, recoveryOriginal?.planId)
           if (!pendingResumePlanId) throw error
@@ -357,8 +377,22 @@ export class HnrPipeline extends WorkflowEntrypoint {
                     },
                     { replaySafe: true },
                   )
+                  const completedArtifactId = resumeOutcome.kind === 'response'
+                    ? resumedStoryJobArtifactId(resumeOutcome.response)
+                    : null
                   const reusable = resumeOutcome.kind === 'response'
                     && shouldReuseResumedStoryJob(resumeOutcome.response)
+                  if (completedArtifactId) {
+                    // The read survived whatever killed the job (normally the
+                    // planned soundtrack). Take it instead of polling an hour
+                    // for a status transition that has already happened.
+                    await note(
+                      `Sleeper Hit reports job ${failedJobId} already complete — adopting its performance.`,
+                      `resume-already-complete:${failedJobId}:a${attempt}`,
+                    )
+                    artifactId = completedArtifactId
+                    continue
+                  }
                   if (reusable) {
                     await note(
                       `Sleeper Hit resumed job ${failedJobId} from its durable checkpoint — keeping the same performance…`,

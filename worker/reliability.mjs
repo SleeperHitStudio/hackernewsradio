@@ -1,3 +1,5 @@
+import { isMusicClassFailure } from './failure-classification.mjs'
+
 export const MIN_SPOKEN_WORDS_PER_PAGE = 55
 export const STORY_JOB_POLL_CHUNKS = 84
 export const AUTOTUNE_CLICK_DURATION_S = 0.5
@@ -56,6 +58,37 @@ export function isSpokenTakeThin(spokenWords, pageTarget) {
 }
 
 const TERMINAL_STORY_JOB_FAILURE = 'terminal-story-job-failure'
+const SALVAGED_STORY_JOB_ARTIFACT = 'salvaged-story-job-artifact'
+
+function tableReadArtifact(job) {
+  const artifacts = Array.isArray(job?.artifacts) ? job.artifacts : []
+  return artifacts.find((candidate) => candidate?.type === 'table_read') ?? artifacts[0] ?? null
+}
+
+/**
+ * The artifact id only when the read itself is finished. Used by the PARTIAL
+ * and music-salvage paths, where the JOB is not a proof of completeness, so the
+ * per-artifact status has to carry it. An artifact that reports any non-READY
+ * status is refused; a server that omits the field is trusted, matching how the
+ * READY-job path has always behaved.
+ */
+export function readyTableReadArtifactId(job) {
+  const artifact = tableReadArtifact(job)
+  if (!artifact?.id) return null
+  const status = String(artifact.status || '').toUpperCase()
+  return !status || status === 'READY' ? artifact.id : null
+}
+
+/**
+ * A read that became performable but whose PLANNED SOUNDTRACK failed is still
+ * the whole HNR deliverable — post-production overwrites those clips with the
+ * banked jazz theme regardless. Adopting it turns a Lyria outage from a total
+ * loss (a paid script and read, discarded) into an ordinary episode.
+ */
+export function salvageableMusicOnlyArtifactId(job) {
+  if (!isMusicClassFailure({ failureCode: job?.failureCode, failureMessage: job?.failureMessage })) return null
+  return readyTableReadArtifactId(job)
+}
 
 /**
  * Convert StoryJob status into a Workflow-serializable polling outcome.
@@ -67,8 +100,7 @@ const TERMINAL_STORY_JOB_FAILURE = 'terminal-story-job-failure'
 export function storyJobPollOutcome(job) {
   const status = String(job?.status || '').toUpperCase()
   if (status === 'READY') {
-    const artifact = (job?.artifacts ?? []).find((candidate) => candidate?.type === 'table_read')
-      ?? (job?.artifacts ?? [])[0]
+    const artifact = tableReadArtifact(job)
     if (artifact?.id) return artifact.id
     return {
       kind: TERMINAL_STORY_JOB_FAILURE,
@@ -77,7 +109,23 @@ export function storyJobPollOutcome(job) {
       message: 'Job finished but produced no artifact.',
     }
   }
+  // PARTIAL = at least one artifact is READY while other work continues. HNR
+  // requests exactly ONE table_read, so a READY read means the job has already
+  // delivered everything we asked for; the remaining work is the planned music
+  // we discard anyway. Waiting it out just burns the poll budget — which is
+  // exactly how a stalled Lyria queue used to time these runs out at 63 min.
+  if (status === 'PARTIAL') {
+    return readyTableReadArtifactId(job) ?? 'pending'
+  }
   if (status === 'FAILED' || status === 'CANCELED') {
+    const salvagedArtifactId = salvageableMusicOnlyArtifactId(job)
+    if (salvagedArtifactId) {
+      return {
+        kind: SALVAGED_STORY_JOB_ARTIFACT,
+        artifactId: salvagedArtifactId,
+        message: job?.failureMessage || 'Planned music did not complete.',
+      }
+    }
     return {
       kind: TERMINAL_STORY_JOB_FAILURE,
       status,
@@ -90,6 +138,25 @@ export function storyJobPollOutcome(job) {
 
 export function isTerminalStoryJobFailureOutcome(value) {
   return value?.kind === TERMINAL_STORY_JOB_FAILURE
+}
+
+export function isSalvagedStoryJobOutcome(value) {
+  return value?.kind === SALVAGED_STORY_JOB_ARTIFACT
+}
+
+/**
+ * Sleeper reports `already_complete` when a resumed job has nothing left to
+ * run. Its artifact is then the performance we were about to re-poll for an
+ * hour; adopt it rather than waiting for a status transition that never comes.
+ * Ambiguous multi-artifact responses fall through to normal polling.
+ */
+export function resumedStoryJobArtifactId(response) {
+  if (String(response?.action || '') !== 'already_complete') return null
+  const fromJob = readyTableReadArtifactId(response?.job)
+  if (fromJob) return fromJob
+  const ids = (Array.isArray(response?.artifactIds) ? response.artifactIds : [])
+    .filter((id) => typeof id === 'string' && id.trim())
+  return ids.length === 1 ? ids[0] : null
 }
 
 export function shouldRollFailedStoryJob(error) {

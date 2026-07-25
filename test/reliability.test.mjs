@@ -16,12 +16,14 @@ import {
   hasInFlightMusicClips,
   inspectBookends,
   isDefinitiveStoryJobResumeRejection,
+  isSalvagedStoryJobOutcome,
   isSpokenTakeThin,
   isTerminalStoryJobFailureOutcome,
   isTransientWorkflowError,
   minimumSpokenWords,
   pollInWorkflowChunks,
   postProductionIdempotencyScope,
+  resumedStoryJobArtifactId,
   runHardStep,
   shouldRollFailedStoryJob,
   shouldReuseResumedStoryJob,
@@ -430,4 +432,102 @@ test('Gruner dial click readiness fails closed for missing, draft, disabled, or 
       updateCue: async () => assert.fail('update should not run'),
     }), /Gruner dial click incomplete at entry 17/)
   }
+})
+
+const LYRIA_QUOTA_MESSAGE =
+  'Planned Lyria music clip failed: Lyria clip generation error (429) after 4 attempts: '
+  + 'Your prepayment credits are depleted. Please go to AI Studio to manage your project and billing.'
+const PERFORMABLE_MUSIC_MESSAGE =
+  'Table read became performable, but its planned music did not complete within the audio finishing budget.'
+
+test('a PARTIAL job whose table read is READY delivers the artifact instead of polling on', () => {
+  assert.equal(
+    storyJobPollOutcome({
+      status: 'PARTIAL',
+      artifacts: [{ id: 'art_partial', type: 'table_read', status: 'READY' }],
+    }),
+    'art_partial',
+  )
+})
+
+test('a PARTIAL job whose table read is still running keeps polling', () => {
+  assert.equal(
+    storyJobPollOutcome({
+      status: 'PARTIAL',
+      artifacts: [{ id: 'art_partial', type: 'table_read', status: 'RUNNING' }],
+    }),
+    'pending',
+  )
+  assert.equal(storyJobPollOutcome({ status: 'PARTIAL', artifacts: [] }), 'pending')
+})
+
+test('a job that failed only on planned music yields a salvageable performance', () => {
+  for (const failureMessage of [PERFORMABLE_MUSIC_MESSAGE, LYRIA_QUOTA_MESSAGE]) {
+    const outcome = storyJobPollOutcome({
+      status: 'FAILED',
+      failureMessage,
+      artifacts: [{ id: 'art_salvage', type: 'table_read', status: 'READY' }],
+    })
+    assert.equal(isSalvagedStoryJobOutcome(outcome), true, failureMessage)
+    assert.equal(isTerminalStoryJobFailureOutcome(outcome), false, failureMessage)
+    assert.equal(outcome.artifactId, 'art_salvage')
+  }
+})
+
+test('a music failure with no performable read stays terminal', () => {
+  const noArtifact = storyJobPollOutcome({
+    status: 'FAILED',
+    failureMessage: LYRIA_QUOTA_MESSAGE,
+    artifacts: [],
+  })
+  assert.equal(isTerminalStoryJobFailureOutcome(noArtifact), true)
+
+  const unfinishedRead = storyJobPollOutcome({
+    status: 'FAILED',
+    failureMessage: LYRIA_QUOTA_MESSAGE,
+    artifacts: [{ id: 'art_unfinished', type: 'table_read', status: 'FAILED' }],
+  })
+  assert.equal(isTerminalStoryJobFailureOutcome(unfinishedRead), true)
+})
+
+test('a non-music failure is never salvaged, even with a ready artifact', () => {
+  const outcome = storyJobPollOutcome({
+    status: 'FAILED',
+    failureMessage: 'Table-read script generation failed: Failed after 3 attempts. Last error: Service Unavailable',
+    artifacts: [{ id: 'art_bad', type: 'table_read', status: 'READY' }],
+  })
+  assert.equal(isSalvagedStoryJobOutcome(outcome), false)
+  assert.equal(isTerminalStoryJobFailureOutcome(outcome), true)
+})
+
+test('an already-complete resume hands back its performance', () => {
+  assert.equal(
+    resumedStoryJobArtifactId({
+      action: 'already_complete',
+      artifactIds: ['art_resumed'],
+      job: { status: 'FAILED', artifacts: [{ id: 'art_resumed', type: 'table_read', status: 'READY' }] },
+    }),
+    'art_resumed',
+  )
+  // artifactIds alone is enough when the job body carries no usable artifact.
+  assert.equal(
+    resumedStoryJobArtifactId({ action: 'already_complete', artifactIds: ['art_only'], job: null }),
+    'art_only',
+  )
+})
+
+test('a resume that requeued work is polled, not adopted', () => {
+  assert.equal(
+    resumedStoryJobArtifactId({
+      action: 'generation_requeued',
+      artifactIds: ['art_pending'],
+      job: { status: 'RUNNING' },
+    }),
+    null,
+  )
+  // An ambiguous multi-artifact response must not guess which read to adopt.
+  assert.equal(
+    resumedStoryJobArtifactId({ action: 'already_complete', artifactIds: ['a', 'b'], job: null }),
+    null,
+  )
 })
