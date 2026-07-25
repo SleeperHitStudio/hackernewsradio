@@ -13,6 +13,15 @@ export const QUOTA_CLASS_RE =
 export const CONTRACT_CLASS_RE =
   /is invalid:|Too big:|Invalid key in record|Supply every speaking character|Table-read outline page budgets total|scriptBlueprint\.pageTarget|Schema validation failed|response did not match schema/i
 
+/**
+ * Failures confined to the job's PLANNED SOUNDTRACK. HNR never ships planned
+ * music: post-production overwrites the bookends with the banked jazz theme and
+ * mutes every middle bed, so a read that became performable is the complete
+ * deliverable even when Lyria never rendered a note.
+ */
+export const MUSIC_CLASS_RE =
+  /planned music did not complete|planned lyria music clip|lyria clip generation|music clip (?:failed|generation)|soundtrack (?:render|generation) failed/i
+
 function failureSignals(value) {
   if (typeof value === 'string') return { code: '', message: value }
   if (!value || typeof value !== 'object') return { code: '', message: String(value || '') }
@@ -40,4 +49,14 @@ export function isQuotaClassFailure(value) {
 
 export function isContractClassFailure(value) {
   return classifySystemicFailure(value) === 'contract'
+}
+
+/**
+ * True when the ONLY thing that broke was the planned soundtrack. Deliberately
+ * message-scoped: a quota/provider outage that also killed the writer must stay
+ * a hard failure, because there is no performable read to salvage.
+ */
+export function isMusicClassFailure(value) {
+  const { code, message } = failureSignals(value)
+  return code === 'music_generation_failed' || MUSIC_CLASS_RE.test(message)
 }
