@@ -531,3 +531,68 @@ test('a resume that requeued work is polled, not adopted', () => {
     null,
   )
 })
+
+function fakeStep() {
+  return {
+    do: async (_label, optsOrFn, maybeFn) => (typeof optsOrFn === 'function' ? optsOrFn() : maybeFn()),
+    sleep: async () => {},
+  }
+}
+
+test('an unreadable probe is not counted as evidence the work is unfinished', async () => {
+  // The bug this closes: hnradio polled a job for 63 minutes and reported a
+  // bare "timed out" — while that exact job had gone READY 33 minutes earlier.
+  // Every probe had failed to read, which is indistinguishable from 'pending'.
+  let calls = 0
+  const probe = async () => {
+    calls += 1
+    if (calls <= 3) throw Object.assign(new Error('fetch failed'), { status: 0 })
+    return 'artifact_1'
+  }
+  assert.equal(await pollInWorkflowChunks(fakeStep(), 'job r1a1', 40, probe), 'artifact_1')
+  assert.equal(calls, 4)
+})
+
+test('a sustained run of unreadable probes fails with the cause, not a bare timeout', async () => {
+  const probe = async () => { throw Object.assign(new Error('Service Unavailable'), { status: 503 }) }
+  await assert.rejects(
+    pollInWorkflowChunks(fakeStep(), 'job r1a1', 84, probe, { maxConsecutiveUnreadable: 5 }),
+    (err) => {
+      assert.match(err.message, /could not be read for 5 consecutive probes/)
+      assert.match(err.message, /Service Unavailable/)
+      return true
+    },
+  )
+})
+
+test('a recovered read resets the unreadable streak', async () => {
+  let calls = 0
+  const probe = async () => {
+    calls += 1
+    // Alternating failures must never accumulate into a false hard failure.
+    if (calls % 2 === 1) throw Object.assign(new Error('connection reset'), { status: 0 })
+    return calls >= 8 ? 'artifact_2' : 'pending'
+  }
+  assert.equal(await pollInWorkflowChunks(fakeStep(), 'job r1a1', 40, probe, { maxConsecutiveUnreadable: 3 }), 'artifact_2')
+})
+
+test('an ordinary timeout still reports unreadable probes it saw along the way', async () => {
+  let calls = 0
+  const probe = async () => {
+    calls += 1
+    if (calls === 2) throw Object.assign(new Error('fetch failed'), { status: 0 })
+    return 'pending'
+  }
+  await assert.rejects(
+    pollInWorkflowChunks(fakeStep(), 'job r1a1', 5, probe),
+    (err) => {
+      assert.match(err.message, /timed out after 5 probes \(1 unreadable/)
+      return true
+    },
+  )
+})
+
+test('a terminal probe error is never swallowed as unreadable', async () => {
+  const probe = async () => { throw new Error('Table read FAILED') }
+  await assert.rejects(pollInWorkflowChunks(fakeStep(), 'job r1a1', 10, probe), /Table read FAILED/)
+})

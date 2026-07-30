@@ -58,6 +58,7 @@ export function isSpokenTakeThin(spokenWords, pageTarget) {
 }
 
 const TERMINAL_STORY_JOB_FAILURE = 'terminal-story-job-failure'
+const UNREADABLE_PROBE = 'unreadable-probe'
 const SALVAGED_STORY_JOB_ARTIFACT = 'salvaged-story-job-artifact'
 
 function tableReadArtifact(job) {
@@ -230,7 +231,12 @@ export async function runHardStep(step, label, fn, {
  */
 export async function pollInWorkflowChunks(step, label, maxChunks, probe, {
   interval = '45 seconds',
+  maxConsecutiveUnreadable = 12,
 } = {}) {
+  let consecutiveUnreadable = 0
+  let unreadableTotal = 0
+  let lastUnreadableMessage = null
+
   for (let chunk = 0; chunk < maxChunks; chunk++) {
     let result
     try {
@@ -238,19 +244,46 @@ export async function pollInWorkflowChunks(step, label, maxChunks, probe, {
         try {
           return await probe()
         } catch (error) {
-          if (isTransientWorkflowError(error)) return 'pending'
+          // Returned as DATA, not as 'pending'. A probe we could not read is
+          // not evidence the work is unfinished, and collapsing the two is how
+          // a finished job went unnoticed for 33 minutes before this reported
+          // a bare "timed out".
+          if (isTransientWorkflowError(error)) {
+            return { kind: UNREADABLE_PROBE, message: (error?.message || String(error)).slice(0, 200) }
+          }
           throw error
         }
       })
     } catch (error) {
       if (!isTransientWorkflowError(error)) throw error
-      result = 'pending'
+      result = { kind: UNREADABLE_PROBE, message: (error?.message || String(error)).slice(0, 200) }
     }
 
-    if (result !== 'pending') return result
+    if (result?.kind === UNREADABLE_PROBE) {
+      consecutiveUnreadable += 1
+      unreadableTotal += 1
+      lastUnreadableMessage = result.message
+      // A sustained run of unreadable probes is its own failure. Burning the
+      // whole budget on it hides the cause and can outlive work that already
+      // finished upstream.
+      if (consecutiveUnreadable >= maxConsecutiveUnreadable) {
+        throw new Error(
+          `${label} could not be read for ${consecutiveUnreadable} consecutive probes; last error: ${lastUnreadableMessage}`,
+        )
+      }
+    } else {
+      consecutiveUnreadable = 0
+      if (result !== 'pending') return result
+    }
+
     await step.sleep(`${label} wait#${chunk}`, interval)
   }
-  throw new Error(`${label} timed out.`)
+
+  throw new Error(
+    unreadableTotal > 0
+      ? `${label} timed out after ${maxChunks} probes (${unreadableTotal} unreadable; last error: ${lastUnreadableMessage}).`
+      : `${label} timed out.`,
+  )
 }
 
 export function bookendSceneIndexes(totalScenes) {
