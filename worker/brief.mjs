@@ -62,6 +62,13 @@ export function canonicalPinnedVoiceMap(pinnedVoices) {
  * Build the job-level request that reaches table-read generation. Existing
  * artifacts (resume/repair) return null so recovery never creates a new job or
  * changes the cast it is repairing.
+ *
+ * deferMusic: THE SHOW HAS EXACTLY ONE THEME AND IT IS ALREADY RENDERED. Sleeper
+ * otherwise runs a baseline coverage pass that scores ~50% of scenes with fresh
+ * Lyria beds — every one of which shapeMusic() then overwrites (the bookends)
+ * or mutes (everything else). That was 3-4 paid renders per episode that were
+ * never audible, and while the provider was rate-limited it took whole episodes
+ * down with it. Skipping the pass changes nothing a listener hears.
  */
 export function buildStoryJobArtifactRequests({
   existingArtifactId = null,
@@ -74,6 +81,7 @@ export function buildStoryJobArtifactRequests({
   return [{
     type: 'table_read',
     narrationPolicy,
+    deferMusic: true,
     ...(notes ? { notes } : {}),
     ...(voiceMap ? { voiceMap } : {}),
   }]

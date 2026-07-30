@@ -84,6 +84,7 @@ test('complete pinned cast is sent canonically with voiceId only', () => {
   }), [{
     type: 'table_read',
     narrationPolicy: 'suppress',
+    deferMusic: true,
     notes: 'Keep it fast.',
     voiceMap: {
       GARY: { voiceId: 'voice-gary' },
@@ -106,6 +107,7 @@ test('missing or incomplete pinned cast preserves the existing assignment reques
     }), [{
       type: 'table_read',
       narrationPolicy: 'suppress',
+      deferMusic: true,
       notes: 'Keep it fast.',
     }])
   }
@@ -117,4 +119,13 @@ test('resume and repair of an existing artifact never creates a cast-bearing job
     pinnedVoices: completePinnedVoices,
     notes: 'This must not be sent.',
   }), null)
+})
+
+test('every generated job defers the soundtrack — the jazz theme is banked, not rendered', () => {
+  // shapeMusic() overwrites the bookends with the banked theme and mutes every
+  // middle bed, so a coverage pass renders 3-4 clips nobody ever hears.
+  for (const pinnedVoices of [null, completePinnedVoices]) {
+    const [request] = buildStoryJobArtifactRequests({ pinnedVoices, notes: 'x' })
+    assert.equal(request.deferMusic, true)
+  }
 })
