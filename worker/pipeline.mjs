@@ -7,7 +7,7 @@
  */
 import { WorkflowEntrypoint } from 'cloudflare:workers'
 import { SleeperHit, SleeperHitError } from './sleeperhit.mjs'
-import { fetchThread, threadToTranscript } from './hn.mjs'
+import { fetchArticle, fetchThread, threadToTranscript } from './hn.mjs'
 import { classifySystemicFailure } from './failure-classification.mjs'
 import {
   AVATAR_STYLE,
@@ -71,6 +71,15 @@ export class HnrPipeline extends WorkflowEntrypoint {
       if (staggerSec > 0) await step.sleep('stagger', `${staggerSec} seconds`)
 
       const thread = await runWorkflowStepOnce(step, 'fetch thread', () => fetchThread(url))
+      // Best-effort, and its own step so a slow publisher cannot take the
+      // episode down with it: fetchArticle never throws, and an episode without
+      // the article is still an episode — just a shallower one.
+      thread.article = await runWorkflowStepOnce(step, 'fetch source article', async () => {
+        if (!thread.articleUrl) return null
+        const article = await fetchArticle(thread.articleUrl)
+        if (!article) console.log(`[hnr] source article unavailable for ${thread.articleUrl}`)
+        return article
+      })
       // A published episode remains playable while a repair is in flight. Its
       // replacement media is promoted only after finalize succeeds.
       if (!(recoveryOriginal?.status === 'ready' && recoveryOriginal?.audioUrl)) {
