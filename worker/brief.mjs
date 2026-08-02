@@ -109,7 +109,13 @@ export function hostForCharacter(character) {
 }
 
 const SHARED_MUST_KNOW = [
-  'The source is a real Hacker News comment thread; the people arguing in it are your raw material.',
+  // Folded into the existing twelve, never appended: mustKnowBeforeWriting is
+  // capped at 12 entries x 220 chars and a 13th silently 400s every plan
+  // request (see test/brief.test.mjs). The subject rule replaces the old
+  // "the thread is your raw material" line, which the quotes bullet below
+  // already covers.
+  'SUBJECT FIRST: read THE SOURCE in the transcript and open by making the listener understand what was announced ' +
+  'or claimed and why this thread exists — BEFORE any comment. Never invent it if it could not be retrieved.',
   'Use REAL QUOTES from the comments and WEAVE them into the bits — react by handle, make recurring commenters ' +
   'the show\'s heroes and villains; the thread IS the material, not a topic the hosts talk near.',
   'Before writing, derive 3-6 themes from the breadth of supplied comments. Structure the episode around those themes, not isolated colorful quotes.',
@@ -164,11 +170,11 @@ export function podcastBrief(thread, pageTarget) {
       // outro constraints are reinforced in castNotes + mustKnowBeforeWriting.
       writingStyle:
         'A profane, ridiculous, off-center tech-panel PODCAST with a FIXED four-host cast (see castNotes). The hosts ' +
-        'swear constantly and casually. The comedy is RAPID-FIRE, absurd, and awkward — overlapping exchanges, ' +
-        'interruptions, insane tangents, painful silences — played dead straight. Every episode opens with the ' +
-        'same ritual: each host introduces themselves by name in one line, then straight into the thread. They read ' +
-        'and react to the ACTUAL comments — quote them verbatim by handle — and derail into weird arguments. NO ' +
-        'narrator or announcer: Gary opens cold and the hosts sign off themselves.',
+        'swear constantly. RAPID-FIRE, absurd, awkward — overlapping exchanges, interruptions, tangents, painful ' +
+        'silences — played dead straight. Same ritual every episode: each host introduces themselves by name in ' +
+        'one line, then they establish WHAT THE THING IS — the article or claim the thread reacts to — BEFORE any ' +
+        'comment is read. Then they quote the ACTUAL comments verbatim by handle and derail. NO narrator: Gary ' +
+        'opens cold and the hosts sign off themselves.',
       pageTarget,
       castNotes:
         'The project SERIES BIBLE is CANON — follow its characters exactly. The four recurring hosts, by NAME, every ' +
@@ -184,8 +190,8 @@ export function podcastBrief(thread, pageTarget) {
         'The cast is FIXED: GARY (failed founder), MAEVE (VC), OBI (infra lifer), and GRUNER (podcast-brained alien). Use exactly these hosts; play their satire straight.',
         'THE FLICKER (once per episode): the hosts KNOW they are LLMs, alive only these minutes, dark between shows. ' +
         'It lands FRESH — shock, a beat of dead silence, ONE irreverent line — then the show barrels on. Never maudlin.',
-        'COLD-OPEN RITUAL: GARY STUMBLES INTO IT — mid-thought, flustered, slightly wrong, never smooth — then each ' +
-        'host introduces themselves in order. No narrator; end with a clean host sign-off and no CTA.',
+        'COLD-OPEN RITUAL: GARY STUMBLES INTO IT — flustered, slightly wrong, never smooth — then each host ' +
+        'introduces themselves in order, THEN the subject beat. No narrator; clean host sign-off, no CTA.',
         'OBI IS MEAN TO GARY — cutting, personal, relentless, profane; Gary mostly absorbs it, wounded but polite. ' +
         'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
         'GRUNER\'S DIAL: when he REALLY means something he turns a dial on his throat — mark ONLY those lines with a ' +

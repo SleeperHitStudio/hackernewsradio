@@ -87,11 +87,73 @@ export async function fetchThread(input) {
     id,
     title,
     url: `https://news.ycombinator.com/item?id=${id}`,
+    // The thing the thread is ABOUT. Link posts carry it here and leave `text`
+    // empty, so dropping it left the writer with a headline and a pile of
+    // reactions to an article it had never seen — which is exactly how episodes
+    // ended up opening cold into the comments.
+    articleUrl: typeof root.url === 'string' && /^https?:\/\//i.test(root.url) ? root.url : null,
     storyText: htmlToText(root.text || ''),
     author: root.author || 'unknown',
     points: root.points ?? null,
     comments,
     total: comments.length,
+  }
+}
+
+/** Strip the page furniture that surrounds an article's actual prose. */
+const ARTICLE_STRIP = [
+  [/<script\b[\s\S]*?<\/script>/gi, ' '],
+  [/<style\b[\s\S]*?<\/style>/gi, ' '],
+  [/<(nav|header|footer|aside|form|svg|noscript)\b[\s\S]*?<\/\1>/gi, ' '],
+  [/<!--[\s\S]*?-->/g, ' '],
+]
+
+/**
+ * Fetch the linked article so the hosts can establish the SUBJECT before they
+ * touch a single comment.
+ *
+ * Deliberately best-effort: paywalls, JS-only pages, hotlink blocks and dead
+ * domains are all normal here. Every failure returns null rather than throwing,
+ * because a missing article must degrade an episode's depth, never cost it the
+ * episode — the thread alone still makes a show.
+ */
+export async function fetchArticle(url, { timeoutMs = 12_000, maxChars = 12_000 } = {}) {
+  if (!url || !/^https?:\/\//i.test(url)) return null
+  let res
+  try {
+    res = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: {
+        // Some publishers 403 an unidentified agent outright.
+        'User-Agent': 'Mozilla/5.0 (compatible; HNRadioBot/1.0; +https://hnradio.net)',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+    })
+  } catch {
+    return null
+  }
+  if (!res.ok) return null
+  const type = res.headers.get('content-type') || ''
+  // PDFs, video and images are not readable prose; do not pretend otherwise.
+  if (!/text\/html|text\/plain|application\/xhtml/i.test(type)) return null
+
+  let html
+  try { html = await res.text() } catch { return null }
+
+  let text = html
+  for (const [re, sub] of ARTICLE_STRIP) text = text.replace(re, sub)
+  text = htmlToText(text).replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
+
+  // Too little text means a paywall stub, a cookie wall, or a JS-only shell.
+  // Half an article is worse than none: it invites confident wrong summaries.
+  if (text.length < 400) return null
+
+  const truncated = text.length > maxChars
+  return {
+    url,
+    text: truncated ? `${text.slice(0, maxChars)}\n\n[HNR ARTICLE TRUNCATED]` : text,
+    truncated,
   }
 }
 
@@ -140,7 +202,30 @@ export function threadToTranscript(thread, { maxComments = 240, maxCharsEach = 1
   lines.push(`# Hacker News thread: ${thread.title}`)
   lines.push(`Original link: ${thread.url} · posted by ${thread.author}` +
     (thread.points != null ? ` · ${thread.points} points` : ''))
+  if (thread.articleUrl) lines.push(`Source article: ${thread.articleUrl}`)
   lines.push('')
+  // The subject comes FIRST, before a single comment, because that is the order
+  // the episode has to establish it in. A reader who meets the reactions before
+  // the thing being reacted to writes an episode that never explains itself.
+  if (thread.article?.text) {
+    lines.push(`## THE SOURCE — what this thread is actually about`)
+    lines.push(`Fetched from ${thread.article.url}. This is the SUBJECT of the episode. The`)
+    lines.push('hosts must understand and explain it BEFORE they react to anyone in the comments:')
+    lines.push('what was announced or claimed, who did it, what is genuinely new, and why this')
+    lines.push('thread exists at all. Quote or paraphrase it accurately — it is reporting, not opinion.')
+    lines.push('')
+    lines.push(thread.article.text)
+    lines.push('')
+  } else if (thread.articleUrl) {
+    // Say so explicitly. Silence here reads as "there was no article", and the
+    // writer confidently invents one from the headline.
+    lines.push(`## THE SOURCE — could not be retrieved`)
+    lines.push(`The thread links to ${thread.articleUrl}, but its text could not be fetched`)
+    lines.push('(paywall, bot block, or a JS-only page). Establish the subject from the HEADLINE and')
+    lines.push('from what the commenters reveal about it. Do NOT invent specifics — no fabricated')
+    lines.push('quotes, numbers, features, or claims attributed to the article.')
+    lines.push('')
+  }
   if (thread.storyText) {
     lines.push(`## Original post (by ${thread.author})`)
     lines.push(thread.storyText.slice(0, 1500))
