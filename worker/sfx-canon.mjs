@@ -147,6 +147,12 @@ export async function enforceSfxCanon(sh, artifactId) {
         label: entry.label,
         prompt: entry.prompt,
         isDisabled: false,
+        // WITHOUT this the cue keeps the audio it was already rendered with and
+        // only the NAME changes — Gary's gag would still sound different every
+        // episode while claiming to be canonical. `regenerate` re-resolves the
+        // cue against the SFX bank, and because the prompt above is a banked
+        // key that resolves to a REUSE, not a fresh provider call.
+        regenerate: true,
       })
     }
     summary.kept += 1
