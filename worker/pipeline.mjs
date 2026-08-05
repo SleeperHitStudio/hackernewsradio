@@ -9,6 +9,7 @@ import { WorkflowEntrypoint } from 'cloudflare:workers'
 import { SleeperHit, SleeperHitError } from './sleeperhit.mjs'
 import { fetchArticle, fetchThread, threadToTranscript } from './hn.mjs'
 import { classifySystemicFailure } from './failure-classification.mjs'
+import { enforceSfxCanon } from './sfx-canon.mjs'
 import {
   AVATAR_STYLE,
   HOSTS,
@@ -450,25 +451,24 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await step.sleep('post-prod break 2', '2 seconds')
       await this.autotuneAlien(step, db, sh, dramaId, artifactId, note, postProductionScope)
       await step.sleep('post-prod break 2b', '2 seconds')
-      await runWorkflowStepOnce(step, 'normalize cable static', async () => {
-        // Gary's cable gag: whatever the writer/detector authored, the SOUND is
-        // always the same canonical 1-2s of soft radio static — an identical
-        // prompt reuses ONE banked asset via the SFX library (like the theme).
+      await runWorkflowStepOnce(step, 'enforce sfx whitelist', async () => {
+        // The show has ELEVEN sounds and the model does not get to add a
+        // twelfth. It may still choose WHERE a cue lands; the sound itself is
+        // rewritten to a banked asset or the cue is switched off. Rewriting to
+        // the canonical prompt reuses that asset instead of rendering new audio,
+        // exactly the way the jazz theme is reused. See worker/sfx-canon.mjs for
+        // why: 555 effects across 362 labels, some of them drums and horns the
+        // Series Bible bans outright.
         try {
-          const cues = await sh.listSfxCues(artifactId)
-          for (const c of cues) {
-            const description = `${c.label} ${c.prompt}`
-            if (/phone.*buzz|buzz.*phone|phone.*vibrat|vibrat.*phone/i.test(description)) {
-              await sh.updateSfxCue(artifactId, c.id, { isDisabled: true })
-            } else if (/static|unplug|cable|disconnect/i.test(description)) {
-              await sh.updateSfxCue(artifactId, c.id, {
-                label: 'Cable Static',
-                prompt: 'one to two seconds of soft radio static, like snow on an old television — low, muffled, gentle',
-                volume: 0.5,
-              })
-            }
+          const summary = await enforceSfxCanon(sh, artifactId)
+          if (summary.disabled > 0) {
+            await note(`sfx: kept ${summary.kept} whitelisted cue(s), silenced ${summary.disabled} off-list`)
           }
-        } catch { /* best-effort */ }
+        } catch (err) {
+          // A failure here means the episode keeps whatever the model authored,
+          // which is the pre-whitelist behaviour — degraded, never fatal.
+          console.log(`[hnr] sfx whitelist enforcement skipped: ${err?.message || err}`)
+        }
       })
       await step.sleep('post-prod break 3', '2 seconds')
       await runWorkflowStepOnce(step, 'pin headshots', async () => {

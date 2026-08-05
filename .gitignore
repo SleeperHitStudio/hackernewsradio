@@ -11,3 +11,6 @@ data/dramas.json
 
 # claude harness state (keep skills, drop lockfile)
 .claude/scheduled_tasks.lock
+
+# graphify skill output — generated, never committed
+graphify-out/
