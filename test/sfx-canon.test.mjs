@@ -120,12 +120,32 @@ test('enforcement rewrites what it can and disables the rest', async () => {
     label: 'Cable pop and static crackle',
     prompt: 'sharp cable pop followed by a brief static crackle',
     isDisabled: false,
+    regenerate: true,
   })
   assert.deepEqual(updates.find((u) => u.id === 'c2'), { id: 'c2', isDisabled: true })
   // Right label, wrong prompt: still corrected, or it renders a new asset.
   assert.equal(updates.find((u) => u.id === 'c3').prompt, 'soft electronic buzzing of a neon sign')
   // Already off — no redundant write.
   assert.equal(updates.find((u) => u.id === 'c4'), undefined)
+})
+
+test('a rewritten cue re-resolves its audio instead of just being renamed', async () => {
+  // Changing label/prompt alone leaves soundUrl pointing at whatever was
+  // originally rendered, so the cue would CLAIM to be canonical while still
+  // playing the rogue sound. Every rewrite must carry regenerate.
+  const updates = []
+  const sh = {
+    listSfxCues: async () => [
+      { id: 'c1', label: 'Radio Static', prompt: 'harsh hiss', isDisabled: false },
+      { id: 'c2', label: 'Mic Click', prompt: 'a click', isDisabled: false },
+    ],
+    updateSfxCue: async (_artifact, id, fields) => { updates.push({ id, ...fields }) },
+  }
+  await enforceSfxCanon(sh, 'art_1')
+  assert.equal(updates.length, 2)
+  for (const update of updates) {
+    assert.equal(update.regenerate, true, `${update.id} must re-resolve its audio`)
+  }
 })
 
 test('enforcement never asks the bank for an unlisted prompt', async () => {
