@@ -186,6 +186,85 @@ function selectAcrossBranches(comments, maxComments) {
   return selected
 }
 
+/**
+ * The transcript's comment section is sized by TOTAL characters, not by a
+ * comment count.
+ *
+ * A flat cap of 240 comments dropped 14% of episodes' threads, and the loss
+ * landed hardest exactly where it hurt most: the 1057-comment GPT-5.6 thread
+ * reached the writer as 240 comments, so it wrote an episode about a
+ * discussion it had seen a fifth of. Meanwhile the per-comment cap was nearly
+ * inert — the median HN comment is ~160 characters and under 1% run past 1600
+ * — so the count was throwing away breadth to protect a budget that length was
+ * never actually spending.
+ *
+ * Budgeting by characters inverts that. Ordinary threads arrive complete and
+ * untouched; only a genuinely enormous one tightens per-comment excerpts, and
+ * every commenter still appears. 360k characters is roughly 90k tokens, which
+ * holds every thread this show has covered at full length.
+ */
+export const TRANSCRIPT_COMMENT_BUDGET = 360_000
+export const TRANSCRIPT_MAX_CHARS_EACH = 1600
+/**
+ * Below this an excerpt stops being a quote and becomes a fragment the hosts
+ * cannot honestly read aloud, so a thread big enough to need it loses comments
+ * instead — the one case where dropping beats mangling.
+ */
+export const TRANSCRIPT_MIN_CHARS_EACH = 260
+
+/** Total characters a set of comments costs when each is capped at `charsEach`. */
+function budgetCost(comments, charsEach) {
+  let total = 0
+  for (const comment of comments) total += Math.min(comment.text.length, charsEach)
+  return total
+}
+
+/**
+ * Fit every comment into the budget, tightening excerpts only as far as needed.
+ *
+ * @returns {{ comments: Array, charsEach: number, complete: boolean }}
+ */
+export function planCommentBudget(comments, {
+  budget = TRANSCRIPT_COMMENT_BUDGET,
+  maxCharsEach = TRANSCRIPT_MAX_CHARS_EACH,
+  minCharsEach = TRANSCRIPT_MIN_CHARS_EACH,
+} = {}) {
+  if (comments.length === 0) return { comments, charsEach: maxCharsEach, complete: true }
+
+  // The common case: everything fits at full length, so nothing is touched.
+  if (budgetCost(comments, maxCharsEach) <= budget) {
+    return { comments, charsEach: maxCharsEach, complete: true }
+  }
+
+  // Largest per-comment allowance that still fits the whole thread. Binary
+  // search rather than a divide, because cost is capped per comment — short
+  // comments do not grow to fill the allowance, so cost is sublinear in it.
+  let low = minCharsEach
+  let high = maxCharsEach
+  let best = null
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2)
+    if (budgetCost(comments, mid) <= budget) {
+      best = mid
+      low = mid + 1
+    } else {
+      high = mid - 1
+    }
+  }
+  if (best !== null) return { comments, charsEach: best, complete: true }
+
+  // Even the floor does not fit. Keep breadth over depth: sample across
+  // top-level branches so the debate's shape survives, and say so in the
+  // transcript rather than letting the writer assume it saw everything.
+  const perComment = minCharsEach
+  const affordable = Math.max(1, Math.floor(budget / perComment))
+  return {
+    comments: selectAcrossBranches(comments, affordable),
+    charsEach: perComment,
+    complete: false,
+  }
+}
+
 function excerpt(text, maxChars) {
   if (text.length <= maxChars) return text
   const prefix = text.slice(0, maxChars)
@@ -195,9 +274,10 @@ function excerpt(text, maxChars) {
   return `${prefix.slice(0, Math.max(1, end)).trim()} [HNR EXCERPT SHORTENED]`
 }
 
-/** Render a branch-balanced, reply-aware transcript for the Story API. */
-export function threadToTranscript(thread, { maxComments = 240, maxCharsEach = 1600 } = {}) {
-  const comments = selectAcrossBranches(thread.comments, maxComments)
+/** Render a complete, reply-aware transcript for the Story API. */
+export function threadToTranscript(thread, budgetOptions = {}) {
+  const plan = planCommentBudget(thread.comments, budgetOptions)
+  const comments = plan.comments
   const lines = []
   lines.push(`# Hacker News thread: ${thread.title}`)
   lines.push(`Original link: ${thread.url} · posted by ${thread.author}` +
@@ -231,13 +311,21 @@ export function threadToTranscript(thread, { maxComments = 240, maxCharsEach = 1
     lines.push(thread.storyText.slice(0, 1500))
     lines.push('')
   }
-  lines.push(`## Comments (${thread.total} total; ${comments.length} included across top-level reply branches)`)
+  lines.push(plan.complete
+    ? `## Comments (all ${thread.total} of them — this is the ENTIRE thread)`
+    : `## Comments (${thread.total} total; ${comments.length} included across top-level reply branches)`)
   lines.push('Source note: comments are complete unless explicitly marked [HNR EXCERPT SHORTENED]. Never claim an unmarked comment was cut off.')
+  if (!plan.complete) {
+    // Only say this when it is true. Telling the writer it saw a sample of a
+    // thread it actually saw in full invites hedging about what it "might have
+    // missed" in an episode that missed nothing.
+    lines.push('This thread is large enough that it was sampled across top-level branches; you are seeing the breadth of the debate, not every reply.')
+  }
   lines.push('')
   for (const c of comments) {
     const indent = '  '.repeat(Math.min(c.depth, 6))
     const reply = c.parentId ? ` reply_to=${c.parentId}` : ''
-    const body = excerpt(c.text, maxCharsEach)
+    const body = excerpt(c.text, plan.charsEach)
     lines.push(`${indent}- [comment=${c.id}${reply}] ${c.author}: ${body.replace(/\n+/g, ' ')}`)
   }
   return lines.join('\n')
