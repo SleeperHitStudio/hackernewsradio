@@ -10,6 +10,7 @@ import { SleeperHit, SleeperHitError } from './sleeperhit.mjs'
 import { fetchArticle, fetchThread, threadToTranscript } from './hn.mjs'
 import { classifySystemicFailure } from './failure-classification.mjs'
 import { enforceSfxCanon } from './sfx-canon.mjs'
+import { SHOW_MEMORY_KEY, appendMemory, buildSeriesContext, extractEpisodeMemory } from './show-memory.mjs'
 import {
   AVATAR_STYLE,
   HOSTS,
@@ -248,7 +249,12 @@ export class HnrPipeline extends WorkflowEntrypoint {
       if (!artifactId) {
         const jobScope = storyJobIdempotencyScope(dramaId, event.payload.recoveryRunId)
         for (let round = 1; artifactId === null; round++) {
-          const brief = buildBrief(thread, pageTarget)
+          // The show's running memory. Read fresh each round so a retry after a
+          // failed draft still sees what earlier episodes spent.
+          const seriesContext = await runWorkflowStepOnce(step, `series memory r${round}`, async () => {
+            try { return buildSeriesContext(await getSetting(db, SHOW_MEMORY_KEY)) } catch { return null }
+          })
+          const brief = buildBrief(thread, pageTarget, seriesContext)
           let planId = null
           if (pendingResumePlanId) {
             planId = pendingResumePlanId
@@ -468,6 +474,30 @@ export class HnrPipeline extends WorkflowEntrypoint {
           // A failure here means the episode keeps whatever the model authored,
           // which is the pre-whitelist behaviour — degraded, never fatal.
           console.log(`[hnr] sfx whitelist enforcement skipped: ${err?.message || err}`)
+        }
+      })
+      await runWorkflowStepOnce(step, 'record show memory', async () => {
+        // What this episode actually spent, so the next one reaches elsewhere in
+        // each character's range instead of defaulting to the same few bits.
+        // Read from the FINISHED script rather than the brief: what was asked
+        // for and what got written are different things, and only the second
+        // one is the show's history.
+        try {
+          const entries = await sh.getScriptEntries(artifactId)
+          const script = entries.map((e) => `${e.character}: ${e.text}`).join('\n')
+          if (!script.trim()) return
+          const drama = await getDrama(db, dramaId)
+          const episode = extractEpisodeMemory(script, { hnId: drama?.hnId, title: drama?.title })
+          await setSetting(db, SHOW_MEMORY_KEY, appendMemory(await getSetting(db, SHOW_MEMORY_KEY), episode))
+          if (episode.violations.length > 0) {
+            // A retired reference came back. Worth seeing in the episode log
+            // rather than discovering it in the audio months later.
+            await note(`canon: retired reference used — ${episode.violations.join(', ')}`)
+          }
+        } catch (err) {
+          // Memory is an improvement to the NEXT episode, never a reason to
+          // fail this one.
+          console.log(`[hnr] show memory skipped: ${err?.message || err}`)
         }
       })
       await step.sleep('post-prod break 3', '2 seconds')

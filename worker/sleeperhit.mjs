@@ -423,6 +423,12 @@ export class SleeperHit {
     })
   }
 
+  /** Every dialogue entry in the read, in order — the whole spoken script. */
+  async getScriptEntries(artifactId, { limit = 2000 } = {}) {
+    const res = await this.request(`/artifacts/${artifactId}/script?limit=${limit}`)
+    return res.script?.selection?.entries ?? []
+  }
+
   /** One character's dialogue entries ({ entryIndex, character, text }), via the script's character scope. */
   async getCharacterEntries(artifactId, character) {
     const qs = `scope=character&character=${encodeURIComponent(character)}&limit=500`

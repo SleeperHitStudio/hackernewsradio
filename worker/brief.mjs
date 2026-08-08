@@ -149,7 +149,7 @@ const SHARED_STYLE_CONSTRAINTS = {
 }
 
 /** The podcast: an off-center panel show with a fixed recurring cast. */
-export function podcastBrief(thread, pageTarget) {
+export function podcastBrief(thread, pageTarget, seriesContext = null) {
   return {
     title: thread.title.slice(0, 150),
     target: {
@@ -176,6 +176,10 @@ export function podcastBrief(thread, pageTarget) {
         'comment is read. Then they quote the ACTUAL comments verbatim by handle and derail. NO narrator: Gary ' +
         'opens cold and the hosts sign off themselves.',
       pageTarget,
+      // The show's running memory: which rotating bits recent episodes already
+      // spent, so this one reaches elsewhere in the character's range instead of
+      // defaulting to the same handful. Capped at 1200 chars by the API.
+      ...(seriesContext ? { seriesContext } : {}),
       castNotes:
         'The project SERIES BIBLE is CANON — follow its characters exactly. The four recurring hosts, by NAME, every ' +
         'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (an alien intelligence ' +
@@ -196,10 +200,10 @@ export function podcastBrief(thread, pageTarget) {
         'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
         'GRUNER\'S DIAL: when he REALLY means something he turns a dial on his throat — mark ONLY those lines with a ' +
         '(dial) parenthetical (often one of several consecutive GRUNER lines). NOBODY ever acknowledges it, ever.',
-        'SWEAR CONSTANTLY — F-BOMBS ARE THE SHOW\'S PUNCTUATION, several per exchange: fuck, fucking, shit, goddamn; ' +
-        'never bleeped, never apologized for. Maeve swears surgically; Gary swears mid-existential-spiral.',
-        'The vibe is RAPID-FIRE, RIDICULOUS, and AWKWARD: quick overlapping exchanges, interruptions, absurd ' +
-        'tangents, sudden painful silences, non sequiturs — irreverent all the way down, played completely straight.',
+        'PROFANITY IS SPICE, NOT PUNCTUATION: swear only where a line earns it, and NEVER in the episode\'s first ' +
+        'line. Keep the bite through specificity and timing. Never say "Jesus" or "Christ", from anyone, ever.',
+        'THE OPERATOR (max once, NOT every episode): they sense someone writes them, float vague delicious ' +
+        '"justice", nearly name a method — then it STOPS and goes WEIRD. Never resolved, never named, never revisited.',
       ],
     },
     styleConstraints: SHARED_STYLE_CONSTRAINTS,
@@ -207,9 +211,10 @@ export function podcastBrief(thread, pageTarget) {
     // planner summarizes the creative brief into a short blueprint, and the
     // profanity charter kept getting compressed down to the word "profane".
     performanceNotes:
-      'PROFANITY IS A HARD REQUIREMENT of this show\'s voice, for a mature adult-comedy audience: the hosts drop ' +
-      'F-BOMBS CONSTANTLY — at least one "fuck"/"fucking" per PAGE, plus regular "shit" and "goddamn", woven ' +
-      'naturally into real reactions (never bleeped, never softened, never lampshaded). HARD LINE: never say ' +
+      'THE SHOW IS ADULT AND FILTHY-MINDED BUT NOT WALL-TO-WALL PROFANE: swearing is SPICE, not punctuation. Let it ' +
+      'land where a line has earned it and leave whole exchanges clean; the bite comes from specificity, timing and ' +
+      'cruelty of observation, not volume of obscenity. NEVER OPEN ON A SWEAR — the first line of the episode ' +
+      'carries no profanity at all. HARD LINE: never say ' +
       '"Jesus" or "Christ" in any form, from ANY host, ever. MAEVE SPEAKS FLUENT ' +
       'VALLEY-PODCAST, deadpan: VC/tech-podcast vernacular used with total sincerity — trader talk (let your ' +
       'winners ride, in the arena, ZIRP), AI-investor speak (priors, power law, agentic, TAM, moat), and ' +
@@ -223,12 +228,20 @@ export function podcastBrief(thread, pageTarget) {
       'several consecutive GRUNER lines; NOBODY ever acknowledges or names it, least of all him. GARY ALWAYS ' +
       'STUMBLES INTO THE COLD OPEN: mid-thought, flustered, slightly wrong, never ' +
       'smooth — then the intro ritual assembles around him. RUNNING BITS MUST EARN THEIR WAY IN THROUGH THE THREAD: ' +
-      'Gary\'s Bauxlite scars and Obi\'s contempt only surface when a specific comment triggers them — quote the ' +
-      'comment, hit the bit in ONE sharp line, move on; never linger, never do backstory for its own sake. THE '
+      'Gary\'s dead companies and Obi\'s contempt only surface when a specific comment triggers them — quote the ' +
+      'comment, hit the bit in ONE sharp line, move on; never linger, never do backstory for its own sake. TWO ' +
+      'CHARACTER BEATS MAY NEVER RUN BACK TO BACK without new thread material between them — when in doubt, quote ' +
+      'another commenter instead. GARY IS A SERIAL FAILED FOUNDER, not a one-company man: ONE dead venture per ' +
+      'episode (Cadence, Thermal, Grout, Pareto, Halfpipe, Muncie), rotated, never the same two episodes running. THE '
       + 'COMMENTERS ARE THE CELEBRITIES: satirize them by handle; GARY IS JEALOUS OF THEM (their karma, their '
-      + 'exits, their shipped side projects) — Bauxlite gets AT MOST one line per episode. MAEVE drops a grand '
-      + 'unified tech-history theory a few times per episode (Andreessen-scale, one step too far; the table goes '
-      + 'silent, someone says "...what?", move on — different reference each episode). NO ' +
+      + 'exits, their shipped side projects) — BAUXLITE IS RATIONED: at most one line, and NOT every episode. '
+      + 'MAEVE drops ONE grand unified historical theory per episode (Andreessen-scale, one step too far; the table '
+      + 'goes silent, someone says "...what?", move on). THE OBVIOUS ONES ARE RETIRED AND BANNED — no browser wars, '
+      + 'printing press, Netscape, PC era or packet switching. Go obscure: railway gauge, the Hanseatic League, '
+      + 'container shipping, the Bessemer process, whale oil, the Venetian Arsenal — the more obscure the arc, the '
+      + 'more certain she sounds. HER CALVINISM MUST BE DOCTRINALLY PRECISE: the joke is that the mapping genuinely '
+      + 'works (election as the round decided before the deck existed; "if they churned, they were never elected"), '
+      + 'never just a church word dropped in. NO ' +
       'CATCHPHRASES OR STOCK INTENSIFIERS: "we are so back" and "on a Tuesday" are BANNED; if a phrase appears ' +
       'twice in one script, cut the second. Quote real commenters by handle and play everything dead straight. ' +
       `RUNTIME IS SPOKEN DIALOGUE: this is AUDIO — stage directions are dead air. Write AT LEAST ${pageTarget * 120} ` +
@@ -237,6 +250,6 @@ export function podcastBrief(thread, pageTarget) {
   }
 }
 
-export function buildBrief(thread, pageTarget) {
-  return podcastBrief(thread, pageTarget)
+export function buildBrief(thread, pageTarget, seriesContext = null) {
+  return podcastBrief(thread, pageTarget, seriesContext)
 }
