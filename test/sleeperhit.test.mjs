@@ -12,6 +12,42 @@ test('Sleeper client StoryJob polling budget is at least 60 minutes', () => {
   assert.ok(STORY_JOB_POLL_ATTEMPTS * STORY_JOB_POLL_INTERVAL_MS >= 60 * 60 * 1000)
 })
 
+test('text source uploads preserve the full-context policy and completeness proof', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const calls = []
+  client.request = async (path, options) => {
+    calls.push({ path, options })
+    return { source: { id: 'source_1' } }
+  }
+  const metadata = {
+    sourceProducer: 'hackernewsradio',
+    sourceContextMode: 'full',
+    sourceCompleteness: { comments: { complete: true, expected: 2, fetched: 2 } },
+  }
+
+  const sourceId = await client.addTextSource('project_1', {
+    content: 'ARTICLE-END\nCOMMENT-END',
+    label: 'HN thread 42',
+    metadata,
+    idempotencyKey: 'episode-source',
+  })
+
+  assert.equal(sourceId, 'source_1')
+  assert.deepEqual(calls, [{
+    path: '/story-projects/project_1/sources',
+    options: {
+      method: 'POST',
+      idempotencyKey: 'episode-source',
+      body: {
+        type: 'text',
+        content: 'ARTICLE-END\nCOMMENT-END',
+        label: 'HN thread 42',
+        metadata,
+      },
+    },
+  }])
+})
+
 test('plan and job recovery call the same-resource resume endpoints with stable keys', async () => {
   const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
   const calls = []

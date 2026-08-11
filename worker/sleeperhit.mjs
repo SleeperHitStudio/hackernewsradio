@@ -119,11 +119,16 @@ export class SleeperHit {
     return res.project.id
   }
 
-  /** Add the thread as a plain-text source (the planner digests it). */
-  async addTextSource(projectId, { content, label, idempotencyKey }) {
+  /** Add the verified thread/article pack as a plain-text source. */
+  async addTextSource(projectId, { content, label, metadata, idempotencyKey }) {
     const res = await this.request(`/story-projects/${projectId}/sources`, {
       method: 'POST', idempotencyKey: idempotencyKey || true,
-      body: { type: 'text', content, ...(label ? { label } : {}) },
+      body: {
+        type: 'text',
+        content,
+        ...(label ? { label } : {}),
+        ...(metadata ? { metadata } : {}),
+      },
     })
     return res.source.id
   }

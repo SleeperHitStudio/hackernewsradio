@@ -16,7 +16,9 @@
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "express": "^4.21.2",
+    "linkedom": "^0.18.13",
     "pg": "^8.21.0",
     "posthog-js": "^1.399.2"
   },

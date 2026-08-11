@@ -1,11 +1,41 @@
+import { Readability } from '@mozilla/readability'
+import { parseHTML } from 'linkedom'
+
 /**
- * Fetch a Hacker News thread and flatten it into a clean transcript the Story
- * API can digest. Uses the public Algolia HN API (no key, no rate-limit pain):
- *   https://hn.algolia.com/api/v1/items/<id>  →  nested comment tree.
+ * HNR's source contract is deliberately fail-closed:
+ *
+ * - Hacker News metadata/counts come from the official Firebase API.
+ * - Comment bodies come from Algolia's paginated story-comment search.
+ * - A thread is returned only when both services agree on the exact count.
+ * - Linked articles are fully consumed and reader-extracted without clipping.
+ *
+ * A source that cannot be proved complete is not eligible for generation. That
+ * is the only honest way to make every *generated* episode fully grounded.
  */
 
+export const HN_FIREBASE_BASE = 'https://hacker-news.firebaseio.com/v0'
+export const HN_ALGOLIA_BASE = 'https://hn.algolia.com/api/v1'
+export const HN_FETCH_TIMEOUT_MS = 20_000
+export const ARTICLE_FETCH_TIMEOUT_MS = 20_000
+export const ARTICLE_FETCH_MAX_BYTES = 5_000_000
+export const ARTICLE_MIN_CHARS = 400
+export const ARTICLE_BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+
+// Sleeper Hit retains at most 1.5M characters for full-source grounding and
+// accepts at most 4MB for inline text. HNR must reject above either boundary;
+// letting the platform clamp would silently violate this module's guarantee.
+export const STORY_SOURCE_MAX_CHARS = 1_500_000
+export const STORY_SOURCE_MAX_BYTES = 4_000_000
+
 export class HNError extends Error {
-  constructor(message) { super(message); this.name = 'HNError' }
+  constructor(message, { code = 'hn_source_error', details = null, cause } = {}) {
+    super(message, cause ? { cause } : undefined)
+    this.name = 'HNError'
+    this.code = code
+    this.details = details
+  }
 }
 
 /** Pull the numeric item id out of any HN URL (or a bare id). */
@@ -13,320 +43,831 @@ export function parseItemId(input) {
   const raw = String(input ?? '').trim()
   if (/^\d+$/.test(raw)) return raw
   let url
-  try { url = new URL(raw) } catch { throw new HNError(`Not a valid Hacker News URL: ${raw}`) }
+  try { url = new URL(raw) } catch { throw new HNError(`Not a valid Hacker News URL: ${raw}`, { code: 'hn_url_invalid' }) }
   const host = url.hostname.replace(/^www\./, '')
   if (host !== 'news.ycombinator.com' && host !== 'hn.algolia.com') {
-    throw new HNError(`Expected a news.ycombinator.com link, got ${host}`)
+    throw new HNError(`Expected a news.ycombinator.com link, got ${host}`, { code: 'hn_url_invalid' })
   }
   const id = url.searchParams.get('id')
-  if (!id || !/^\d+$/.test(id)) throw new HNError(`No item id in URL: ${raw}`)
+  if (!id || !/^\d+$/.test(id)) {
+    throw new HNError(`No item id in URL: ${raw}`, { code: 'hn_url_invalid' })
+  }
   return id
 }
 
-const STRIP = [
-  [/<\/p>/gi, '\n\n'], [/<p>/gi, ''],
-  [/<a [^>]*href="([^"]*)"[^>]*>.*?<\/a>/gi, '$1'],
-  [/<i>(.*?)<\/i>/gi, '$1'], [/<[^>]+>/g, ''],
-]
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** HN comment bodies are HTML — decode to readable plain text. */
-function htmlToText(html) {
-  if (!html) return ''
-  let t = html
-  for (const [re, sub] of STRIP) t = t.replace(re, sub)
-  t = t
-    .replace(/&#x2F;/g, '/').replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
-    .replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-  return t.replace(/\n{3,}/g, '\n\n').trim()
+function abortSignal(timeoutMs) {
+  return typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined
 }
 
-/**
- * Flatten the comment tree depth-first into an ordered list. Each entry keeps
- * the author, depth (for "replying to" texture), and decoded text.
- */
-function flatten(node, depth, out, branch = null, parentId = null) {
-  for (const [index, child] of (node.children ?? []).entries()) {
-    const childBranch = branch ?? index
-    if (child.type === 'comment' && child.text && !child.deleted && !child.dead) {
-      out.push({
-        id: String(child.id),
-        parentId: parentId == null ? null : String(parentId),
-        branch: childBranch,
-        author: child.author || 'someone',
-        depth,
-        text: htmlToText(child.text),
-      })
-    }
-    flatten(child, depth + 1, out, childBranch, child.id)
-  }
-}
-
-/**
- * @returns {{ id, title, url, storyText, author, points, comments: Array<{author,depth,text}>, total }}
- */
-export async function fetchThread(input) {
-  const id = parseItemId(input)
-  let res
+async function fetchJson(url, {
+  fetchImpl = fetch,
+  timeoutMs = HN_FETCH_TIMEOUT_MS,
+  label = 'Hacker News',
+} = {}) {
+  let response
   try {
-    res = await fetch(`https://hn.algolia.com/api/v1/items/${id}`, {
+    response = await fetchImpl(url, {
+      signal: abortSignal(timeoutMs),
       headers: { Accept: 'application/json' },
     })
-  } catch (err) {
-    throw new HNError(`Could not reach Hacker News: ${err.message}`)
-  }
-  if (!res.ok) throw new HNError(`Hacker News returned ${res.status} for item ${id}`)
-  const root = await res.json()
-
-  // If the URL pointed at a comment rather than a story, climb to its story.
-  const title = root.title || root.story_title || `Hacker News discussion #${id}`
-  const comments = []
-  flatten(root, 0, comments)
-
-  return {
-    id,
-    title,
-    url: `https://news.ycombinator.com/item?id=${id}`,
-    // The thing the thread is ABOUT. Link posts carry it here and leave `text`
-    // empty, so dropping it left the writer with a headline and a pile of
-    // reactions to an article it had never seen — which is exactly how episodes
-    // ended up opening cold into the comments.
-    articleUrl: typeof root.url === 'string' && /^https?:\/\//i.test(root.url) ? root.url : null,
-    storyText: htmlToText(root.text || ''),
-    author: root.author || 'unknown',
-    points: root.points ?? null,
-    comments,
-    total: comments.length,
-  }
-}
-
-/** Strip the page furniture that surrounds an article's actual prose. */
-const ARTICLE_STRIP = [
-  [/<script\b[\s\S]*?<\/script>/gi, ' '],
-  [/<style\b[\s\S]*?<\/style>/gi, ' '],
-  [/<(nav|header|footer|aside|form|svg|noscript)\b[\s\S]*?<\/\1>/gi, ' '],
-  [/<!--[\s\S]*?-->/g, ' '],
-]
-
-/**
- * Fetch the linked article so the hosts can establish the SUBJECT before they
- * touch a single comment.
- *
- * Deliberately best-effort: paywalls, JS-only pages, hotlink blocks and dead
- * domains are all normal here. Every failure returns null rather than throwing,
- * because a missing article must degrade an episode's depth, never cost it the
- * episode — the thread alone still makes a show.
- */
-export async function fetchArticle(url, { timeoutMs = 12_000, maxChars = 12_000 } = {}) {
-  if (!url || !/^https?:\/\//i.test(url)) return null
-  let res
-  try {
-    res = await fetch(url, {
-      redirect: 'follow',
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: {
-        // Some publishers 403 an unidentified agent outright.
-        'User-Agent': 'Mozilla/5.0 (compatible; HNRadioBot/1.0; +https://hnradio.net)',
-        Accept: 'text/html,application/xhtml+xml',
-      },
+  } catch (error) {
+    throw new HNError(`${label} could not be reached: ${error?.message || error}`, {
+      code: 'hn_upstream_unavailable',
+      cause: error,
     })
-  } catch {
-    return null
   }
-  if (!res.ok) return null
-  const type = res.headers.get('content-type') || ''
-  // PDFs, video and images are not readable prose; do not pretend otherwise.
-  if (!/text\/html|text\/plain|application\/xhtml/i.test(type)) return null
-
-  let html
-  try { html = await res.text() } catch { return null }
-
-  let text = html
-  for (const [re, sub] of ARTICLE_STRIP) text = text.replace(re, sub)
-  text = htmlToText(text).replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
-
-  // Too little text means a paywall stub, a cookie wall, or a JS-only shell.
-  // Half an article is worse than none: it invites confident wrong summaries.
-  if (text.length < 400) return null
-
-  const truncated = text.length > maxChars
-  return {
-    url,
-    text: truncated ? `${text.slice(0, maxChars)}\n\n[HNR ARTICLE TRUNCATED]` : text,
-    truncated,
+  if (!response?.ok) {
+    throw new HNError(`${label} returned ${response?.status ?? 'an unreadable response'} for ${url}`, {
+      code: 'hn_upstream_error',
+      details: { status: response?.status ?? null, url: String(url) },
+    })
+  }
+  try {
+    return await response.json()
+  } catch (error) {
+    throw new HNError(`${label} returned invalid JSON for ${url}`, {
+      code: 'hn_upstream_invalid',
+      cause: error,
+    })
   }
 }
 
-/**
- * Select comments across top-level branches rather than taking one depth-first
- * prefix. For ordinary threads the cap includes every comment; on huge threads
- * round-robin sampling preserves the breadth of the debate.
- */
-function selectAcrossBranches(comments, maxComments) {
-  if (comments.length <= maxComments) return comments
-  const groups = new Map()
-  for (const comment of comments) {
-    const key = comment.branch ?? 0
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push(comment)
+function normalizeText(text) {
+  return String(text ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** HN comment bodies are HTML — decode them without losing link labels. */
+export function htmlToText(html) {
+  if (!html) return ''
+  const { document } = parseHTML(`<html><body>${String(html)}</body></html>`)
+  for (const element of document.querySelectorAll('script,style')) element.remove()
+  for (const br of document.querySelectorAll('br')) br.replaceWith(document.createTextNode('\n'))
+  for (const anchor of document.querySelectorAll('a[href]')) {
+    const label = normalizeText(anchor.textContent)
+    const href = anchor.getAttribute('href') || ''
+    const rendered = label && label !== href ? `${label} (${href})` : (label || href)
+    anchor.replaceWith(document.createTextNode(rendered))
   }
-  const selected = []
-  const queues = [...groups.values()]
-  for (let index = 0; selected.length < maxComments; index++) {
-    let added = false
-    for (const queue of queues) {
-      if (queue[index]) {
-        selected.push(queue[index])
-        added = true
-        if (selected.length === maxComments) break
+  for (const block of document.querySelectorAll('p,div,li,pre,blockquote')) {
+    block.append(document.createTextNode('\n'))
+  }
+  return normalizeText(document.body?.textContent || '')
+}
+
+async function resolveStoryItem(inputId, options) {
+  let id = String(inputId)
+  const seen = new Set()
+  for (let depth = 0; depth < 64; depth++) {
+    if (seen.has(id)) {
+      throw new HNError(`Hacker News parent chain for item ${inputId} contains a cycle.`, {
+        code: 'hn_item_invalid',
+      })
+    }
+    seen.add(id)
+    const item = await fetchJson(`${HN_FIREBASE_BASE}/item/${id}.json`, {
+      ...options,
+      label: 'Official Hacker News API',
+    })
+    if (!item || typeof item !== 'object') {
+      throw new HNError(`Hacker News item ${id} does not exist.`, { code: 'hn_item_missing' })
+    }
+    if (item.type === 'story') return item
+    if (item.parent == null) {
+      throw new HNError(`Hacker News item ${id} is not a story and has no parent story.`, {
+        code: 'hn_item_invalid',
+      })
+    }
+    id = String(item.parent)
+  }
+  throw new HNError(`Hacker News parent chain for item ${inputId} is too deep.`, {
+    code: 'hn_item_invalid',
+  })
+}
+
+function collectNestedStructure(root) {
+  const parentById = new Map()
+  const siblingRank = new Map()
+  const commentsById = new Map()
+  const visited = new Set()
+  const visit = (node, parentId) => {
+    for (const [index, child] of (node?.children ?? []).entries()) {
+      const id = String(child.id)
+      const traversalParentId = String(parentId)
+      const declaredParentId = child?.parent_id == null ? traversalParentId : String(child.parent_id)
+      if (!/^\d+$/.test(id)
+        || !/^\d+$/.test(declaredParentId)
+        || declaredParentId !== traversalParentId
+        || visited.has(id)) {
+        throw new HNError('HN Algolia returned an invalid recursive comment tree.', {
+          code: 'hn_comment_snapshot_invalid',
+          details: { id: id || null, parentId: declaredParentId || null },
+        })
+      }
+      visited.add(id)
+      parentById.set(id, traversalParentId)
+      siblingRank.set(`${parentId}:${id}`, index)
+      commentsById.set(id, {
+        id,
+        parentId: traversalParentId,
+        author: typeof child?.author === 'string' ? child.author.trim() : '',
+        text: htmlToText(child?.text ?? child?.comment_text ?? ''),
+        createdAt: Number(child?.created_at_i ?? 0),
+      })
+      visit(child, id)
+    }
+  }
+  visit(root, String(root.id))
+  return { parentById, siblingRank, commentsById }
+}
+
+async function fetchAlgoliaCommentSnapshot(storyId, options) {
+  const nestedUrl = `${HN_ALGOLIA_BASE}/items/${storyId}`
+  const searchUrl = new URL(`${HN_ALGOLIA_BASE}/search_by_date`)
+  searchUrl.searchParams.set('tags', `comment,story_${storyId}`)
+  searchUrl.searchParams.set('hitsPerPage', '1000')
+  searchUrl.searchParams.set('page', '0')
+
+  const [nested, firstPage] = await Promise.all([
+    fetchJson(nestedUrl, { ...options, label: 'HN Algolia item API' }),
+    fetchJson(searchUrl, { ...options, label: 'HN Algolia comment API' }),
+  ])
+
+  const nbHits = Number(firstPage?.nbHits)
+  const nbPages = Number(firstPage?.nbPages)
+  if (!Number.isInteger(nbHits) || nbHits < 0 || !Number.isInteger(nbPages) || nbPages < 0) {
+    throw new HNError(`HN Algolia returned invalid pagination for story ${storyId}.`, {
+      code: 'hn_comment_snapshot_invalid',
+    })
+  }
+
+  // Algolia's index reports the true nbHits but caps ordinary page traversal
+  // at 1,000 results. Walk the date-sorted index with an inclusive timestamp
+  // cursor instead. Boundary duplicates are expected and de-duplicated; the
+  // recursive item tree below fills any just-indexed edge that one view lacks.
+  const hitsById = new Map()
+  let page = firstPage
+  let cursorUpperBound = null
+  for (let batch = 0; batch < 64; batch++) {
+    const pageHits = Array.isArray(page?.hits) ? page.hits : []
+    const pageIds = new Set()
+    for (const hit of pageHits) {
+      const id = String(hit?.objectID ?? hit?.id ?? '')
+      if (!/^\d+$/.test(id) || pageIds.has(id)) {
+        throw new HNError(`HN Algolia returned duplicate or invalid search hits for story ${storyId}.`, {
+          code: 'hn_comment_snapshot_invalid',
+        })
+      }
+      pageIds.add(id)
+      if (!hitsById.has(id)) hitsById.set(id, hit)
+    }
+    if (hitsById.size >= nbHits || pageHits.length === 0) break
+
+    const timestamps = pageHits.map((hit) => Number(hit?.created_at_i))
+    if (timestamps.some((value) => !Number.isInteger(value) || value < 0)) {
+      throw new HNError(`HN Algolia returned an invalid comment timestamp for story ${storyId}.`, {
+        code: 'hn_comment_snapshot_invalid',
+      })
+    }
+    const oldest = Math.min(...timestamps)
+    if (cursorUpperBound !== null && oldest >= cursorUpperBound) break
+    cursorUpperBound = oldest
+    const cursorUrl = new URL(searchUrl)
+    cursorUrl.searchParams.set('numericFilters', `created_at_i<=${oldest}`)
+    page = await fetchJson(cursorUrl, { ...options, label: 'HN Algolia comment API' })
+  }
+
+  const hits = [...hitsById.values()]
+  if (String(nested?.id ?? '') !== String(storyId)) {
+    throw new HNError(`HN Algolia returned the wrong recursive item for story ${storyId}.`, {
+      code: 'hn_comment_snapshot_invalid',
+    })
+  }
+  return { nested, hits, nbHits }
+}
+
+function orderedComments(storyId, hits, nested) {
+  const searchCommentsById = new Map()
+  for (const hit of hits) {
+    const id = String(hit?.objectID ?? hit?.id ?? '')
+    const parentId = String(hit?.parent_id ?? '')
+    const hitStoryId = String(hit?.story_id ?? '')
+    const text = htmlToText(hit?.comment_text ?? hit?.text ?? '')
+    if (!/^\d+$/.test(id) || !/^\d+$/.test(parentId) || hitStoryId !== String(storyId)) {
+      throw new HNError(`HN Algolia returned an incomplete comment in story ${storyId}.`, {
+        code: 'hn_comment_snapshot_invalid',
+        details: { id: id || null, parentId: parentId || null, storyId: hitStoryId || null },
+      })
+    }
+    if (searchCommentsById.has(id)) {
+      throw new HNError(`HN Algolia returned duplicate comment ${id} in story ${storyId}.`, {
+        code: 'hn_comment_snapshot_invalid',
+      })
+    }
+    searchCommentsById.set(id, {
+      id,
+      parentId,
+      author: typeof hit?.author === 'string' ? hit.author.trim() : '',
+      text,
+      createdAt: Number(hit.created_at_i ?? 0),
+    })
+  }
+
+  const {
+    parentById: structuralParents,
+    siblingRank,
+    commentsById: nestedCommentsById,
+  } = collectNestedStructure(nested)
+  const commentsById = new Map()
+  const allSnapshotIds = new Set([...nestedCommentsById.keys(), ...searchCommentsById.keys()])
+  for (const id of allSnapshotIds) {
+    const searched = searchCommentsById.get(id)
+    const nestedComment = nestedCommentsById.get(id)
+    if (searched && nestedComment && searched.parentId !== nestedComment.parentId) {
+      throw new HNError(`HN Algolia returned conflicting parents for comment ${id} in story ${storyId}.`, {
+        code: 'hn_comment_snapshot_changed',
+      })
+    }
+    const text = searched?.text || nestedComment?.text || ''
+    const parentId = searched?.parentId || nestedComment?.parentId || ''
+    const author = searched?.author || nestedComment?.author || ''
+    if (!text || !author || !/^\d+$/.test(parentId)) {
+      throw new HNError(`HN Algolia returned an incomplete comment in story ${storyId}.`, {
+        code: 'hn_comment_snapshot_invalid',
+        details: { id, parentId: parentId || null },
+      })
+    }
+    commentsById.set(id, {
+      id,
+      parentId,
+      author,
+      text,
+      createdAt: searched?.createdAt || nestedComment?.createdAt || 0,
+    })
+  }
+
+  const childIds = new Map()
+  const allIds = new Set([...structuralParents.keys(), ...commentsById.keys()])
+
+  for (const id of allIds) {
+    const parentId = commentsById.get(id)?.parentId || structuralParents.get(id)
+    if (!parentId) continue
+    if (!childIds.has(parentId)) childIds.set(parentId, [])
+    if (!childIds.get(parentId).includes(id)) childIds.get(parentId).push(id)
+  }
+
+  const compareSiblings = (parentId, left, right) => {
+    const leftRank = siblingRank.get(`${parentId}:${left}`)
+    const rightRank = siblingRank.get(`${parentId}:${right}`)
+    if (leftRank !== undefined || rightRank !== undefined) {
+      return (leftRank ?? Number.MAX_SAFE_INTEGER) - (rightRank ?? Number.MAX_SAFE_INTEGER)
+    }
+    const leftTime = commentsById.get(left)?.createdAt ?? 0
+    const rightTime = commentsById.get(right)?.createdAt ?? 0
+    return leftTime - rightTime || Number(left) - Number(right)
+  }
+  for (const [parentId, ids] of childIds) ids.sort((a, b) => compareSiblings(parentId, a, b))
+
+  const result = []
+  const visitedNodes = new Set()
+  const visitedComments = new Set()
+  const visit = (parentId, depth, branch) => {
+    for (const id of childIds.get(String(parentId)) ?? []) {
+      if (visitedNodes.has(id)) continue
+      visitedNodes.add(id)
+      const comment = commentsById.get(id)
+      const nextBranch = branch ?? id
+      if (comment) {
+        result.push({
+          id,
+          parentId: comment.parentId === String(storyId) ? null : comment.parentId,
+          branch: nextBranch,
+          author: comment.author,
+          depth,
+          text: comment.text,
+        })
+        visitedComments.add(id)
+      }
+      // Deleted/dead structural placeholders remain traversable so replies to
+      // them are not orphaned or dropped.
+      visit(id, depth + 1, nextBranch)
+    }
+  }
+  visit(String(storyId), 0, null)
+
+  // A just-indexed Algolia comment can precede the nested-item cache. Preserve
+  // it rather than losing content; count agreement remains the completeness
+  // proof and these orphans are rendered last with their real parent id.
+  const unvisited = [...commentsById.values()]
+    .filter((comment) => !visitedComments.has(comment.id))
+    .sort((a, b) => a.createdAt - b.createdAt || Number(a.id) - Number(b.id))
+  for (const comment of unvisited) {
+    let depth = 0
+    let cursor = comment.parentId
+    const seen = new Set([comment.id])
+    while (cursor !== String(storyId) && !seen.has(cursor) && depth < 64) {
+      seen.add(cursor)
+      depth++
+      cursor = commentsById.get(cursor)?.parentId || structuralParents.get(cursor) || String(storyId)
+    }
+    result.push({
+      id: comment.id,
+      parentId: comment.parentId === String(storyId) ? null : comment.parentId,
+      branch: comment.id,
+      author: comment.author,
+      depth,
+      text: comment.text,
+    })
+  }
+
+  return result
+}
+
+/**
+ * Fetch one complete, count-verified HN thread. A comment URL is resolved all
+ * the way to its story before the snapshot is taken.
+ */
+export async function fetchThread(input, {
+  fetchImpl = fetch,
+  timeoutMs = HN_FETCH_TIMEOUT_MS,
+  maxAttempts = 3,
+  retryDelaysMs = [1_500, 4_000],
+} = {}) {
+  const inputId = parseItemId(input)
+  const options = { fetchImpl, timeoutMs }
+  const initialStory = await resolveStoryItem(inputId, options)
+  const storyId = String(initialStory.id)
+  let lastError = null
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const [root, snapshot] = await Promise.all([
+        fetchJson(`${HN_FIREBASE_BASE}/item/${storyId}.json`, {
+          ...options,
+          label: 'Official Hacker News API',
+        }),
+        fetchAlgoliaCommentSnapshot(storyId, options),
+      ])
+      if (root?.type !== 'story' || String(root.id) !== storyId) {
+        throw new HNError(`Official Hacker News item ${storyId} is no longer a story.`, {
+          code: 'hn_item_invalid',
+        })
+      }
+
+      const expected = Number(root.descendants ?? 0)
+      if (!Number.isInteger(expected) || expected < 0) {
+        throw new HNError(`Official Hacker News returned an invalid comment count for ${storyId}.`, {
+          code: 'hn_comment_snapshot_invalid',
+        })
+      }
+      const comments = orderedComments(storyId, snapshot.hits, snapshot.nested)
+      if (snapshot.nbHits !== expected || comments.length !== expected) {
+        throw new HNError(
+          `Hacker News thread ${storyId} is not synchronized yet: official count ${expected}, `
+          + `Algolia count ${snapshot.nbHits}, decoded ${comments.length}.`,
+          {
+            code: 'hn_thread_incomplete',
+            details: { storyId, expected, algolia: snapshot.nbHits, decoded: comments.length, attempt },
+          },
+        )
+      }
+
+      const capturedAt = new Date().toISOString()
+      return {
+        id: storyId,
+        title: htmlToText(root.title || '') || `Hacker News discussion #${storyId}`,
+        url: `https://news.ycombinator.com/item?id=${storyId}`,
+        articleUrl: typeof root.url === 'string' && /^https?:\/\//i.test(root.url) ? root.url : null,
+        storyText: htmlToText(root.text || ''),
+        author: root.by || 'unknown',
+        points: root.score ?? null,
+        comments,
+        total: comments.length,
+        completeness: {
+          comments: {
+            complete: true,
+            expected,
+            fetched: comments.length,
+            capturedAt,
+            metadataSource: 'official-hn-firebase',
+            contentSource: 'hn-algolia-search-plus-recursive-item-tree',
+          },
+        },
+      }
+    } catch (error) {
+      lastError = error
+      if (attempt < maxAttempts) {
+        await delay(retryDelaysMs[Math.min(attempt - 1, retryDelaysMs.length - 1)] ?? 0)
       }
     }
-    if (!added) break
   }
-  return selected
+
+  if (lastError instanceof HNError) throw lastError
+  throw new HNError(`Could not capture a complete Hacker News thread ${storyId}.`, {
+    code: 'hn_thread_incomplete',
+    cause: lastError,
+  })
+}
+
+function contentTypeOf(response) {
+  return String(response.headers?.get?.('content-type') || '').split(';')[0].trim().toLowerCase()
+}
+
+function charsetOf(response) {
+  const value = String(response.headers?.get?.('content-type') || '')
+  return value.match(/charset\s*=\s*["']?([^;"'\s]+)/i)?.[1] || 'utf-8'
+}
+
+async function readCompleteBody(response, maxBytes) {
+  const declared = Number(response.headers?.get?.('content-length'))
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new HNError(`Source article is ${declared} bytes, above HNR's ${maxBytes}-byte completeness limit.`, {
+      code: 'article_too_large',
+      details: { declaredBytes: declared, maxBytes },
+    })
+  }
+  let bytes
+  try {
+    bytes = new Uint8Array(await response.arrayBuffer())
+  } catch (error) {
+    throw new HNError(`Source article body ended before it could be read completely: ${error?.message || error}`, {
+      code: 'article_body_incomplete',
+      cause: error,
+    })
+  }
+  if (bytes.byteLength > maxBytes) {
+    throw new HNError(`Source article is ${bytes.byteLength} bytes, above HNR's ${maxBytes}-byte completeness limit.`, {
+      code: 'article_too_large',
+      details: { observedBytes: bytes.byteLength, maxBytes },
+    })
+  }
+  return bytes
+}
+
+function decodeBytes(bytes, charset) {
+  try { return new TextDecoder(charset, { fatal: false }).decode(bytes) } catch {
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+  }
+}
+
+const PAYWALL_MARKERS = [
+  /subscribe(?: now)? to (?:continue|keep) reading/i,
+  /sign in(?: or subscribe)? to continue reading/i,
+  /(?:this|the full) (?:article|story) is (?:available )?(?:only )?to subscribers/i,
+  /you(?:'ve| have) reached your (?:free )?(?:article )?limit/i,
+  /register(?: now)? to (?:continue|keep) reading/i,
+  /continue reading (?:with|by subscribing)/i,
+]
+
+function structuredArticleData(document) {
+  const bodies = []
+  let accessRestricted = false
+  let headline = null
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item)
+      return
+    }
+    if (!value || typeof value !== 'object') return
+    const type = Array.isArray(value['@type']) ? value['@type'] : [value['@type']]
+    const articleLike = type.some((entry) => /(?:article|blogposting|report)$/i.test(String(entry || '')))
+      || typeof value.articleBody === 'string'
+    if (articleLike) {
+      if (value.isAccessibleForFree === false || value.isAccessibleForFree === 'false') accessRestricted = true
+      if (typeof value.articleBody === 'string') {
+        const body = normalizeText(value.articleBody)
+        if (body) bodies.push(body)
+      }
+      if (!headline && typeof value.headline === 'string') headline = normalizeText(value.headline)
+    }
+    for (const child of Object.values(value)) visit(child)
+  }
+
+  for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+    try { visit(JSON.parse(script.textContent || 'null')) } catch { /* malformed metadata is non-authoritative */ }
+  }
+  return {
+    accessRestricted,
+    headline,
+    body: bodies.sort((left, right) => right.length - left.length)[0] || '',
+  }
+}
+
+function assertNotPartialArticle(text, { accessRestricted = false, url } = {}) {
+  if (accessRestricted || PAYWALL_MARKERS.some((pattern) => pattern.test(text))) {
+    throw new HNError(`Source article at ${url} is paywalled or only exposed as a reading preview.`, {
+      code: 'article_paywalled',
+      details: { url },
+    })
+  }
+}
+
+function extractReadableArticle(html, finalUrl) {
+  const { document } = parseHTML(html)
+  const base = document.createElement('base')
+  base.setAttribute('href', finalUrl)
+  if (document.head) document.head.prepend(base)
+  const structured = structuredArticleData(document)
+  const parsed = new Readability(document, { charThreshold: ARTICLE_MIN_CHARS }).parse()
+  const readableText = normalizeText(parsed?.textContent || '')
+  const text = structured.body.length > readableText.length ? structured.body : readableText
+  if (text.length < ARTICLE_MIN_CHARS) return null
+  assertNotPartialArticle(text, { accessRestricted: structured.accessRestricted, url: finalUrl })
+  return {
+    title: normalizeText(parsed?.title || structured.headline || '') || null,
+    byline: normalizeText(parsed?.byline || '') || null,
+    publishedTime: parsed?.publishedTime || null,
+    text,
+  }
 }
 
 /**
- * The transcript's comment section is sized by TOTAL characters, not by a
- * comment count.
- *
- * A flat cap of 240 comments dropped 14% of episodes' threads, and the loss
- * landed hardest exactly where it hurt most: the 1057-comment GPT-5.6 thread
- * reached the writer as 240 comments, so it wrote an episode about a
- * discussion it had seen a fifth of. Meanwhile the per-comment cap was nearly
- * inert — the median HN comment is ~160 characters and under 1% run past 1600
- * — so the count was throwing away breadth to protect a budget that length was
- * never actually spending.
- *
- * Budgeting by characters inverts that. Ordinary threads arrive complete and
- * untouched; only a genuinely enormous one tightens per-comment excerpts, and
- * every commenter still appears. 360k characters is roughly 90k tokens, which
- * holds every thread this show has covered at full length.
+ * Fetch and reader-extract the entire linked article. There is no character
+ * truncation path. Unsupported, blocked, partial, or unreadable sources throw,
+ * making the story ineligible instead of generating from a headline.
  */
-export const TRANSCRIPT_COMMENT_BUDGET = 360_000
-export const TRANSCRIPT_MAX_CHARS_EACH = 1600
-/**
- * Below this an excerpt stops being a quote and becomes a fragment the hosts
- * cannot honestly read aloud, so a thread big enough to need it loses comments
- * instead — the one case where dropping beats mangling.
- */
-export const TRANSCRIPT_MIN_CHARS_EACH = 260
-
-/** Total characters a set of comments costs when each is capped at `charsEach`. */
-function budgetCost(comments, charsEach) {
-  let total = 0
-  for (const comment of comments) total += Math.min(comment.text.length, charsEach)
-  return total
-}
-
-/**
- * Fit every comment into the budget, tightening excerpts only as far as needed.
- *
- * @returns {{ comments: Array, charsEach: number, complete: boolean }}
- */
-export function planCommentBudget(comments, {
-  budget = TRANSCRIPT_COMMENT_BUDGET,
-  maxCharsEach = TRANSCRIPT_MAX_CHARS_EACH,
-  minCharsEach = TRANSCRIPT_MIN_CHARS_EACH,
+export async function fetchArticle(url, {
+  fetchImpl = fetch,
+  timeoutMs = ARTICLE_FETCH_TIMEOUT_MS,
+  maxBytes = ARTICLE_FETCH_MAX_BYTES,
 } = {}) {
-  if (comments.length === 0) return { comments, charsEach: maxCharsEach, complete: true }
-
-  // The common case: everything fits at full length, so nothing is touched.
-  if (budgetCost(comments, maxCharsEach) <= budget) {
-    return { comments, charsEach: maxCharsEach, complete: true }
+  if (!url || !/^https?:\/\//i.test(url)) {
+    throw new HNError(`Source article URL is invalid: ${String(url ?? '')}`, { code: 'article_url_invalid' })
   }
 
-  // Largest per-comment allowance that still fits the whole thread. Binary
-  // search rather than a divide, because cost is capped per comment — short
-  // comments do not grow to fill the allowance, so cost is sublinear in it.
-  let low = minCharsEach
-  let high = maxCharsEach
-  let best = null
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2)
-    if (budgetCost(comments, mid) <= budget) {
-      best = mid
-      low = mid + 1
-    } else {
-      high = mid - 1
+  let response
+  try {
+    response = await fetchImpl(url, {
+      redirect: 'follow',
+      signal: abortSignal(timeoutMs),
+      headers: {
+        // Several first-party article sites return a bot interstitial or 403 to
+        // the old HNRadioBot token while serving the same public document to a
+        // normal browser request. Use stable browser negotiation headers, then
+        // apply the exact same byte/readability/paywall completeness checks.
+        'User-Agent': ARTICLE_BROWSER_USER_AGENT,
+        Accept: 'text/html,application/xhtml+xml,text/plain,text/markdown;q=0.9',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    })
+  } catch (error) {
+    throw new HNError(`Source article could not be reached: ${error?.message || error}`, {
+      code: 'article_unavailable',
+      cause: error,
+    })
+  }
+  if (!response?.ok) {
+    throw new HNError(`Source article returned HTTP ${response?.status ?? 'unknown'} for ${url}.`, {
+      code: 'article_unavailable',
+      details: { status: response?.status ?? null, url },
+    })
+  }
+  if (response.status === 206 || response.headers?.get?.('content-range')) {
+    throw new HNError(`Source article returned only a partial HTTP body for ${url}.`, {
+      code: 'article_body_incomplete',
+      details: { status: response.status, contentRange: response.headers?.get?.('content-range') || null },
+    })
+  }
+
+  const contentType = contentTypeOf(response)
+  const supported = new Set([
+    'text/html',
+    'application/xhtml+xml',
+    'text/plain',
+    'text/markdown',
+    'text/x-markdown',
+  ])
+  if (!supported.has(contentType)) {
+    throw new HNError(`Source article type ${contentType || '(missing)'} cannot be read completely by HNR.`, {
+      code: 'article_type_unsupported',
+      details: { contentType: contentType || null, url },
+    })
+  }
+
+  const bytes = await readCompleteBody(response, maxBytes)
+  const decoded = decodeBytes(bytes, charsetOf(response))
+  const finalUrl = response.url || url
+  let extracted
+  if (contentType === 'text/html' || contentType === 'application/xhtml+xml') {
+    extracted = extractReadableArticle(decoded, finalUrl)
+  } else {
+    const text = normalizeText(decoded)
+    assertNotPartialArticle(text, { url: finalUrl })
+    extracted = text.length >= ARTICLE_MIN_CHARS
+      ? { title: null, byline: null, publishedTime: null, text }
+      : null
+  }
+  if (!extracted) {
+    throw new HNError(`Source article at ${finalUrl} did not yield a complete readable body.`, {
+      code: 'article_unreadable',
+      details: { contentType, rawBytes: bytes.byteLength },
+    })
+  }
+
+  return {
+    url: finalUrl,
+    requestedUrl: url,
+    contentType,
+    rawByteSize: bytes.byteLength,
+    title: extracted.title,
+    byline: extracted.byline,
+    publishedTime: extracted.publishedTime,
+    text: extracted.text,
+    charCount: extracted.text.length,
+    complete: true,
+    truncated: false,
+    fetchedAt: new Date().toISOString(),
+  }
+}
+
+/** Attach the linked article (when any) and prove the combined source is usable. */
+export async function hydrateThreadArticle(thread, options = {}) {
+  thread.article = thread?.articleUrl
+    ? await fetchArticle(thread.articleUrl, options)
+    : null
+  assertCompleteThread(thread)
+  return thread
+}
+
+export function assertCompleteThread(thread) {
+  const comments = Array.isArray(thread?.comments) ? thread.comments : []
+  const total = Number(thread?.total)
+  const ids = new Set()
+  if (!Number.isInteger(total) || total < 0 || comments.length !== total) {
+    throw new HNError(
+      `Thread completeness check failed: expected ${Number.isFinite(total) ? total : 'a valid count'} comments, received ${comments.length}.`,
+      { code: 'hn_thread_incomplete' },
+    )
+  }
+  for (const comment of comments) {
+    const id = String(comment?.id ?? '')
+    if (!id || ids.has(id) || !String(comment?.text ?? '').trim()) {
+      throw new HNError(`Thread completeness check failed at comment ${id || '(missing id)'}.`, {
+        code: 'hn_thread_incomplete',
+      })
+    }
+    ids.add(id)
+  }
+  const proof = thread?.completeness?.comments
+  if (!proof || proof.complete !== true || Number(proof.expected) !== total || Number(proof.fetched) !== total) {
+    throw new HNError('Thread completeness proof does not match the captured comments.', {
+      code: 'hn_thread_incomplete',
+    })
+  }
+  if (thread?.articleUrl) {
+    const articleText = String(thread.article?.text ?? '')
+    const articleChars = Number(thread.article?.charCount)
+    if (!thread.article?.complete
+      || thread.article?.truncated
+      || !articleText.trim()
+      || !Number.isInteger(articleChars)
+      || articleChars !== articleText.length) {
+      throw new HNError(`Linked article ${thread.articleUrl} is not complete; generation is not allowed.`, {
+        code: 'article_incomplete',
+      })
     }
   }
-  if (best !== null) return { comments, charsEach: best, complete: true }
-
-  // Even the floor does not fit. Keep breadth over depth: sample across
-  // top-level branches so the debate's shape survives, and say so in the
-  // transcript rather than letting the writer assume it saw everything.
-  const perComment = minCharsEach
-  const affordable = Math.max(1, Math.floor(budget / perComment))
-  return {
-    comments: selectAcrossBranches(comments, affordable),
-    charsEach: perComment,
-    complete: false,
-  }
+  return true
 }
 
-function excerpt(text, maxChars) {
-  if (text.length <= maxChars) return text
-  const prefix = text.slice(0, maxChars)
-  const sentenceEnd = Math.max(prefix.lastIndexOf('. '), prefix.lastIndexOf('? '), prefix.lastIndexOf('! '))
-  const wordEnd = prefix.lastIndexOf(' ')
-  const end = sentenceEnd >= maxChars * 0.6 ? sentenceEnd + 1 : wordEnd
-  return `${prefix.slice(0, Math.max(1, end)).trim()} [HNR EXCERPT SHORTENED]`
-}
-
-/** Render a complete, reply-aware transcript for the Story API. */
-export function threadToTranscript(thread, budgetOptions = {}) {
-  const plan = planCommentBudget(thread.comments, budgetOptions)
-  const comments = plan.comments
+/** Render the complete article/self-post/thread source passed to Sleeper Hit. */
+export function threadToTranscript(thread, {
+  maxChars = STORY_SOURCE_MAX_CHARS,
+  maxBytes = STORY_SOURCE_MAX_BYTES,
+} = {}) {
+  assertCompleteThread(thread)
+  const comments = thread.comments
   const lines = []
   lines.push(`# Hacker News thread: ${thread.title}`)
-  lines.push(`Original link: ${thread.url} · posted by ${thread.author}` +
-    (thread.points != null ? ` · ${thread.points} points` : ''))
-  if (thread.articleUrl) lines.push(`Source article: ${thread.articleUrl}`)
+  lines.push(`Original link: ${thread.url} · posted by ${thread.author}`
+    + (thread.points != null ? ` · ${thread.points} points` : ''))
+  if (thread.articleUrl) lines.push(`Source article: ${thread.article.url}`)
   lines.push('')
-  // The subject comes FIRST, before a single comment, because that is the order
-  // the episode has to establish it in. A reader who meets the reactions before
-  // the thing being reacted to writes an episode that never explains itself.
-  if (thread.article?.text) {
-    lines.push(`## THE SOURCE — what this thread is actually about`)
-    lines.push(`Fetched from ${thread.article.url}. This is the SUBJECT of the episode. The`)
-    lines.push('hosts must understand and explain it BEFORE they react to anyone in the comments:')
-    lines.push('what was announced or claimed, who did it, what is genuinely new, and why this')
-    lines.push('thread exists at all. Quote or paraphrase it accurately — it is reporting, not opinion.')
+  lines.push('## SOURCE COMPLETENESS — VERIFIED')
+  lines.push(`Comments: ${thread.total}/${thread.total}, with full text and reply relationships.`)
+  if (thread.completeness?.comments?.capturedAt) {
+    lines.push(`Thread snapshot captured at ${thread.completeness.comments.capturedAt}.`)
+  }
+  if (thread.articleUrl) {
+    lines.push(`Article: complete reader extraction, ${thread.article.charCount ?? thread.article.text.length} characters, no clipping.`)
+  }
+  lines.push('')
+
+  if (thread.articleUrl) {
+    lines.push('## THE COMPLETE SOURCE ARTICLE — what this thread is actually about')
+    lines.push(`Fetched in full from ${thread.article.url}. This is the SUBJECT of the episode.`)
+    lines.push('The hosts must understand and explain it BEFORE reacting to comments. Quote or paraphrase it accurately.')
     lines.push('')
+    lines.push(`<<<HNR_ARTICLE_BEGIN chars=${thread.article.charCount ?? thread.article.text.length}>>>`)
     lines.push(thread.article.text)
-    lines.push('')
-  } else if (thread.articleUrl) {
-    // Say so explicitly. Silence here reads as "there was no article", and the
-    // writer confidently invents one from the headline.
-    lines.push(`## THE SOURCE — could not be retrieved`)
-    lines.push(`The thread links to ${thread.articleUrl}, but its text could not be fetched`)
-    lines.push('(paywall, bot block, or a JS-only page). Establish the subject from the HEADLINE and')
-    lines.push('from what the commenters reveal about it. Do NOT invent specifics — no fabricated')
-    lines.push('quotes, numbers, features, or claims attributed to the article.')
+    lines.push('<<<HNR_ARTICLE_END>>>')
     lines.push('')
   }
   if (thread.storyText) {
-    lines.push(`## Original post (by ${thread.author})`)
-    lines.push(thread.storyText.slice(0, 1500))
+    lines.push(`## COMPLETE ORIGINAL POST (by ${thread.author})`)
+    lines.push(`<<<HNR_SELF_POST_BEGIN chars=${thread.storyText.length}>>>`)
+    lines.push(thread.storyText)
+    lines.push('<<<HNR_SELF_POST_END>>>')
     lines.push('')
   }
-  lines.push(plan.complete
-    ? `## Comments (all ${thread.total} of them — this is the ENTIRE thread)`
-    : `## Comments (${thread.total} total; ${comments.length} included across top-level reply branches)`)
-  lines.push('Source note: comments are complete unless explicitly marked [HNR EXCERPT SHORTENED]. Never claim an unmarked comment was cut off.')
-  if (!plan.complete) {
-    // Only say this when it is true. Telling the writer it saw a sample of a
-    // thread it actually saw in full invites hedging about what it "might have
-    // missed" in an episode that missed nothing.
-    lines.push('This thread is large enough that it was sampled across top-level branches; you are seeing the breadth of the debate, not every reply.')
-  }
+  lines.push(`## COMPLETE COMMENT THREAD (all ${thread.total} comments)`)
+  lines.push('Every visible comment in the verified snapshot follows. Preserve handles, quotes, reply context, minority positions, and late branches.')
+  lines.push(`<<<HNR_COMMENTS_BEGIN count=${thread.total}>>>`)
   lines.push('')
-  for (const c of comments) {
-    const indent = '  '.repeat(Math.min(c.depth, 6))
-    const reply = c.parentId ? ` reply_to=${c.parentId}` : ''
-    const body = excerpt(c.text, plan.charsEach)
-    lines.push(`${indent}- [comment=${c.id}${reply}] ${c.author}: ${body.replace(/\n+/g, ' ')}`)
+  for (const comment of comments) {
+    const indent = '  '.repeat(Math.min(comment.depth, 12))
+    const reply = comment.parentId ? ` reply_to=${comment.parentId}` : ''
+    const bodyLines = String(comment.text).split('\n')
+    lines.push(`${indent}- [comment=${comment.id}${reply}] ${comment.author}: ${bodyLines.shift()}`)
+    for (const bodyLine of bodyLines) lines.push(`${indent}  ${bodyLine}`)
   }
-  return lines.join('\n')
+  lines.push('<<<HNR_COMMENTS_END>>>')
+
+  const transcript = lines.join('\n')
+  const byteSize = new TextEncoder().encode(transcript).byteLength
+  if (transcript.length > maxChars || byteSize > maxBytes) {
+    throw new HNError(
+      `Verified source is too large to pass without clipping (${transcript.length} chars / ${byteSize} bytes; `
+      + `limits ${maxChars} chars / ${maxBytes} bytes).`,
+      {
+        code: 'source_pack_too_large',
+        details: { chars: transcript.length, bytes: byteSize, maxChars, maxBytes },
+      },
+    )
+  }
+  return transcript
+}
+
+/**
+ * Metadata sent beside the text source. `sourceContextMode: full` is the
+ * cross-service contract: Sleeper Hit must hash-check and pass this exact text
+ * to both the planner and final table-read writer, never a digest or preview.
+ */
+export function buildSourceMetadata(thread, transcript) {
+  assertCompleteThread(thread)
+  const content = String(transcript ?? '')
+  const byteSize = new TextEncoder().encode(content).byteLength
+  if (!content || content.length > STORY_SOURCE_MAX_CHARS || byteSize > STORY_SOURCE_MAX_BYTES) {
+    throw new HNError('Verified source metadata cannot be built for missing or oversized text.', {
+      code: 'source_pack_too_large',
+      details: {
+        chars: content.length,
+        bytes: byteSize,
+        maxChars: STORY_SOURCE_MAX_CHARS,
+        maxBytes: STORY_SOURCE_MAX_BYTES,
+      },
+    })
+  }
+
+  const commentProof = thread.completeness.comments
+  return {
+    sourceProducer: 'hackernewsradio',
+    sourceContextMode: 'full',
+    hnStoryId: String(thread.id),
+    sourceCompleteness: {
+      comments: {
+        complete: true,
+        expected: Number(commentProof.expected),
+        fetched: Number(commentProof.fetched),
+        capturedAt: commentProof.capturedAt,
+        metadataSource: commentProof.metadataSource,
+        contentSource: commentProof.contentSource,
+      },
+      article: {
+        required: Boolean(thread.articleUrl),
+        complete: !thread.articleUrl || thread.article.complete === true,
+        url: thread.articleUrl ? thread.article.url : null,
+        chars: thread.articleUrl ? Number(thread.article.charCount ?? thread.article.text.length) : 0,
+        rawBytes: thread.articleUrl ? Number(thread.article.rawByteSize ?? 0) : 0,
+        fetchedAt: thread.articleUrl ? thread.article.fetchedAt : null,
+      },
+      post: {
+        required: Boolean(thread.storyText),
+        complete: true,
+        chars: thread.storyText ? thread.storyText.length : 0,
+      },
+      sourcePack: {
+        complete: true,
+        chars: content.length,
+        bytes: byteSize,
+        clipped: false,
+      },
+    },
+  }
+}
+
+export function verifiedSourceProgress(thread) {
+  const article = thread.articleUrl
+    ? ` and full article (${thread.article.charCount ?? thread.article.text.length} characters)`
+    : thread.storyText
+      ? ` and full self-post (${thread.storyText.length} characters)`
+      : ' and no linked article or self-post'
+  return `Verified complete source: ${thread.total}/${thread.total} comments${article}`
 }

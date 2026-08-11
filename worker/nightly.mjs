@@ -1,4 +1,10 @@
-import { fetchThread } from './hn.mjs'
+import {
+  buildSourceMetadata,
+  fetchArticle,
+  fetchThread,
+  threadToTranscript,
+  verifiedSourceProgress,
+} from './hn.mjs'
 import {
   appendProgress,
   deleteDrama,
@@ -148,6 +154,7 @@ const defaultDependencies = {
   patchDrama,
   setSetting,
   upsertDrama,
+  fetchArticle,
   fetchThread,
   now: () => new Date(),
   randomUUID: () => crypto.randomUUID(),
@@ -510,11 +517,21 @@ async function recoverStalledMusicWake(env, batch, item, drama, instance, deps) 
   return true
 }
 
-async function createEpisodeWorkflow(env, thread, {
+async function prepareEpisodeSource(thread, deps) {
+  thread.article = thread.articleUrl
+    ? await deps.fetchArticle(thread.articleUrl)
+    : null
+  const sourceTranscript = threadToTranscript(thread)
+  const sourceMetadata = buildSourceMetadata(thread, sourceTranscript)
+  return { thread, sourceMetadata }
+}
+
+async function createEpisodeWorkflow(env, preparedSource, {
   batchDate,
   attempt,
   staggerSec = 0,
 }, deps) {
+  const { thread, sourceMetadata } = preparedSource
   const drama = {
     id: crypto.randomUUID(),
     hnId: String(thread.id),
@@ -526,10 +543,11 @@ async function createEpisodeWorkflow(env, thread, {
     status: 'queued',
     progress: [{
       at: nowIso(),
-      message: `Fetched ${thread.total} comments`,
+      message: verifiedSourceProgress(thread),
       runId: `nightly:${batchDate}:attempt:${attempt}`,
-      eventKey: 'thread-fetched',
+      eventKey: 'source-completeness-verified',
     }],
+    sourceCompleteness: sourceMetadata.sourceCompleteness,
     audioUrl: null,
     error: null,
     createdAt: nowIso(),
@@ -820,6 +838,11 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
           updatedAt: nowIso(),
         }
       } else {
+        // Prove the source complete before reserving the single generation
+        // slot. An unreadable/paywalled first candidate must not prevent this
+        // pass from selecting the next story whose entire source is usable.
+        const thread = await deps.fetchThread(`https://news.ycombinator.com/item?id=${hnId}`)
+        const preparedSource = await prepareEpisodeSource(thread, deps)
         const generationSlot = await acquireGenerationSlot(
           env,
           generationController,
@@ -833,8 +856,7 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
           if (generationController.circuit) break
           continue
         }
-        const thread = await deps.fetchThread(`https://news.ycombinator.com/item?id=${hnId}`)
-        const created = await createEpisodeWorkflow(env, thread, {
+        const created = await createEpisodeWorkflow(env, preparedSource, {
           batchDate: batch.date,
           attempt: 1,
           staggerSec: 0,
@@ -870,7 +892,8 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
       }
       if (generationController.generationStarted) break
     } catch (error) {
-      recordBatchError(batch, `HN ${hnId}: ${error?.message || error}`)
+      const sourceCode = error?.code ? ` (${error.code})` : ''
+      recordBatchError(batch, `HN ${hnId}: ${error?.message || error}${sourceCode}`)
       await persistBatch(env.DB, batch, deps)
     }
   }

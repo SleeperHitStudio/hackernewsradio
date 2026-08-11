@@ -1,108 +1,140 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import {
-  TRANSCRIPT_COMMENT_BUDGET,
-  TRANSCRIPT_MAX_CHARS_EACH,
-  TRANSCRIPT_MIN_CHARS_EACH,
-  planCommentBudget,
-  threadToTranscript,
-} from '../worker/hn.mjs'
+import { buildSourceMetadata, HNError, threadToTranscript } from '../worker/hn.mjs'
 
-/**
- * Real HN shape, measured off three threads this show has covered: the median
- * comment is ~160 characters, p90 lands near 500, and under 1% run past 1600.
- */
 const makeComments = (count, { length = 180 } = {}) =>
-  Array.from({ length: count }, (_, i) => ({
-    id: String(i + 1),
-    parentId: null,
-    branch: i % 12,
-    author: `user${i}`,
-    depth: 0,
-    text: 'x'.repeat(length),
+  Array.from({ length: count }, (_, index) => ({
+    id: String(index + 1),
+    parentId: index === 0 ? null : String(index),
+    branch: '1',
+    author: `user${index}`,
+    depth: Math.min(index, 8),
+    text: `${'x'.repeat(length)}\nparagraph-${index}`,
   }))
 
-test('an ordinary thread arrives complete and untouched', () => {
-  // 333 comments was the largest of the threads measured; it must not be
-  // excerpted at all, let alone truncated to 240.
-  const plan = planCommentBudget(makeComments(333))
-  assert.equal(plan.comments.length, 333)
-  assert.equal(plan.charsEach, TRANSCRIPT_MAX_CHARS_EACH)
-  assert.equal(plan.complete, true)
-})
-
-test('the thread that lost 77% of itself now arrives whole', () => {
-  // The GPT-5.6 thread: 1057 comments, of which the writer previously saw 240.
-  const plan = planCommentBudget(makeComments(1057))
-  assert.equal(plan.comments.length, 1057)
-  assert.equal(plan.complete, true)
-})
-
-test('a huge thread tightens excerpts rather than dropping commenters', () => {
-  // Long comments AND many of them: the budget binds, so per-comment length
-  // gives way first. Every commenter still appears.
-  const comments = makeComments(1200, { length: 1500 })
-  const plan = planCommentBudget(comments)
-  assert.equal(plan.comments.length, 1200, 'nobody is dropped')
-  assert.equal(plan.complete, true)
-  assert.ok(plan.charsEach < TRANSCRIPT_MAX_CHARS_EACH, 'excerpts tightened')
-  assert.ok(plan.charsEach >= TRANSCRIPT_MIN_CHARS_EACH, 'never below the readable floor')
-})
-
-test('the chosen allowance actually fits the budget, and is the largest that does', () => {
-  const comments = makeComments(1200, { length: 1500 })
-  const plan = planCommentBudget(comments)
-  const cost = (each) => comments.reduce((sum, c) => sum + Math.min(c.text.length, each), 0)
-  assert.ok(cost(plan.charsEach) <= TRANSCRIPT_COMMENT_BUDGET, 'fits')
-  // One character more must not fit, or we gave away detail we could afford.
-  assert.ok(cost(plan.charsEach + 1) > TRANSCRIPT_COMMENT_BUDGET, 'maximal')
-})
-
-test('only a thread past the readable floor loses comments, and says so', () => {
-  // Big enough that even minimum-length excerpts cannot all fit.
-  const comments = makeComments(4000, { length: 2000 })
-  const plan = planCommentBudget(comments)
-  assert.equal(plan.complete, false)
-  assert.ok(plan.comments.length < 4000)
-  assert.equal(plan.charsEach, TRANSCRIPT_MIN_CHARS_EACH)
-  // Breadth is preserved: the sample spans top-level branches, not one prefix.
-  assert.ok(new Set(plan.comments.map((c) => c.branch)).size > 1)
-})
-
-test('an empty thread is handled without dividing by zero', () => {
-  const plan = planCommentBudget([])
-  assert.deepEqual(plan.comments, [])
-  assert.equal(plan.complete, true)
-})
-
-test('the transcript claims completeness only when it is complete', () => {
-  const thread = {
-    title: 'A thread', url: 'https://news.ycombinator.com/item?id=1',
-    author: 'op', points: 10, storyText: '', articleUrl: null,
-    comments: makeComments(50), total: 50,
+function makeThread(comments, overrides = {}) {
+  return {
+    id: '42',
+    title: 'A complete thread',
+    url: 'https://news.ycombinator.com/item?id=42',
+    articleUrl: null,
+    author: 'op',
+    points: 10,
+    storyText: '',
+    comments,
+    total: comments.length,
+    completeness: {
+      comments: {
+        complete: true,
+        expected: comments.length,
+        fetched: comments.length,
+        capturedAt: '2026-08-10T12:00:00.000Z',
+        metadataSource: 'official-hn-firebase',
+        contentSource: 'hn-algolia-search-plus-recursive-item-tree',
+      },
+    },
+    ...overrides,
   }
-  const complete = threadToTranscript(thread)
-  assert.match(complete, /this is the ENTIRE thread/)
-  assert.doesNotMatch(complete, /sampled across top-level branches/)
+}
 
-  // Forcing a tiny budget makes it incomplete, and it must admit that.
-  const sampled = threadToTranscript(
-    { ...thread, comments: makeComments(400, { length: 900 }), total: 400 },
-    { budget: 20_000 },
-  )
-  assert.match(sampled, /sampled across top-level branches/)
-  assert.doesNotMatch(sampled, /this is the ENTIRE thread/)
+test('an ordinary thread arrives complete without excerpts', () => {
+  const comments = makeComments(333)
+  const transcript = threadToTranscript(makeThread(comments))
+
+  assert.match(transcript, /COMPLETE COMMENT THREAD \(all 333 comments\)/)
+  assert.match(transcript, /<<<HNR_COMMENTS_BEGIN count=333>>>/)
+  assert.match(transcript, /<<<HNR_COMMENTS_END>>>/)
+  assert.match(transcript, /\[comment=333 reply_to=332\] user332:/)
+  assert.match(transcript, /paragraph-332/)
 })
 
-test('every included comment is rendered with its handle and id', () => {
-  const thread = {
-    title: 'A thread', url: 'https://news.ycombinator.com/item?id=1',
-    author: 'op', points: 10, storyText: '', articleUrl: null,
-    comments: makeComments(300), total: 300,
-  }
+test('source metadata opts Sleeper Hit into exact full-text grounding', () => {
+  const thread = makeThread(makeComments(3))
   const transcript = threadToTranscript(thread)
-  // Previously the 241st comment onward simply did not exist for the writer.
-  assert.ok(transcript.includes('user299:'), 'the 300th comment is present')
-  assert.ok(transcript.includes('[comment=300'), 'and carries its id for quoting')
+  const metadata = buildSourceMetadata(thread, transcript)
+
+  assert.equal(metadata.sourceProducer, 'hackernewsradio')
+  assert.equal(metadata.sourceContextMode, 'full')
+  assert.equal(metadata.hnStoryId, '42')
+  assert.deepEqual(metadata.sourceCompleteness.comments, {
+    complete: true,
+    expected: 3,
+    fetched: 3,
+    capturedAt: '2026-08-10T12:00:00.000Z',
+    metadataSource: 'official-hn-firebase',
+    contentSource: 'hn-algolia-search-plus-recursive-item-tree',
+  })
+  assert.equal(metadata.sourceCompleteness.article.required, false)
+  assert.equal(metadata.sourceCompleteness.post.required, false)
+  assert.equal(metadata.sourceCompleteness.sourcePack.chars, transcript.length)
+  assert.equal(metadata.sourceCompleteness.sourcePack.clipped, false)
+})
+
+test('the formerly sampled 1,057-comment case keeps every comment and long body', () => {
+  const comments = makeComments(1_057, { length: 600 })
+  comments[1_056].text = `${'z'.repeat(2_400)}\nlong-comment-end`
+  const transcript = threadToTranscript(makeThread(comments))
+
+  assert.match(transcript, /\[comment=1057 reply_to=1056\] user1056:/)
+  assert.ok(transcript.includes('z'.repeat(2_400)), 'comment text must not be clipped at the old 1,600-character cap')
+  assert.match(transcript, /long-comment-end/)
+})
+
+test('a complete self-post is not clipped at the old 1,500-character cap', () => {
+  const storyText = `BEGIN-${'s'.repeat(8_000)}-END`
+  const transcript = threadToTranscript(makeThread([], { storyText }))
+
+  assert.ok(transcript.includes(storyText))
+  assert.match(transcript, new RegExp(`<<<HNR_SELF_POST_BEGIN chars=${storyText.length}>>>`))
+  assert.match(transcript, /<<<HNR_SELF_POST_END>>>/)
+  assert.match(transcript, /COMPLETE COMMENT THREAD \(all 0 comments\)/)
+  assert.match(transcript, /<<<HNR_COMMENTS_BEGIN count=0>>>\n\n<<<HNR_COMMENTS_END>>>/)
+
+  const metadata = buildSourceMetadata(makeThread([], { storyText }), transcript)
+  assert.deepEqual(metadata.sourceCompleteness.post, {
+    required: true,
+    complete: true,
+    chars: storyText.length,
+  })
+})
+
+test('a source above the downstream limit fails instead of sampling or clipping', () => {
+  const comments = makeComments(50, { length: 2_000 })
+
+  assert.throws(
+    () => threadToTranscript(makeThread(comments), { maxChars: 10_000, maxBytes: 20_000 }),
+    (error) => error instanceof HNError && error.code === 'source_pack_too_large',
+  )
+})
+
+test('a count mismatch is rejected before rendering', () => {
+  const comments = makeComments(2)
+  const thread = makeThread(comments)
+  thread.total = 3
+
+  assert.throws(
+    () => threadToTranscript(thread),
+    (error) => error instanceof HNError && error.code === 'hn_thread_incomplete',
+  )
+})
+
+test('missing completeness proof is rejected before rendering', () => {
+  const thread = makeThread(makeComments(1))
+  delete thread.completeness
+
+  assert.throws(
+    () => threadToTranscript(thread),
+    (error) => error instanceof HNError && error.code === 'hn_thread_incomplete',
+  )
+})
+
+test('duplicate or empty comments are rejected before rendering', () => {
+  const duplicate = makeThread(makeComments(2))
+  duplicate.comments[1].id = duplicate.comments[0].id
+  assert.throws(() => threadToTranscript(duplicate), { code: 'hn_thread_incomplete' })
+
+  const empty = makeThread(makeComments(1))
+  empty.comments[0].text = ''
+  assert.throws(() => threadToTranscript(empty), { code: 'hn_thread_incomplete' })
 })
