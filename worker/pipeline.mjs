@@ -7,7 +7,13 @@
  */
 import { WorkflowEntrypoint } from 'cloudflare:workers'
 import { SleeperHit, SleeperHitError } from './sleeperhit.mjs'
-import { fetchArticle, fetchThread, threadToTranscript } from './hn.mjs'
+import {
+  buildSourceMetadata,
+  fetchArticle,
+  fetchThread,
+  threadToTranscript,
+  verifiedSourceProgress,
+} from './hn.mjs'
 import { classifySystemicFailure } from './failure-classification.mjs'
 import { enforceSfxCanon } from './sfx-canon.mjs'
 import { SHOW_MEMORY_KEY, appendMemory, buildSeriesContext, extractEpisodeMemory } from './show-memory.mjs'
@@ -72,16 +78,35 @@ export class HnrPipeline extends WorkflowEntrypoint {
     try {
       if (staggerSec > 0) await step.sleep('stagger', `${staggerSec} seconds`)
 
-      const thread = await runWorkflowStepOnce(step, 'fetch thread', () => fetchThread(url))
-      // Best-effort, and its own step so a slow publisher cannot take the
-      // episode down with it: fetchArticle never throws, and an episode without
-      // the article is still an episode — just a shallower one.
-      thread.article = await runWorkflowStepOnce(step, 'fetch source article', async () => {
-        if (!thread.articleUrl) return null
-        const article = await fetchArticle(thread.articleUrl)
-        if (!article) console.log(`[hnr] source article unavailable for ${thread.articleUrl}`)
-        return article
-      })
+      const recoversExistingSource = isRepair || isResume || isUpstreamRecovery
+      const thread = recoversExistingSource
+        ? {
+            id: String(recoveryOriginal?.hnId ?? ''),
+            title: recoveryOriginal?.title || 'Recovered Hacker News episode',
+            url: recoveryOriginal?.url || url,
+            total: Number(recoveryOriginal?.commentCount ?? 0),
+            points: recoveryOriginal?.points ?? null,
+          }
+        : await runWorkflowStepOnce(step, 'fetch complete thread', () => fetchThread(url))
+      if (recoversExistingSource && !thread.id) {
+        throw new Error(`Cannot recover ${dramaId}: the episode has no Hacker News source identity.`)
+      }
+
+      let sourceTranscript = null
+      let sourceMetadata = null
+      if (!recoversExistingSource) {
+        thread.article = await runWorkflowStepOnce(step, 'fetch complete source article', async () =>
+          thread.articleUrl ? fetchArticle(thread.articleUrl) : null)
+        sourceTranscript = threadToTranscript(thread)
+        sourceMetadata = buildSourceMetadata(thread, sourceTranscript)
+        await patchDrama(db, dramaId, {
+          title: thread.title,
+          commentCount: thread.total,
+          points: thread.points ?? null,
+          sourceCompleteness: sourceMetadata.sourceCompleteness,
+        })
+        await note(verifiedSourceProgress(thread), 'source-completeness-verified')
+      }
       // A published episode remains playable while a repair is in flight. Its
       // replacement media is promoted only after finalize succeeds.
       if (!(recoveryOriginal?.status === 'ready' && recoveryOriginal?.audioUrl)) {
@@ -133,13 +158,18 @@ export class HnrPipeline extends WorkflowEntrypoint {
           } catch { /* endpoint not deployed yet — pin step covers the hosts */ }
         })
 
-        await note('Adding this episode to HNRadio…')
+        await note('Adding the verified full article and comment thread to HNRadio…')
         sourceId = await this.hardStep(step, 'add source', () =>
           sh.addTextSource(projectId, {
-            content: threadToTranscript(thread),
+            content: sourceTranscript,
             label: `HN thread ${thread.id}`,
+            metadata: sourceMetadata,
             idempotencyKey: `${dramaId}-source`,
           }), { replaySafe: true })
+        await patchDrama(db, dramaId, {
+          sourceId,
+          sourceCompleteness: sourceMetadata.sourceCompleteness,
+        })
         await this.pollChunked(step, 'source', 8, async () => {
           const res = await sh.request(`/story-projects/${projectId}/sources/${sourceId}`)
           const status = res.source?.status

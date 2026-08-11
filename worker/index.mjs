@@ -5,7 +5,13 @@
  * 7pm America/Chicago sweep fires from an hourly cron trigger (DST-proof).
  */
 import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread } from './store.mjs'
-import { fetchThread } from './hn.mjs'
+import {
+  buildSourceMetadata,
+  fetchThread,
+  hydrateThreadArticle,
+  threadToTranscript,
+  verifiedSourceProgress,
+} from './hn.mjs'
 import { spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
 import { operatorAuthorization } from './operator-auth.mjs'
 import { operatorNightlyReconcile } from './operator-nightly.mjs'
@@ -69,6 +75,9 @@ async function startGeneration(request, env, url, { force = false, requireEntitl
     const existing = await findByHnIdAndMode(env.DB, thread.id, 'podcast')
     if (existing && ['queued', 'running', 'ready'].includes(existing.status)) return { drama: existing, reused: true }
   }
+  await hydrateThreadArticle(thread)
+  const sourceTranscript = threadToTranscript(thread)
+  const sourceMetadata = buildSourceMetadata(thread, sourceTranscript)
   let entitlementClaimed = false
   if (requireEntitlement) {
     const claim = await claimCommunityGeneration(request, env, thread.id)
@@ -89,7 +98,13 @@ async function startGeneration(request, env, url, { force = false, requireEntitl
     commentCount: thread.total,
     points: thread.points ?? null,
     status: 'queued',
-    progress: [{ at: new Date().toISOString(), message: `Fetched ${thread.total} comments` }],
+    progress: [{
+      at: new Date().toISOString(),
+      message: verifiedSourceProgress(thread),
+      runId: 'request-preflight',
+      eventKey: 'source-completeness-verified',
+    }],
+    sourceCompleteness: sourceMetadata.sourceCompleteness,
     audioUrl: null,
     error: null,
     createdAt: new Date().toISOString(),
@@ -209,7 +224,10 @@ async function handleApi(request, env, url) {
       if (String(err?.code || '').startsWith('community_')) {
         return json({ error: err.code, code: err.code, generatedHnId: err.generatedHnId || null }, 403)
       }
-      return json({ error: err?.message || String(err) }, 400)
+      return json({
+        error: err?.message || String(err),
+        code: err?.code || 'source_preflight_failed',
+      }, 400)
     }
   }
   return json({ error: 'Not found' }, 404)

@@ -36,10 +36,22 @@ grounded SFX* — and let it write, cast, score, and mix the final audio.
 ## How it works
 
 ```
-HN URL → fetch thread (Algolia) → Story API:
-  project → source → plan → approve → job → pin voices → autotune Gruner
-          → shape music to bookends → finalize(audio) → MP3
+HN URL → verify official HN comment count against cursor-paged Algolia search
+         merged with Algolia's recursive reply tree (including >1,000 comments)
+       → fetch + reader-extract the complete linked article
+       → upload one integrity-declared full source pack → Story API:
+         source → plan → approve → job → pin voices → autotune Gruner
+                → shape music to bookends → finalize(audio) → MP3
 ```
+
+**Source completeness is fail-closed.** An episode starts only when HNR has an
+exact count-matched comment snapshot and, when present, a complete unclipped
+linked-article extraction and complete self-post. Unsupported media, unreadable/paywalled article
+previews, partial HTTP bodies, count disagreement, and sources above the
+downstream no-clipping limit are rejected instead of producing a shallow
+episode. HNR marks the upload `sourceContextMode: full`; Sleeper Hit verifies
+the retained-text hash and HNR's article/self-post/comment/size declaration before
+passing the exact source to both planning and final script writing.
 
 **Voice pinning:** the Story API can't pin voices at plan time, so the first
 episode *adopts* whatever voices the planner cast for the four hosts (saved in

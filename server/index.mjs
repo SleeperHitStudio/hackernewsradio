@@ -47,7 +47,10 @@ app.post('/api/generate', wrap(async (req, res) => {
     })
     res.json({ drama, reused })
   } catch (err) {
-    res.status(400).json({ error: err?.message || String(err) })
+    res.status(400).json({
+      error: err?.message || String(err),
+      code: err?.code || 'source_preflight_failed',
+    })
   }
 }))
 

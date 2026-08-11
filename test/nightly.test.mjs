@@ -71,14 +71,39 @@ function harness({
       const id = url.match(/item\/(\d+)\.json$/)?.[1]
       return { id: Number(id), type: 'story', descendants: 50, title: `Story ${id}` }
     },
+    async fetchArticle() {
+      throw new Error('fetchArticle must not run for a story without a linked article')
+    },
     async fetchThread(url) {
       const id = url.match(/id=(\d+)/)?.[1]
+      const comments = Array.from({ length: 50 }, (_, index) => ({
+        id: `${id}${String(index + 1).padStart(3, '0')}`,
+        parentId: null,
+        branch: `${id}${String(index + 1).padStart(3, '0')}`,
+        author: `user${index + 1}`,
+        depth: 0,
+        text: `Complete comment ${index + 1}`,
+      }))
       return {
         id,
         title: `Story ${id}`,
         url: `https://news.ycombinator.com/item?id=${id}`,
+        articleUrl: null,
+        storyText: 'Complete self-post body.',
+        author: 'submitter',
+        comments,
         total: 50,
         points: 100,
+        completeness: {
+          comments: {
+            complete: true,
+            expected: 50,
+            fetched: 50,
+            capturedAt: '2026-07-16T06:00:00.000Z',
+            metadataSource: 'official-hn-firebase',
+            contentSource: 'hn-algolia-search-plus-recursive-item-tree',
+          },
+        },
       }
     },
   }
@@ -415,6 +440,90 @@ test('nightly selection adopts active work and starts one globally serialized ge
   assert.equal(h.creates.length, 1)
   assert.equal(h.creates[0].params.staggerSec, 0)
   assert.equal(h.settings.get('dailyTopLastRun'), undefined)
+})
+
+test('nightly refuses to create a workflow when the linked article is unavailable', async () => {
+  const h = harness({ topIds: [30] })
+  const originalFetchThread = h.dependencies.fetchThread
+  h.dependencies.fetchThread = async (url) => ({
+    ...await originalFetchThread(url),
+    articleUrl: 'https://publisher.example/unavailable',
+  })
+  h.dependencies.fetchArticle = async () => {
+    const error = new Error('Source article returned HTTP 403.')
+    error.code = 'article_unavailable'
+    throw error
+  }
+
+  const batch = await reconcileNightlyBatch(h.env, '2026-07-15', {
+    dependencies: h.dependencies,
+  })
+
+  assert.equal(h.creates.length, 0)
+  assert.equal(h.dramas.size, 0)
+  assert.equal(batch.items.length, 0)
+  assert.match(batch.errors.at(-1).message, /HN 30: Source article returned HTTP 403/)
+})
+
+test('nightly rejects an incomplete source before reserving the generation slot and selects the next story', async () => {
+  const h = harness({ topIds: [30, 31] })
+  const originalFetchThread = h.dependencies.fetchThread
+  h.dependencies.fetchThread = async (url) => {
+    const thread = await originalFetchThread(url)
+    return String(thread.id) === '30'
+      ? { ...thread, articleUrl: 'https://publisher.example/unavailable' }
+      : thread
+  }
+  h.dependencies.fetchArticle = async () => {
+    const error = new Error('Source article returned HTTP 403.')
+    error.code = 'article_unavailable'
+    throw error
+  }
+
+  const batch = await reconcileNightlyBatch(h.env, '2026-07-15', {
+    dependencies: h.dependencies,
+  })
+
+  assert.equal(h.creates.length, 1)
+  assert.equal(batch.items.length, 1)
+  assert.equal(batch.items[0].hnId, '31')
+  assert.match(batch.errors[0].message, /HN 30: Source article returned HTTP 403/)
+})
+
+test('nightly records full article and comment proof before creating a workflow', async () => {
+  const h = harness({ topIds: [31] })
+  const completeArticleText = `ARTICLE-BEGIN ${'complete article. '.repeat(40)} ARTICLE-END`
+  const originalFetchThread = h.dependencies.fetchThread
+  h.dependencies.fetchThread = async (url) => ({
+    ...await originalFetchThread(url),
+    articleUrl: 'https://publisher.example/full',
+  })
+  h.dependencies.fetchArticle = async (url) => ({
+    url,
+    requestedUrl: url,
+    contentType: 'text/html',
+    rawByteSize: 2_000,
+    title: 'Complete article',
+    byline: null,
+    publishedTime: null,
+    text: completeArticleText,
+    charCount: completeArticleText.length,
+    complete: true,
+    truncated: false,
+    fetchedAt: '2026-07-16T06:00:00.000Z',
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, '2026-07-15', {
+    dependencies: h.dependencies,
+  })
+
+  assert.equal(h.creates.length, 1)
+  const drama = h.dramas.get(batch.items[0].episodeId)
+  assert.equal(drama.sourceCompleteness.comments.expected, 50)
+  assert.equal(drama.sourceCompleteness.comments.fetched, 50)
+  assert.equal(drama.sourceCompleteness.article.complete, true)
+  assert.equal(drama.sourceCompleteness.article.url, 'https://publisher.example/full')
+  assert.match(drama.progress[0].message, /50\/50 comments and full article/)
 })
 
 test('a ready but unpublished terminal Workflow resumes the same artifact', async () => {

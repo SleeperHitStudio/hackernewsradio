@@ -14,7 +14,13 @@
 import { randomUUID } from 'node:crypto'
 import { SleeperHit } from './sleeperhit.mjs'
 import { config } from './config.mjs'
-import { fetchThread, threadToTranscript } from './hn.mjs'
+import {
+  buildSourceMetadata,
+  fetchThread,
+  hydrateThreadArticle,
+  threadToTranscript,
+  verifiedSourceProgress,
+} from './hn.mjs'
 import { upsertDrama, patchDrama, findByHnIdAndMode, getSetting, setSetting, deleteOtherEpisodesOfThread } from './store.mjs'
 
 const client = () => new SleeperHit({ baseUrl: config.apiBase, apiKey: config.apiKey })
@@ -202,6 +208,9 @@ export async function startGeneration(url, { force = false } = {}) {
     const existing = await findByHnIdAndMode(thread.id, mode)
     if (existing && existing.status === 'ready') return { drama: existing, reused: true }
   }
+  await hydrateThreadArticle(thread)
+  const sourceTranscript = threadToTranscript(thread)
+  const sourceMetadata = buildSourceMetadata(thread, sourceTranscript)
 
   const drama = {
     id: randomUUID(),
@@ -211,7 +220,8 @@ export async function startGeneration(url, { force = false } = {}) {
     title: thread.title,
     commentCount: thread.total,
     status: 'queued',
-    progress: [{ at: stamp(), message: `Fetched ${thread.total} comments` }],
+    progress: [{ at: stamp(), message: verifiedSourceProgress(thread) }],
+    sourceCompleteness: sourceMetadata.sourceCompleteness,
     audioUrl: null,
     error: null,
     createdAt: stamp(),
@@ -219,7 +229,7 @@ export async function startGeneration(url, { force = false } = {}) {
   await upsertDrama(drama)
   if (force) await deleteOtherEpisodesOfThread(thread.id, mode, drama.id)
 
-  runPipeline(drama.id, thread).catch(async (err) => {
+  runPipeline(drama.id, thread, { sourceTranscript, sourceMetadata }).catch(async (err) => {
     await patchDrama(drama.id, {
       status: 'failed',
       error: err?.message || String(err),
@@ -241,7 +251,7 @@ async function note(id, message) {
   await patchDrama(id, { progress: await appendProgress(id, message) })
 }
 
-async function runPipeline(id, thread) {
+async function runPipeline(id, thread, { sourceTranscript, sourceMetadata }) {
   const sh = client()
   const onProgress = (message) => { note(id, message) }
   const label = 'podcast'
@@ -262,10 +272,15 @@ async function runPipeline(id, thread) {
   }
   await patchDrama(id, { projectId })
 
-  await note(id, 'Adding the thread as source…')
+  await note(id, 'Adding the verified full article and comment thread as source…')
   const sourceId = await sh.addTextSource(projectId, {
-    content: threadToTranscript(thread),
+    content: sourceTranscript,
     label: `HN thread ${thread.id}`,
+    metadata: sourceMetadata,
+  })
+  await patchDrama(id, {
+    sourceId,
+    sourceCompleteness: sourceMetadata.sourceCompleteness,
   })
   await sh.pollSourceReady(projectId, sourceId, { onProgress })
 
