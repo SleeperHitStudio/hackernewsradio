@@ -16,7 +16,13 @@ import {
 } from './hn.mjs'
 import { classifySystemicFailure } from './failure-classification.mjs'
 import { enforceSfxCanon } from './sfx-canon.mjs'
-import { SHOW_MEMORY_KEY, appendMemory, buildSeriesContext, extractEpisodeMemory } from './show-memory.mjs'
+import {
+  SHOW_MEMORY_KEY,
+  appendMemory,
+  buildSeriesContext,
+  extractEpisodeMemory,
+  trimBibleEpisodes,
+} from './show-memory.mjs'
 import {
   AVATAR_STYLE,
   HOSTS,
@@ -969,6 +975,6 @@ export class HnrPipeline extends WorkflowEntrypoint {
       summary: `Produced episode on the Hacker News thread "${thread.title}" (${thread.total} comments) — ${thread.url}`,
       status: 'produced',
     })
-    await sh.patchSeriesBible(projectId, { content: { episodes } })
+    await sh.patchSeriesBible(projectId, { content: { episodes: trimBibleEpisodes(episodes) } })
   }
 }
