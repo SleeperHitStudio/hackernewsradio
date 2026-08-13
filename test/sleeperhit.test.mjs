@@ -7,6 +7,7 @@ import {
   SleeperHit,
   summarizeVoiceModifications,
 } from '../worker/sleeperhit.mjs'
+import { classifySystemicFailure } from '../worker/failure-classification.mjs'
 
 test('Sleeper client StoryJob polling budget is at least 60 minutes', () => {
   assert.ok(STORY_JOB_POLL_ATTEMPTS * STORY_JOB_POLL_INTERVAL_MS >= 60 * 60 * 1000)
@@ -253,4 +254,56 @@ test('SFX repair updates and regenerates the existing cue with its repair key', 
       },
     },
   }])
+})
+
+test('a failed voice mod carries the reason the platform recorded', () => {
+  // The Story API records WHY a render failed on the record's `error` and
+  // returns it on the artifact manifest. HNR used to read only `status`, so a
+  // Hume credit cliff reached the episode as a bare render timeout — fifteen
+  // times in a row, with the real cause sitting unread in the payload.
+  const summary = summarizeVoiceModifications([
+    {
+      startEntryIndex: 4,
+      endEntryIndex: 6,
+      status: 'failed',
+      updatedAt: '2026-08-11T02:00:00Z',
+      error: 'Hume TTS error (400): {"slug":"zero_credits","message":"Exhausted credit balance."}',
+    },
+    { startEntryIndex: 12, endEntryIndex: 12, status: 'ready', updatedAt: '2026-08-11T02:01:00Z' },
+  ], [{ start: 4, end: 6 }, { start: 12, end: 12 }])
+
+  assert.equal(summary.failed, 1)
+  assert.match(summary.lastError, /Exhausted credit balance/)
+  assert.deepEqual(summary.failureReasons.length, 1)
+})
+
+test('a failure the platform left blank does not invent a reason', () => {
+  const summary = summarizeVoiceModifications(
+    [{ startEntryIndex: 4, endEntryIndex: 6, status: 'failed', updatedAt: '2026-08-11T02:00:00Z' }],
+    [{ start: 4, end: 6 }],
+  )
+  assert.equal(summary.failed, 1)
+  assert.equal(summary.lastError, null)
+  assert.deepEqual(summary.failureReasons, [])
+})
+
+test('a surfaced credit-balance reason classifies as a quota cliff', () => {
+  // This is the payoff: naming the reason is what lets the nightly reconciler
+  // CLASSIFY it. A quota-class failure opens the generation circuit and emails
+  // the operator, instead of spending attempts on a provider that is out of
+  // money. An unnamed timeout classifies as nothing at all.
+  const summary = summarizeVoiceModifications([
+    {
+      startEntryIndex: 4,
+      endEntryIndex: 6,
+      status: 'failed',
+      updatedAt: '2026-08-11T02:00:00Z',
+      error: 'Hume TTS error (400): Exhausted credit balance. Visit platform.hume.ai/billing',
+    },
+  ], [{ start: 4, end: 6 }])
+
+  const surfaced = `autotune render a2 timed out. Last render failure: ${summary.lastError}`
+  assert.equal(classifySystemicFailure(surfaced), 'quota')
+  assert.equal(classifySystemicFailure('autotune render a2 timed out.'), null,
+    'the bare timeout HNR used to report classifies as nothing')
 })

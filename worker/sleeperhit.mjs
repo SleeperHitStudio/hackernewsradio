@@ -46,6 +46,7 @@ function latestVoiceMods(modifications) {
 export function summarizeVoiceModifications(modifications, requestedRanges) {
   const latest = latestVoiceMods(Array.isArray(modifications) ? modifications : [])
   const failedRanges = []
+  const failureReasons = []
   const statuses = []
   let ready = 0
   let failed = 0
@@ -65,10 +66,27 @@ export function summarizeVoiceModifications(modifications, requestedRanges) {
     else if (status === 'failed') {
       failed++
       failedRanges.push(normalized)
+      // The platform records WHY a render failed on the record's `error` and
+      // returns it on the artifact manifest. Dropping it here is what made a
+      // Hume credit cliff read as a bare "autotune render a2 timed out" for
+      // fifteen consecutive episodes.
+      const reason = String(modification?.error ?? '').trim()
+      if (reason) failureReasons.push(reason)
     } else pending++
   }
 
-  return { total: requestedRanges.length, ready, failed, pending, failedRanges, statuses }
+  return {
+    total: requestedRanges.length,
+    ready,
+    failed,
+    pending,
+    failedRanges,
+    statuses,
+    failureReasons,
+    // The reason to put in front of a human first. Identical provider errors
+    // repeat across every range in a batch, so surfacing one is enough.
+    lastError: failureReasons[failureReasons.length - 1] ?? null,
+  }
 }
 
 export class SleeperHit {
