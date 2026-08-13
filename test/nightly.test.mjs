@@ -657,6 +657,58 @@ test('a quota-class failure opens the circuit, then retries the same job on the 
   assert.equal(h.dramas.get('episode_quota').error, null)
 })
 
+test('an episode that failed before it had a job is replaced with a fully prepared source', async () => {
+  // An episode that dies in `fetch complete thread` never reaches a jobId or a
+  // planId, so there is nothing to resume and reconciliation must build a fresh
+  // replacement. That path has to hand createEpisodeWorkflow the SAME prepared
+  // source a first attempt gets — thread plus completeness metadata — not the
+  // bare thread. Passing the thread alone made every retry throw
+  // "Cannot read properties of undefined (reading 'id')" before it could queue
+  // anything, which turned each transient failure into a permanent one.
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  h.dramas.set('episode_unsynced', {
+    id: 'episode_unsynced',
+    hnId: '77',
+    status: 'failed',
+    error: 'HNError: Hacker News thread 77 is not synchronized yet: official count 117, Algolia count 116, decoded 116.',
+    url: 'https://news.ycombinator.com/item?id=77',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '77',
+      url: 'https://news.ycombinator.com/item?id=77',
+      title: 'Story 77',
+      episodeId: 'episode_unsynced',
+      workflowId: 'episode_unsynced',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'failed',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+
+  assert.equal(item.lastError ?? null, null, 'the replacement path must not throw')
+  assert.equal(item.status, 'queued')
+  assert.equal(item.attempt, 2, 'a fresh replacement consumes an attempt')
+  assert.equal(h.creates.length, 1, 'exactly one replacement Workflow is queued')
+
+  // The replacement drama proves the prepared source was destructured: reading
+  // `thread.id` off a bare thread is what used to throw.
+  const replacement = h.dramas.get(item.episodeId)
+  assert.ok(replacement, 'the replacement episode row exists')
+  assert.equal(replacement.hnId, '77')
+  assert.equal(replacement.status, 'queued')
+  assert.notEqual(item.episodeId, 'episode_unsynced', 'the replacement is a new episode')
+})
+
 test('a recorded failed probe is rearmed when its next recovery window arrives', async () => {
   const now = '2026-07-19T06:00:00.000Z'
   const date = '2026-07-18'

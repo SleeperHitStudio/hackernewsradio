@@ -693,7 +693,12 @@ async function recoverItem(
     })
   } else {
     const thread = await deps.fetchThread(item.url)
-    const replacement = await createEpisodeWorkflow(env, thread, {
+    // A replacement needs the same prepared source a first attempt gets: the
+    // article hydrated onto the thread and the completeness metadata the
+    // pipeline sends with the source. Passing the bare thread here left every
+    // retry throwing before it could queue anything.
+    const preparedSource = await prepareEpisodeSource(thread, deps)
+    const replacement = await createEpisodeWorkflow(env, preparedSource, {
       batchDate: batch.date,
       attempt: blocked ? attempt : attempt + 1,
     }, deps)
