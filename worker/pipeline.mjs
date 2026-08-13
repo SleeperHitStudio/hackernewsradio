@@ -755,6 +755,22 @@ export class HnrPipeline extends WorkflowEntrypoint {
       // replacement appears, and must not be mistaken for a second failure.
       if (attempt === 1 && summary.pending === 0) return summary
       return 'pending'
+    }).catch(async (error) => {
+      // A bare "timed out" hides the one fact that explains it. Re-read the
+      // manifest — as its own step, so a Workflow replay does not depend on a
+      // closure — and name the provider failure the platform already recorded.
+      // This is also what lets the nightly CLASSIFY the failure: an exhausted
+      // credit balance reaches the reconciler as a quota cliff, which opens the
+      // circuit and emails the operator instead of burning attempts silently.
+      if (!/timed out/i.test(error?.message || '')) throw error
+      const reason = await this.hardStep(
+        step,
+        `autotune failure reason a${attempt}`,
+        async () => (await sh.getVoiceModificationSummary(artifactId, runs)).lastError,
+        { replaySafe: true },
+      ).catch(() => null)
+      if (!reason) throw error
+      throw new Error(`${error.message} Last render failure: ${reason}`)
     })
     await ensureRequestedVoiceModsReady({
       requestedRanges: runs,
