@@ -139,13 +139,16 @@ const SHARED_AUDIO = {
 }
 
 // Soft constraints the planner sees. musicPolicy enforces intro/outro-only music;
-// voicePreference biases the cast toward Cartesia (reliable live API).
+// voicePreference matches the pinned recurring cast, which is Hume on every
+// voice. Telling the planner to prefer a different provider only ever applied
+// to guest characters, and read as though the show had a Cartesia fallback it
+// has never had.
 const SHARED_STYLE_CONSTRAINTS = {
   musicPolicy:
     'Music is bookend-only and sparse: the show\'s recurring late-night JAZZ THEME (~30–40s) under the intro and ' +
     'outro, plus AT MOST one or two ~10s jazz stings mid-show. The vast majority of runtime is voices-only with NO ' +
     'music. SFX stay plentiful throughout; music does not.',
-  voicePreference: 'Prefer Cartesia voices for the cast; avoid leaning on a single provider.',
+  voicePreference: 'Prefer Hume voices for the cast, matching the show\'s pinned recurring voices.',
 }
 
 /** The podcast: an off-center panel show with a fixed recurring cast. */

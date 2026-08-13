@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   NIGHTLY_GENERATION_CIRCUIT_KEY,
+  NIGHTLY_MAX_SOURCE_LAG_HOLDS,
   NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS,
   NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS,
   NIGHTLY_MUSIC_STALL_TIMEOUT_MS,
@@ -655,6 +656,60 @@ test('a quota-class failure opens the circuit, then retries the same job on the 
   })
   assert.equal(h.dramas.get('episode_quota').status, 'queued')
   assert.equal(h.dramas.get('episode_quota').error, null)
+})
+
+test('an episode that failed before it had a job is replaced with a fully prepared source', async () => {
+  // An episode that dies in `fetch complete thread` never reaches a jobId or a
+  // planId, so there is nothing to resume and reconciliation must build a fresh
+  // replacement. That path has to hand createEpisodeWorkflow the SAME prepared
+  // source a first attempt gets — thread plus completeness metadata — not the
+  // bare thread. Passing the thread alone made every retry throw
+  // "Cannot read properties of undefined (reading 'id')" before it could queue
+  // anything, which turned each transient failure into a permanent one.
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  // A plain, non-systemic failure, so this test measures the replacement path
+  // alone. Source-lag holds are covered separately.
+  h.dramas.set('episode_unsynced', {
+    id: 'episode_unsynced',
+    hnId: '77',
+    status: 'failed',
+    error: 'Table-read script generation produced empty output.',
+    url: 'https://news.ycombinator.com/item?id=77',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '77',
+      url: 'https://news.ycombinator.com/item?id=77',
+      title: 'Story 77',
+      episodeId: 'episode_unsynced',
+      workflowId: 'episode_unsynced',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'failed',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+
+  assert.equal(item.lastError ?? null, null, 'the replacement path must not throw')
+  assert.equal(item.status, 'queued')
+  assert.equal(item.attempt, 2, 'a fresh replacement consumes an attempt')
+  assert.equal(h.creates.length, 1, 'exactly one replacement Workflow is queued')
+
+  // The replacement drama proves the prepared source was destructured: reading
+  // `thread.id` off a bare thread is what used to throw.
+  const replacement = h.dramas.get(item.episodeId)
+  assert.ok(replacement, 'the replacement episode row exists')
+  assert.equal(replacement.hnId, '77')
+  assert.equal(replacement.status, 'queued')
+  assert.notEqual(item.episodeId, 'episode_unsynced', 'the replacement is a new episode')
 })
 
 test('a recorded failed probe is rearmed when its next recovery window arrives', async () => {
@@ -1405,4 +1460,76 @@ test('cumulative failure events fire the failing alert after one full wave', asy
   assert.equal(batch.failureEvents, 5)
   assert.equal(emails.length, 1, 'one full-wave wipeout with zero published alerts on the next tick')
   assert.match(emails[0].subject, /failing repeatedly/)
+})
+
+function unsyncedThreadBatch(h, date, overrides = {}) {
+  h.dramas.set('episode_lag', {
+    id: 'episode_lag',
+    hnId: '77',
+    status: 'failed',
+    error: 'HNError: Hacker News thread 77 is not synchronized yet: official count 117, Algolia count 116, decoded 116, need at least 106.',
+    url: 'https://news.ycombinator.com/item?id=77',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '77',
+      url: 'https://news.ycombinator.com/item?id=77',
+      title: 'Story 77',
+      episodeId: 'episode_lag',
+      workflowId: 'episode_lag',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'failed',
+      ...overrides,
+    }],
+    errors: [],
+  })
+}
+
+test('a thread whose index has not caught up does not spend an attempt', async () => {
+  // Three attempts is the whole nightly budget. Spending one on a search index
+  // that is seconds behind drops the story for the night, and it is exactly the
+  // busiest threads — the ones worth an episode — that lag.
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  unsyncedThreadBatch(h, date)
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+
+  assert.equal(item.status, 'queued')
+  assert.equal(item.attempt, 1, 'index lag is free')
+  assert.equal(item.sourceLagHolds, 1)
+  assert.ok(item.sourceLagAt)
+  assert.equal(h.creates.length, 1, 'it still retries immediately')
+})
+
+test('a thread that never converges stops being held and exhausts normally', async () => {
+  // The hold is capped so one permanently unreadable story cannot occupy a slot
+  // for the whole night.
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  unsyncedThreadBatch(h, date, { sourceLagHolds: NIGHTLY_MAX_SOURCE_LAG_HOLDS })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+
+  assert.equal(item.attempt, 2, 'past the cap it spends attempts like any other failure')
+  assert.equal(item.sourceLagHolds, NIGHTLY_MAX_SOURCE_LAG_HOLDS, 'the hold count stops growing')
+})
+
+test('an unsynced thread never opens the generation circuit', async () => {
+  // One story being briefly unreadable is not the show being broken. Opening
+  // the circuit would halt every other story to one probe an hour.
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  unsyncedThreadBatch(h, date)
+
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY) ?? null, null)
 })

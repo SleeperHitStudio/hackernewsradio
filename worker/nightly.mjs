@@ -24,6 +24,7 @@ import {
   isContractClassFailure,
   isProviderBlockedFailure,
   isQuotaClassFailure,
+  isTransientSourceFailure,
 } from './failure-classification.mjs'
 import {
   WORKFLOW_DEPLOY_GATE_KEY,
@@ -38,10 +39,14 @@ export {
   isContractClassFailure,
   isProviderBlockedFailure,
   isQuotaClassFailure,
+  isTransientSourceFailure,
 } from './failure-classification.mjs'
 
 export const NIGHTLY_TARGET = 5
 export const NIGHTLY_MAX_ATTEMPTS = 3
+// Free retries for a thread whose search index has not caught up. Capped so a
+// thread that never converges still exhausts instead of holding a slot all night.
+export const NIGHTLY_MAX_SOURCE_LAG_HOLDS = 3
 export const NIGHTLY_MUSIC_STALL_TIMEOUT_MS = 60 * 60 * 1000
 export const NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS = 60 * 60 * 1000
 export const NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS = 2
@@ -625,6 +630,22 @@ async function recoverItem(
   if (failureClass === 'quota') item.quotaBlockedAt = nowIso()
   if (failureClass === 'contract') item.contractBlockedAt = nowIso()
 
+  // A thread whose index has not caught up costs the item nothing for the first
+  // few ticks: it is expected to settle within minutes, and spending a third of
+  // a three-attempt budget on it would drop the story for the night. The hold
+  // is capped so a thread that never converges still exhausts normally.
+  const lagHolds = Number(item.sourceLagHolds || 0)
+  const heldForSourceLag = !blocked
+    && lagHolds < NIGHTLY_MAX_SOURCE_LAG_HOLDS
+    && isTransientSourceFailure({ failureCode: drama?.failureCode, failureMessage })
+  if (heldForSourceLag) {
+    item.sourceLagHolds = lagHolds + 1
+    item.sourceLagAt = nowIso()
+  }
+  // Both a systemic block and an unconverged source leave the attempt budget
+  // untouched; only a real generation attempt spends it.
+  const spendsAttempt = !blocked && !heldForSourceLag
+
   // An existing performance is already past generation. Keep its
   // post-production/publishing recovery independent from the generation
   // circuit so an MP3 can finish while writer/planner probes are restricted.
@@ -665,7 +686,7 @@ async function recoverItem(
   }
 
   const attempt = Number(item.attempt || 1)
-  if (!blocked && attempt >= NIGHTLY_MAX_ATTEMPTS) {
+  if (spendsAttempt && attempt >= NIGHTLY_MAX_ATTEMPTS) {
     item.status = 'exhausted'
     item.lastError = 'Generation attempts exhausted.'
     return
@@ -693,9 +714,14 @@ async function recoverItem(
     })
   } else {
     const thread = await deps.fetchThread(item.url)
-    const replacement = await createEpisodeWorkflow(env, thread, {
+    // A replacement needs the same prepared source a first attempt gets: the
+    // article hydrated onto the thread and the completeness metadata the
+    // pipeline sends with the source. Passing the bare thread here left every
+    // retry throwing before it could queue anything.
+    const preparedSource = await prepareEpisodeSource(thread, deps)
+    const replacement = await createEpisodeWorkflow(env, preparedSource, {
       batchDate: batch.date,
-      attempt: blocked ? attempt : attempt + 1,
+      attempt: spendsAttempt ? attempt + 1 : attempt,
     }, deps)
     const oldEpisodeId = item.episodeId
     item.episodeId = replacement.drama.id
@@ -708,7 +734,7 @@ async function recoverItem(
       if (old?.status === 'failed') await deps.deleteDrama(env.DB, oldEpisodeId).catch(() => {})
     }
   }
-  item.attempt = blocked ? attempt : attempt + 1
+  item.attempt = spendsAttempt ? attempt + 1 : attempt
   item.status = 'queued'
   item.lastWorkflowStatus = 'queued'
   item.lastError = null
