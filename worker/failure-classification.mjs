@@ -22,6 +22,23 @@ export const CONTRACT_CLASS_RE =
 export const MUSIC_CLASS_RE =
   /planned music did not complete|planned lyria music clip|lyria clip generation|music clip (?:failed|generation)|soundtrack (?:render|generation) failed/i
 
+/**
+ * A source capture that was refused because Hacker News and its search index
+ * had not converged yet. Deliberately NOT a systemic class: it is one story
+ * being briefly unreadable, not the show being broken, so it must never open
+ * the generation circuit. It only earns the item a few retries that do not
+ * count against its attempt budget, because the thread is expected to settle
+ * within minutes and the next hourly tick will find it whole.
+ */
+export const SOURCE_LAG_CLASS_RE =
+  /is not synchronized yet|completeness proof does not match|Could not capture a complete Hacker News thread/i
+
+export function isTransientSourceFailure(value) {
+  const { code, message } = failureSignals(value)
+  if (classifySystemicFailure(value)) return false
+  return code === 'hn_thread_incomplete' || SOURCE_LAG_CLASS_RE.test(message)
+}
+
 function failureSignals(value) {
   if (typeof value === 'string') return { code: '', message: value }
   if (!value || typeof value !== 'object') return { code: '', message: String(value || '') }

@@ -180,8 +180,10 @@ test('fetchThread retries count disagreement and then fails closed', async () =>
     (error) => {
       assert.ok(error instanceof HNError)
       assert.equal(error.code, 'hn_thread_incomplete')
+      // One of two comments is a 50% shortfall, far outside the coverage
+      // tolerance, so a small thread still fails closed.
       assert.deepEqual(error.details, {
-        storyId: '300', expected: 2, algolia: 1, decoded: 1, attempt: 3,
+        storyId: '300', expected: 2, algolia: 1, decoded: 1, floor: 2, attempt: 3,
       })
       return true
     },
@@ -250,4 +252,115 @@ test('fetchThread rejects a comment whose author is unavailable in both Algolia 
     () => fetchThread('600', { fetchImpl, maxAttempts: 1 }),
     (error) => error instanceof HNError && error.code === 'hn_comment_snapshot_invalid',
   )
+})
+
+/**
+ * A thread whose Algolia index holds `indexed` comments while Hacker News' own
+ * `descendants` counter already reads `official`. That skew is the normal state
+ * of a live thread, not a broken one.
+ */
+function laggingThread(storyId, { official, indexed }) {
+  const ids = Array.from({ length: indexed }, (_, i) => storyId + i + 1)
+  return async (input) => {
+    const url = new URL(String(input))
+    if (url.hostname === 'hacker-news.firebaseio.com') {
+      return json({ id: storyId, type: 'story', title: 'Live thread', by: 'op', descendants: official })
+    }
+    if (url.pathname === `/api/v1/items/${storyId}`) {
+      return json({ id: storyId, children: ids.map((id) => ({ id, children: [] })) })
+    }
+    if (url.pathname === '/api/v1/search_by_date') {
+      return json({
+        nbHits: indexed,
+        nbPages: 1,
+        hits: ids.map((id, i) => comment(id, storyId, `comment ${i + 1}`, i + 1, storyId)),
+      })
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  }
+}
+
+test('a one-comment index lag on a busy thread is captured, not refused', async () => {
+  // The exact shape that took the show down two nights running: HN counted 117,
+  // Algolia had indexed 116. The thread later converged at 143/143, so nothing
+  // was ever missing — the index was seconds behind a live counter.
+  const thread = await fetchThread('700', {
+    fetchImpl: laggingThread(700, { official: 117, indexed: 116 }),
+    maxAttempts: 1,
+  })
+
+  assert.equal(thread.total, 116)
+  assert.equal(thread.completeness.comments.expected, 117)
+  assert.equal(thread.completeness.comments.fetched, 116)
+  assert.equal(thread.completeness.comments.complete, false, 'short of the live count is not complete')
+})
+
+test('an index that runs ahead of the descendants counter is never a failure', async () => {
+  // Comments landed between reading `descendants` and reading the index. That
+  // is a fresher thread, and the old check rejected it.
+  const thread = await fetchThread('800', {
+    fetchImpl: laggingThread(800, { official: 50, indexed: 52 }),
+    maxAttempts: 1,
+  })
+
+  assert.equal(thread.total, 52)
+  assert.equal(thread.completeness.comments.complete, true)
+})
+
+test('a shortfall past the tolerance still fails closed', async () => {
+  // 85 of 100 is a genuinely partial thread, not lag. The show refuses it.
+  await assert.rejects(
+    () => fetchThread('900', {
+      fetchImpl: laggingThread(900, { official: 100, indexed: 85 }),
+      maxAttempts: 1,
+      retryDelaysMs: [],
+    }),
+    (error) => {
+      assert.ok(error instanceof HNError)
+      assert.equal(error.code, 'hn_thread_incomplete')
+      assert.equal(error.details.floor, 90)
+      return true
+    },
+  )
+})
+
+test('the boundary of the tolerance is inclusive', async () => {
+  // Exactly 90 of 100 is the floor and must be accepted; 89 must not.
+  const thread = await fetchThread('1000', {
+    fetchImpl: laggingThread(1000, { official: 100, indexed: 90 }),
+    maxAttempts: 1,
+  })
+  assert.equal(thread.total, 90)
+
+  await assert.rejects(
+    () => fetchThread('1100', {
+      fetchImpl: laggingThread(1100, { official: 100, indexed: 89 }),
+      maxAttempts: 1,
+      retryDelaysMs: [],
+    }),
+    (error) => error instanceof HNError && error.code === 'hn_thread_incomplete',
+  )
+})
+
+test('a partial capture never describes itself as complete', async () => {
+  // This copy reaches the writer and the episode progress trail. Rounding 116
+  // of 117 up to "complete" would make the show claim a thread it did not read.
+  const { commentCoveragePhrase, verifiedSourceProgress, threadToTranscript } =
+    await import('../worker/hn.mjs')
+
+  const short = await fetchThread('1200', {
+    fetchImpl: laggingThread(1200, { official: 117, indexed: 116 }),
+    maxAttempts: 1,
+  })
+  assert.equal(commentCoveragePhrase(short), '116/117 (index lag)')
+  assert.match(verifiedSourceProgress(short), /^Verified source: 116\/117 \(index lag\) comments/)
+  assert.doesNotMatch(verifiedSourceProgress(short), /complete/i)
+  assert.match(threadToTranscript(short), /Comments: 116\/117 \(index lag\)/)
+
+  const full = await fetchThread('1300', {
+    fetchImpl: laggingThread(1300, { official: 40, indexed: 40 }),
+    maxAttempts: 1,
+  })
+  assert.equal(commentCoveragePhrase(full), '40/40')
+  assert.match(verifiedSourceProgress(full), /^Verified complete source: 40\/40 comments/)
 })

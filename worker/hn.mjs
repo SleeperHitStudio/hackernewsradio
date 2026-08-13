@@ -391,6 +391,30 @@ function orderedComments(storyId, hits, nested) {
 }
 
 /**
+ * How far Algolia's index may trail Hacker News' own `descendants` count before
+ * a capture is refused.
+ *
+ * The two sources are eventually consistent by nature: `descendants` is a live
+ * counter on an active thread, and the search index catches up seconds to
+ * minutes later. Requiring exact equality therefore fails hardest on the
+ * busiest threads — the ones the show most wants — and it failed on a
+ * one-comment gap twice in two nights (117 vs 116, 90 vs 89). Both threads
+ * later converged exactly, so the gap is lag, not loss.
+ *
+ * Ten percent keeps a genuinely partial capture out of the show while letting
+ * ordinary index lag through. What we actually captured is recorded honestly on
+ * `completeness.comments` rather than being rounded up to "complete".
+ */
+export const HN_COMMENT_COVERAGE_TOLERANCE = 0.1
+
+/** The fewest comments a capture may hold and still count as usable. */
+export function hnCommentCoverageFloor(expected) {
+  const target = Number(expected)
+  if (!Number.isFinite(target) || target <= 0) return 0
+  return Math.ceil(target * (1 - HN_COMMENT_COVERAGE_TOLERANCE))
+}
+
+/**
  * Fetch one complete, count-verified HN thread. A comment URL is resolved all
  * the way to its story before the snapshot is taken.
  */
@@ -428,13 +452,20 @@ export async function fetchThread(input, {
         })
       }
       const comments = orderedComments(storyId, snapshot.hits, snapshot.nested)
-      if (snapshot.nbHits !== expected || comments.length !== expected) {
+      // Only a SHORTFALL is a problem. An index that reports more comments than
+      // `descendants` is simply fresher than the counter we read a moment ago,
+      // which is a newer thread, never an incomplete one.
+      const floor = hnCommentCoverageFloor(expected)
+      if (snapshot.nbHits < floor || comments.length < floor) {
         throw new HNError(
           `Hacker News thread ${storyId} is not synchronized yet: official count ${expected}, `
-          + `Algolia count ${snapshot.nbHits}, decoded ${comments.length}.`,
+          + `Algolia count ${snapshot.nbHits}, decoded ${comments.length}, `
+          + `need at least ${floor}.`,
           {
             code: 'hn_thread_incomplete',
-            details: { storyId, expected, algolia: snapshot.nbHits, decoded: comments.length, attempt },
+            details: {
+              storyId, expected, algolia: snapshot.nbHits, decoded: comments.length, floor, attempt,
+            },
           },
         )
       }
@@ -452,7 +483,10 @@ export async function fetchThread(input, {
         total: comments.length,
         completeness: {
           comments: {
-            complete: true,
+            // `complete` stays literal: it means we hold every comment HN
+            // counted. Within tolerance but short is usable, not complete, and
+            // the show says so rather than claiming a full thread.
+            complete: comments.length >= expected,
             expected,
             fetched: comments.length,
             capturedAt,
@@ -716,7 +750,12 @@ export function assertCompleteThread(thread) {
     ids.add(id)
   }
   const proof = thread?.completeness?.comments
-  if (!proof || proof.complete !== true || Number(proof.expected) !== total || Number(proof.fetched) !== total) {
+  // `fetched` must still match the captured array exactly — that is internal
+  // consistency, and a mismatch means the proof was built against different
+  // comments. `expected` is the live HN count, which the capture is allowed to
+  // trail by the coverage tolerance.
+  if (!proof || Number(proof.fetched) !== total || !Number.isFinite(Number(proof.expected))
+    || total < hnCommentCoverageFloor(Number(proof.expected))) {
     throw new HNError('Thread completeness proof does not match the captured comments.', {
       code: 'hn_thread_incomplete',
     })
@@ -751,7 +790,7 @@ export function threadToTranscript(thread, {
   if (thread.articleUrl) lines.push(`Source article: ${thread.article.url}`)
   lines.push('')
   lines.push('## SOURCE COMPLETENESS — VERIFIED')
-  lines.push(`Comments: ${thread.total}/${thread.total}, with full text and reply relationships.`)
+  lines.push(`Comments: ${commentCoveragePhrase(thread)}, with full text and reply relationships.`)
   if (thread.completeness?.comments?.capturedAt) {
     lines.push(`Thread snapshot captured at ${thread.completeness.comments.capturedAt}.`)
   }
@@ -833,7 +872,10 @@ export function buildSourceMetadata(thread, transcript) {
     hnStoryId: String(thread.id),
     sourceCompleteness: {
       comments: {
-        complete: true,
+        // Reported, not asserted. The platform stores this alongside the source
+        // and it is the only durable record of how much of the thread the
+        // episode was actually written against.
+        complete: commentProof.complete === true,
         expected: Number(commentProof.expected),
         fetched: Number(commentProof.fetched),
         capturedAt: commentProof.capturedAt,
@@ -863,11 +905,26 @@ export function buildSourceMetadata(thread, transcript) {
   }
 }
 
+/**
+ * "116/116" when we hold the whole thread, "116/117 (index lag)" when the
+ * capture is inside tolerance but short. The writer and the episode's progress
+ * trail both read this, so it must never round a partial thread up to a
+ * complete one.
+ */
+export function commentCoveragePhrase(thread) {
+  const fetched = Number(thread?.total ?? 0)
+  const expected = Number(thread?.completeness?.comments?.expected ?? fetched)
+  if (!Number.isFinite(expected) || expected <= fetched) return `${fetched}/${fetched}`
+  return `${fetched}/${expected} (index lag)`
+}
+
 export function verifiedSourceProgress(thread) {
   const article = thread.articleUrl
     ? ` and full article (${thread.article.charCount ?? thread.article.text.length} characters)`
     : thread.storyText
       ? ` and full self-post (${thread.storyText.length} characters)`
       : ' and no linked article or self-post'
-  return `Verified complete source: ${thread.total}/${thread.total} comments${article}`
+  const complete = thread?.completeness?.comments?.complete === true
+  const label = complete ? 'Verified complete source' : 'Verified source'
+  return `${label}: ${commentCoveragePhrase(thread)} comments${article}`
 }
