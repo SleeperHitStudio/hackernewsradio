@@ -6,6 +6,8 @@ import {
   appendMemory,
   buildSeriesContext,
   extractEpisodeMemory,
+  SERIES_BIBLE_MAX_EPISODES,
+  trimBibleEpisodes,
 } from '../worker/show-memory.mjs'
 
 const SCRIPT = `
@@ -106,4 +108,51 @@ test('the series context never exceeds the API cap that would 400 the plan', () 
 test('no memory yet means no series context at all', () => {
   assert.equal(buildSeriesContext([]), null)
   assert.equal(buildSeriesContext(null), null)
+})
+
+const produced = (id) => ({ id: `u${id}`, label: `HN ${id}`, title: `Story ${id}`, status: 'produced' })
+const canon = (name) => ({ id: `c-${name}`, label: name, title: name, status: 'planned' })
+
+test('an episode log under the cap is left exactly as it is', () => {
+  const list = [canon('THE FLICKER'), produced(1), produced(2)]
+  assert.deepEqual(trimBibleEpisodes(list, 100), list)
+})
+
+test('a full episode log drops its oldest produced rows to make room', () => {
+  // The platform rejects the whole patch at >100 entries, so without this the
+  // log silently stops recording once the show has produced 100 episodes.
+  const list = [...Array.from({ length: 102 }, (_, i) => produced(i + 1))]
+  const trimmed = trimBibleEpisodes(list, 100)
+
+  assert.equal(trimmed.length, 100)
+  assert.equal(trimmed[0].label, 'HN 3', 'the two oldest went')
+  assert.equal(trimmed.at(-1).label, 'HN 102', 'the episode just appended survives')
+})
+
+test('authored show canon is never dropped to make room', () => {
+  // The same array holds the show's canonical episodes. Those are authored, not
+  // generated, and deleting one to fit a produced-episode row would lose canon
+  // that nothing else in the system can reconstruct.
+  const list = [canon('THE FLICKER'), canon('GARY ORIGIN'), ...Array.from({ length: 100 }, (_, i) => produced(i + 1))]
+  const trimmed = trimBibleEpisodes(list, 100)
+
+  assert.equal(trimmed.length, 100)
+  assert.deepEqual(
+    trimmed.filter((e) => e.status === 'planned').map((e) => e.label),
+    ['THE FLICKER', 'GARY ORIGIN'],
+    'both canon entries survive',
+  )
+  assert.equal(trimmed[2].label, 'HN 3', 'produced rows absorbed the whole trim')
+})
+
+test('a log full of canon is returned untouched rather than trimmed', () => {
+  // Failing the append is recoverable and loud. Deleting canon to satisfy it is
+  // neither, so the trim refuses when it cannot make room from its own rows.
+  const list = Array.from({ length: 105 }, (_, i) => canon(`CANON ${i}`))
+  assert.deepEqual(trimBibleEpisodes(list, 100), list)
+})
+
+test('the cap matches the limit the platform actually enforces', () => {
+  // The rejection reads "Too big: expected array to have <=100 items".
+  assert.equal(SERIES_BIBLE_MAX_EPISODES, 100)
 })

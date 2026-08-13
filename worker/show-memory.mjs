@@ -174,3 +174,37 @@ export function buildSeriesContext(memories, { limit = 1200 } = {}) {
   }
   return context.length > limit ? context.slice(0, limit - 1).trimEnd() : context
 }
+
+/**
+ * The platform caps a Series Bible's `episodes` array at 100 entries. HNR
+ * appends one produced-episode row per published show, so the array eventually
+ * fills and every later append is rejected with
+ * "Too big: expected array to have <=100 items". The episode still publishes —
+ * the log just stops recording, quietly, forever.
+ */
+export const SERIES_BIBLE_MAX_EPISODES = 100
+
+/** Rows HNR itself wrote. Anything else in the array is authored show canon. */
+const PRODUCED_EPISODE_LABEL = /^HN \d+$/
+
+/**
+ * Make room by dropping the OLDEST rows HNR produced, and nothing else. The
+ * same array carries the show's canonical episodes, which are authored rather
+ * than generated, so they are never candidates. If our own rows cannot get the
+ * array under the cap, the list is returned untouched: failing the append is
+ * better than deleting canon to satisfy it.
+ */
+export function trimBibleEpisodes(episodes, max = SERIES_BIBLE_MAX_EPISODES) {
+  const list = Array.isArray(episodes) ? [...episodes] : []
+  const excess = list.length - max
+  if (excess <= 0) return list
+
+  const ours = []
+  for (let index = 0; index < list.length; index += 1) {
+    if (PRODUCED_EPISODE_LABEL.test(String(list[index]?.label ?? ''))) ours.push(index)
+  }
+  if (ours.length < excess) return list
+
+  const drop = new Set(ours.slice(0, excess))
+  return list.filter((_, index) => !drop.has(index))
+}
