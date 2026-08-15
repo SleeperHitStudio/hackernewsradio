@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  canResumeGeneration,
   NIGHTLY_GENERATION_CIRCUIT_KEY,
   NIGHTLY_MAX_SOURCE_LAG_HOLDS,
   NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS,
@@ -1532,4 +1533,36 @@ test('an unsynced thread never opens the generation circuit', async () => {
   await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
 
   assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY) ?? null, null)
+})
+
+test('a contract failure after a job exists must replan, never resume', () => {
+  // The plan already generated (a job only exists once it was approved), so
+  // resumeStoryPlan hands back the SAME blueprint — the one the platform just
+  // rejected. This is the JOHNSMITH1840 shape: the blueprint cast a speaker the
+  // show cannot voice, so every hourly probe replayed the identical rejection
+  // and the episode could not recover without a hand-edit to the database.
+  const drama = { id: 'e1', jobId: 'job_1', planId: 'plan_1' }
+  assert.equal(canResumeGeneration(drama, 'contract'), false)
+})
+
+test('a contract failure before job creation still resumes, because that replans', () => {
+  // No job means the plan never generated, and resumeStoryPlan resets a
+  // non-generated plan to PENDING and re-enqueues it — a genuinely fresh
+  // blueprint. Refusing here would throw away a working recovery.
+  const drama = { id: 'e1', planId: 'plan_1' }
+  assert.equal(canResumeGeneration(drama, 'contract'), true)
+})
+
+test('a failure around a sound blueprint resumes as before', () => {
+  // provider/quota/transient did not reject the plan, so replanning would just
+  // discard a paid one.
+  const drama = { id: 'e1', jobId: 'job_1', planId: 'plan_1' }
+  for (const cls of ['provider', 'quota', null, undefined]) {
+    assert.equal(canResumeGeneration(drama, cls), true, String(cls))
+  }
+})
+
+test('an episode with nothing to resume is never resumable', () => {
+  assert.equal(canResumeGeneration({ id: 'e1' }, null), false)
+  assert.equal(canResumeGeneration(null, 'contract'), false)
 })
