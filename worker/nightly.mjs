@@ -589,7 +589,36 @@ async function resumeArtifactWorkflow(env, drama) {
   return workflowId
 }
 
-async function resumeGenerationWorkflow(env, drama, deps) {
+/**
+ * Whether a failed episode can be recovered by RESUMING its existing plan/job
+ * rather than replanning from scratch.
+ *
+ * The line is whether the PLAN HAS ALREADY GENERATED, and a jobId is how that
+ * shows here — a job only exists once its plan was approved.
+ *
+ * `resumeStoryPlan` on the platform regenerates a plan that has not generated
+ * (FAILED/PENDING with no `generatedAt`), which is why resuming after a failure
+ * BEFORE job creation is a real recovery: the blueprint is rewritten. But it
+ * returns an already-approved plan UNCHANGED, so once a job exists the same
+ * blueprint comes back every time.
+ *
+ * For a contract failure that is fatal. Contract means the platform rejected
+ * the blueprint itself — a cast the show cannot voice, a field over a schema
+ * cap — so replaying it earns the identical rejection, the hourly probe never
+ * succeeds, and the episode is stuck until someone edits the database by hand.
+ * That is how one episode held a batch at 1 of 5 with the circuit reopening
+ * every hour. Replanning is the only recovery that can change the outcome.
+ *
+ * Every other class (provider, quota, transient) is a failure AROUND a sound
+ * blueprint, so it still resumes — replanning would throw away a paid plan.
+ */
+export function canResumeGeneration(drama, failureClass) {
+  if (failureClass === 'contract' && drama?.jobId) return false
+  return Boolean(drama?.jobId || drama?.planId)
+}
+
+async function resumeGenerationWorkflow(env, drama, deps, failureClass = null) {
+  if (!canResumeGeneration(drama, failureClass)) return null
   const workflowId = deps.randomUUID()
   const resource = drama?.jobId
     ? { resumeJobId: drama.jobId }
@@ -701,7 +730,7 @@ async function recoverItem(
     return
   }
 
-  const resumedWorkflowId = await resumeGenerationWorkflow(env, drama, deps)
+  const resumedWorkflowId = await resumeGenerationWorkflow(env, drama, deps, failureClass)
   if (resumedWorkflowId) {
     item.episodeId = drama.id
     item.workflowId = resumedWorkflowId
