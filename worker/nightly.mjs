@@ -647,7 +647,17 @@ async function recoverItem(
   generationController,
   { allowGeneration = true } = {},
 ) {
-  const failureMessage = drama?.failureMessage || drama?.error || item.lastError
+  // The EPISODE is the authority on its own outcome. `item.lastError` is batch
+  // bookkeeping that persists across ticks and is only cleared once a recovery
+  // completes — so when the slot is denied it never clears, and the next tick
+  // reads the same stale string, reclassifies it, and reopens the circuit.
+  // That is a closed loop: the circuit stays open because it was open. It kept
+  // reopening on a JOHNSMITH1840 message hours after the episode itself had
+  // been healed. It is still the fallback when no drama exists, which is the
+  // case it was there for — a failure that never reached an episode row.
+  const failureMessage = drama
+    ? (drama.failureMessage || drama.error || null)
+    : item.lastError
   const failureClass = ['provider', 'quota', 'contract'].includes(drama?.failureClass)
     ? drama.failureClass
     : classifySystemicFailure({

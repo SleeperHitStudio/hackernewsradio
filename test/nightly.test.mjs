@@ -1566,3 +1566,77 @@ test('an episode with nothing to resume is never resumable', () => {
   assert.equal(canResumeGeneration({ id: 'e1' }, null), false)
   assert.equal(canResumeGeneration(null, 'contract'), false)
 })
+
+test('a stale batch-item error does not reopen the circuit on a healed episode', async () => {
+  // The closed loop that kept HNR down after the cause was already fixed:
+  // recoverItem read `item.lastError`, reclassified the old contract message,
+  // reopened the circuit, and then denied the slot — so `item.lastError` was
+  // never cleared and the next tick read the very same string. The circuit
+  // stayed open because it had been open. Hours after the episode itself was
+  // healed, it was still reopening on a JOHNSMITH1840 message.
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  h.dramas.set('episode_healed', {
+    id: 'episode_healed',
+    hnId: '77',
+    status: 'failed',
+    // Healed: no failureClass, no error, and nothing left to resume.
+    url: 'https://news.ycombinator.com/item?id=77',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '77',
+      url: 'https://news.ycombinator.com/item?id=77',
+      title: 'Story 77',
+      episodeId: 'episode_healed',
+      workflowId: 'episode_healed',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'blocked',
+      lastError: 'Preassigned voiceMap is missing a voice for: JOHNSMITH1840. Supply every speaking character.',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY) ?? null, null,
+    'a healed episode must not reopen the circuit')
+  assert.equal(item.status, 'queued', 'it retries instead of staying blocked')
+  assert.equal(h.creates.length, 1, 'a fresh replacement is queued')
+})
+
+test('a failure that never reached an episode still classifies from the item', async () => {
+  // The fallback exists for exactly this: reconcileItem threw before any
+  // episode row could record it, so the batch item is the only witness.
+  const h = harness({ topIds: [] })
+  const date = '2026-07-17'
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '77',
+      url: 'https://news.ycombinator.com/item?id=77',
+      title: 'Story 77',
+      episodeId: 'missing_episode',
+      workflowId: 'missing_episode',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'failed',
+      lastError: 'Planning failed. This request requires more credits, or fewer max_tokens.',
+    }],
+    errors: [],
+  })
+
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.ok(circuit, 'with no episode row, the item is the only signal and must still count')
+  assert.equal(circuit.failureClass, 'quota')
+})
