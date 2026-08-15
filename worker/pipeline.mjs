@@ -52,6 +52,7 @@ import {
   resumedStoryJobArtifactId,
   runHardStep,
   runWorkflowStepOnce,
+  shouldRecastWithoutPinnedCast,
   shouldRollFailedStoryJob,
   shouldReuseResumedStoryJob,
   storyJobIdempotencyScope,
@@ -386,14 +387,23 @@ export class HnrPipeline extends WorkflowEntrypoint {
                 }
               } catch (err) {
                 const msg = err?.message || String(err)
-                if (classifySystemicFailure(err)) throw err
-                if (includePinnedCast && attempt < 3 && /voiceMap is missing/i.test(msg)) {
+                // BEFORE the systemic check, because this one IS systemic by
+                // classification and recoverable in fact. "Supply every speaking
+                // character" matches CONTRACT_CLASS_RE, so classifying first
+                // rethrew the very error this branch exists to absorb — the
+                // recovery was unreachable for its own trigger, and a show whose
+                // whole premise is reading Hacker News comments aloud opened the
+                // generation circuit the first time the writer gave a commenter
+                // a line. Recasting without the pinned map is the fix; only once
+                // that is exhausted is it genuinely a contract failure.
+                if (shouldRecastWithoutPinnedCast({ error: err, includePinnedCast, attempt })) {
                   includePinnedCast = false
                   jobId = null
                   jobRoll++
                   await note('The blueprint cast a guest commenter — recasting with automatic voice assignment…')
                   continue
                 }
+                if (classifySystemicFailure(err)) throw err
                 const overBudget = OUTPUT_BUDGET_RE.test(msg)
                 const transient = !/time budget|timed out/i.test(msg)
                 if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
