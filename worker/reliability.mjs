@@ -57,6 +57,26 @@ export function isSpokenTakeThin(spokenWords, pageTarget) {
   return Number(spokenWords) < minimumSpokenWords(pageTarget)
 }
 
+/**
+ * Speaking characters in a generated script that are not part of the fixed
+ * cast, de-duplicated and in first-seen order.
+ *
+ * The show has FOUR voices and no fifth, ever. A commenter is quoted inside a
+ * host's own line, never given one. `isHost` is injected rather than imported
+ * so this stays a pure function of the script — the caller owns who the cast is.
+ */
+export function offCastSpeakers(entries, isHost) {
+  const seen = new Map()
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const label = String(entry?.character ?? '').trim()
+    if (!label) continue
+    if (isHost(label)) continue
+    const key = label.toUpperCase()
+    if (!seen.has(key)) seen.set(key, label)
+  }
+  return [...seen.values()]
+}
+
 /** Matches the platform's refusal when a speaking character has no voice. */
 const MISSING_VOICE_RE = /voiceMap is missing/i
 

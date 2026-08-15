@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { classifySystemicFailure } from '../worker/failure-classification.mjs'
+import { hostForCharacter } from '../worker/brief.mjs'
 
 import {
   AUTOTUNE_CLICK_DURATION_S,
@@ -33,6 +34,7 @@ import {
   storyJobPollOutcome,
   terminalStoryJobFallbackPlanId,
   shouldRecastWithoutPinnedCast,
+  offCastSpeakers,
 } from '../worker/reliability.mjs'
 
 test('spoken-word floor accepts valid 56-60 word/page takes', () => {
@@ -640,5 +642,53 @@ test('an unrelated failure is never mistaken for a casting problem', () => {
       false,
       message,
     )
+  }
+})
+
+test('a commenter given their own line is detected as off-cast', () => {
+  // The exact shape that halted a batch: the writer gave an HN handle a line.
+  const entries = [
+    { character: 'GARY', text: 'so this thread' },
+    { character: 'JOHNSMITH1840', text: 'actually, the JVM' },
+    { character: 'MAEVE', text: 'nobody asked' },
+  ]
+  assert.deepEqual(offCastSpeakers(entries, (l) => Boolean(hostForCharacter(l))), ['JOHNSMITH1840'])
+})
+
+test('a clean four-host script has nothing off-cast', () => {
+  const entries = ['GARY', 'MAEVE', 'OBI', 'GRUNER', 'GARY'].map((character) => ({ character, text: 'x' }))
+  assert.deepEqual(offCastSpeakers(entries, (l) => Boolean(hostForCharacter(l))), [])
+})
+
+test('host labels with decoration still count as the host', () => {
+  // hostForCharacter matches "Gary (host)" and case variants; a rename-ish
+  // label must not be mistaken for a fifth voice and trigger a needless reroll.
+  const entries = [
+    { character: 'Gary (host)', text: 'x' },
+    { character: 'maeve', text: 'x' },
+    { character: 'GRUNER (dial)', text: 'x' },
+  ]
+  assert.deepEqual(offCastSpeakers(entries, (l) => Boolean(hostForCharacter(l))), [])
+})
+
+test('each off-cast speaker is reported once, in first-seen order', () => {
+  const entries = [
+    { character: 'ANNOUNCER', text: 'x' },
+    { character: 'JOHNSMITH1840', text: 'x' },
+    { character: 'announcer', text: 'x' },
+    { character: '', text: 'x' },
+    { character: 'JOHNSMITH1840', text: 'x' },
+  ]
+  assert.deepEqual(
+    offCastSpeakers(entries, (l) => Boolean(hostForCharacter(l))),
+    ['ANNOUNCER', 'JOHNSMITH1840'],
+  )
+})
+
+test('an unreadable script is not treated as a cast violation', () => {
+  // The measure step is best-effort and returns null on failure; a missing or
+  // malformed script must never trigger a reroll on cast grounds.
+  for (const value of [null, undefined, [], 'nonsense', [{ text: 'no character' }]]) {
+    assert.deepEqual(offCastSpeakers(value, (l) => Boolean(hostForCharacter(l))), [], String(value))
   }
 })

@@ -47,6 +47,7 @@ import {
   isSpokenTakeThin,
   isTerminalStoryJobFailureOutcome,
   minimumSpokenWords,
+  offCastSpeakers,
   pollInWorkflowChunks,
   postProductionIdempotencyScope,
   resumedStoryJobArtifactId,
@@ -368,12 +369,30 @@ export class HnrPipeline extends WorkflowEntrypoint {
                 // reroll a fresh performance when far under the page target
                 // A valid fast panel take lands around 56-60 spoken words/page;
                 // reject only below 55/page so we stop discarding good audio.
-                const spokenWords = await runWorkflowStepOnce(step, `measure r${round}a${attempt}`, async () => {
+                const take = await runWorkflowStepOnce(step, `measure r${round}a${attempt}`, async () => {
                   const res = await sh.request(`/artifacts/${artifactId}/script?limit=500`)
                   const entries = res.script?.selection?.entries ?? res.script?.entries ?? []
-                  return entries.reduce(
-                    (sum, e) => sum + String(e.text ?? '').trim().split(/\s+/).filter(Boolean).length, 0)
+                  return {
+                    spokenWords: entries.reduce(
+                      (sum, e) => sum + String(e.text ?? '').trim().split(/\s+/).filter(Boolean).length, 0),
+                    offCast: offCastSpeakers(entries, (label) => Boolean(hostForCharacter(label))),
+                  }
                 }).catch(() => null)
+                const spokenWords = take?.spokenWords ?? null
+
+                // The show has FOUR voices and no fifth, ever. The brief says so,
+                // but a brief is a request, not a guarantee — so the take is
+                // checked rather than trusted. Rolling a fresh one is cheaper
+                // than shipping an episode with a stranger in it, and the
+                // recast-without-pinned-cast fallback below stays as the last
+                // resort if the writer keeps insisting.
+                if (take?.offCast?.length && attempt < 3) {
+                  await note(`Script gave lines to ${take.offCast.join(', ')} — the cast is the four hosts; rolling a fresh take…`)
+                  jobId = null
+                  jobRoll++
+                  artifactId = null
+                  continue
+                }
                 const minSpoken = minimumSpokenWords(pageTarget)
                 if (spokenWords !== null && isSpokenTakeThin(spokenWords, pageTarget)) {
                   if (attempt < 3) {

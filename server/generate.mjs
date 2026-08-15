@@ -138,10 +138,11 @@ function podcastBrief(thread, pageTarget) {
         'The project SERIES BIBLE is CANON — follow its characters exactly. The four recurring hosts, by NAME, every ' +
         'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (an alien intelligence ' +
         'trained only on Silicon Valley tech-bro culture; speaks in SHORT BURSTS — blunt interjections, field notes, ' +
-        'an occasional 2-3 line run; still the least talkative host; Russian-accented, dropped articles, jargon slightly wrong, Russian swears) — ' +
-        'plus at most ONE optional guest voicing the thread\'s most notable commenter. Voices clearly ' +
-        'distinct: Obi an Indian-accented English voice; Gruner a DEEP RUSSIAN-accented English voice. Do NOT ' +
-        'rename, merge, or replace them. NO NARRATOR or ANNOUNCER.',
+        'an occasional 2-3 line run; still the least talkative host; Russian-accented, dropped articles, jargon slightly wrong, Russian swears). ' +
+        'THESE FOUR ARE THE ONLY SPEAKING CHARACTERS — there is never a fifth. Commenters are QUOTED BY a host ' +
+        'inside that host\'s own line ("some guy called JOHNSMITH1840 says..."); they never get a line of their ' +
+        'own. Voices clearly distinct: Obi an Indian-accented English voice; Gruner a DEEP RUSSIAN-accented ' +
+        'English voice. Do NOT rename, merge, or replace them. NO NARRATOR, ANNOUNCER, or GUEST.',
       ...SHARED_AUDIO,
       mustKnowBeforeWriting: [
         ...SHARED_MUST_KNOW,

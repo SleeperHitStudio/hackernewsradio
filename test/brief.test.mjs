@@ -5,6 +5,7 @@ import {
   buildBrief,
   buildStoryJobArtifactRequests,
   canonicalPinnedVoiceMap,
+  hostForCharacter,
 } from '../worker/brief.mjs'
 
 test('the full brief honors every Sleeper plan-schema cap (contract test)', () => {
@@ -127,5 +128,33 @@ test('every generated job defers the soundtrack — the jazz theme is banked, no
   for (const pinnedVoices of [null, completePinnedVoices]) {
     const [request] = buildStoryJobArtifactRequests({ pinnedVoices, notes: 'x' })
     assert.equal(request.deferMusic, true)
+  }
+})
+
+test('the brief never invites a fifth speaking character', () => {
+  // The cast is four voices and the pinned voiceMap covers exactly those four.
+  // castNotes used to end with "plus at most ONE optional guest voicing the
+  // thread's most notable commenter" — so the writer was being ASKED for a
+  // speaker the show cannot voice. The platform then refused the whole job
+  // ("Supply every speaking character"), which classified as a contract
+  // failure, opened the generation circuit and halted a night at 1 of 5.
+  const brief = buildBrief({ title: 't', total: 500, points: 100 }, 8)
+  const notes = brief.creativeBrief.castNotes
+
+  assert.doesNotMatch(notes, /optional guest|guest voicing|ONE guest/i)
+  assert.match(notes, /ONLY SPEAKING CHARACTERS/i)
+  // Commenters still belong in the show — quoted inside a host's line, not
+  // handed one. Dropping the guest must not read as "ignore the thread".
+  assert.match(notes, /QUOTED BY a host/i)
+})
+
+test('every host the brief names is one the pinned voice map can cast', () => {
+  // The failure mode is a name in the script with no voice behind it. Any host
+  // named in castNotes must therefore resolve through hostForCharacter, or the
+  // brief is promising a voice that does not exist.
+  const notes = buildBrief({ title: 't', total: 5, points: 1 }, 4).creativeBrief.castNotes
+  for (const name of ['GARY', 'MAEVE', 'OBI', 'GRUNER']) {
+    assert.ok(notes.includes(name), `castNotes should name ${name}`)
+    assert.ok(hostForCharacter(name), `${name} must resolve to a pinned host`)
   }
 })
