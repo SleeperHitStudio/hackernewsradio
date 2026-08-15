@@ -57,6 +57,39 @@ export function isSpokenTakeThin(spokenWords, pageTarget) {
   return Number(spokenWords) < minimumSpokenWords(pageTarget)
 }
 
+/** Matches the platform's refusal when a speaking character has no voice. */
+const MISSING_VOICE_RE = /voiceMap is missing/i
+
+/**
+ * True when a rejected job should be recast WITHOUT the pinned voice map.
+ *
+ * The show reads Hacker News comments aloud, so the writer regularly gives a
+ * commenter a line — and the pinned map only covers the four recurring hosts.
+ * The platform then refuses the job with "Preassigned voiceMap is missing a
+ * voice for: <HANDLE>. Supply every speaking character."
+ *
+ * That message ALSO matches CONTRACT_CLASS_RE, so it is systemic by
+ * classification while being trivially recoverable in fact: dropping the pinned
+ * map lets the platform assign a voice to every speaker itself. This predicate
+ * has to be consulted BEFORE the systemic check, or the classification rethrows
+ * the one error the recovery exists to absorb — which is what opened the
+ * generation circuit on a guest named JOHNSMITH1840 and halted a night's batch
+ * at one episode of five.
+ *
+ * Once the pinned map is already dropped, or the attempts are spent, the same
+ * message IS a real contract failure and must be left to classify as one.
+ */
+export function shouldRecastWithoutPinnedCast({
+  error,
+  includePinnedCast,
+  attempt,
+  maxAttempts = 3,
+} = {}) {
+  if (!includePinnedCast) return false
+  if (!(Number(attempt) < Number(maxAttempts))) return false
+  return MISSING_VOICE_RE.test(error?.message || String(error ?? ''))
+}
+
 const TERMINAL_STORY_JOB_FAILURE = 'terminal-story-job-failure'
 const UNREADABLE_PROBE = 'unreadable-probe'
 const SALVAGED_STORY_JOB_ARTIFACT = 'salvaged-story-job-artifact'

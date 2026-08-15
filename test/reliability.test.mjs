@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+import { classifySystemicFailure } from '../worker/failure-classification.mjs'
+
 import {
   AUTOTUNE_CLICK_DURATION_S,
   AUTOTUNE_CLICK_LABEL,
@@ -30,6 +32,7 @@ import {
   storyJobIdempotencyScope,
   storyJobPollOutcome,
   terminalStoryJobFallbackPlanId,
+  shouldRecastWithoutPinnedCast,
 } from '../worker/reliability.mjs'
 
 test('spoken-word floor accepts valid 56-60 word/page takes', () => {
@@ -595,4 +598,47 @@ test('an ordinary timeout still reports unreadable probes it saw along the way',
 test('a terminal probe error is never swallowed as unreadable', async () => {
   const probe = async () => { throw new Error('Table read FAILED') }
   await assert.rejects(pollInWorkflowChunks(fakeStep(), 'job r1a1', 10, probe), /Table read FAILED/)
+})
+
+test('a guest commenter without a pinned voice is recast, not treated as systemic', () => {
+  // The show reads Hacker News comments aloud, so the writer regularly hands a
+  // commenter a line. The pinned map covers only the four hosts, and the
+  // platform refuses the job. This is the exact message that halted a night's
+  // batch at 1 of 5 episodes.
+  const err = new Error(
+    'Preassigned voiceMap is missing a voice for: JOHNSMITH1840. Supply every speaking character.',
+  )
+
+  // THE TRAP: it is systemic BY CLASSIFICATION and recoverable IN FACT. The
+  // pipeline used to classify first, so this branch rethrew the one error it
+  // exists to absorb, and the recovery was unreachable for its own trigger.
+  assert.equal(classifySystemicFailure(err), 'contract')
+  assert.equal(shouldRecastWithoutPinnedCast({ error: err, includePinnedCast: true, attempt: 1 }), true)
+})
+
+test('recasting is not retried once the pinned map is already dropped', () => {
+  // Second time around the map is gone and the platform still refused, so it is
+  // a real contract failure and must be allowed to classify as one.
+  const err = new Error('Preassigned voiceMap is missing a voice for: SOMEONE. Supply every speaking character.')
+  assert.equal(shouldRecastWithoutPinnedCast({ error: err, includePinnedCast: false, attempt: 1 }), false)
+})
+
+test('recasting stops at the attempt ceiling', () => {
+  const err = new Error('Preassigned voiceMap is missing a voice for: SOMEONE.')
+  assert.equal(shouldRecastWithoutPinnedCast({ error: err, includePinnedCast: true, attempt: 2 }), true)
+  assert.equal(shouldRecastWithoutPinnedCast({ error: err, includePinnedCast: true, attempt: 3 }), false)
+})
+
+test('an unrelated failure is never mistaken for a casting problem', () => {
+  for (const message of [
+    'Table-read script generation produced empty output.',
+    'autotune render a2 timed out.',
+    'Schema validation failed — response did not match schema',
+  ]) {
+    assert.equal(
+      shouldRecastWithoutPinnedCast({ error: new Error(message), includePinnedCast: true, attempt: 1 }),
+      false,
+      message,
+    )
+  }
 })
