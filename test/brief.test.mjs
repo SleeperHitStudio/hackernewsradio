@@ -86,6 +86,7 @@ test('complete pinned cast is sent canonically with voiceId only', () => {
     type: 'table_read',
     narrationPolicy: 'suppress',
     deferMusic: true,
+    deferAudioRender: true,
     notes: 'Keep it fast.',
     voiceMap: {
       GARY: { voiceId: 'voice-gary' },
@@ -109,6 +110,7 @@ test('missing or incomplete pinned cast preserves the existing assignment reques
       type: 'table_read',
       narrationPolicy: 'suppress',
       deferMusic: true,
+      deferAudioRender: true,
       notes: 'Keep it fast.',
     }])
   }

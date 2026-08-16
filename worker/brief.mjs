@@ -82,6 +82,13 @@ export function buildStoryJobArtifactRequests({
     type: 'table_read',
     narrationPolicy,
     deferMusic: true,
+    // The show ALWAYS runs its own post-production — autotune, then the banked
+    // jazz bookends — and finalizes itself afterwards. Without this the whole
+    // read is synthesised twice: once by the platform's auto-render the moment
+    // the job reaches READY, for a mix autotune immediately invalidates, and
+    // again on our finalize. That first pass is bought and discarded on every
+    // episode, and it is roughly half the show's TTS spend.
+    deferAudioRender: true,
     ...(notes ? { notes } : {}),
     ...(voiceMap ? { voiceMap } : {}),
   }]
