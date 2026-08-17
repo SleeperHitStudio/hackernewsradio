@@ -351,16 +351,6 @@ export default function App() {
             <button type="button" className="subscribe subscribe--ghost" onClick={() => { posthog.capture('create_podcast_modal_opened'); setShowCreate(true) }}>
               Create your own podcast
             </button>
-            <a
-              className="subscribe"
-              href="https://sleeperhit.studio/api/v1/publishing-feeds/hnr.xml"
-              target="_blank"
-              rel="noreferrer"
-              title="Podcast RSS feed — paste into any podcast app"
-              onClick={() => posthog.capture('rss_subscribe_clicked')}
-            >
-              Subscribe (RSS)
-            </a>
           </div>
         </div>
         <p>Gary, Maeve, Obi, and Gruner ride roughshod over your daily dose of Hacker News</p>
