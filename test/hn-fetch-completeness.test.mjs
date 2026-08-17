@@ -364,3 +364,35 @@ test('a partial capture never describes itself as complete', async () => {
   assert.equal(commentCoveragePhrase(full), '40/40')
   assert.match(verifiedSourceProgress(full), /^Verified complete source: 40\/40 comments/)
 })
+
+test('a capture that runs ahead of the counter reports what it actually holds', async () => {
+  // The exact shape that failed a live episode: HN's `descendants` said 18
+  // while the index had already surfaced 19. Reporting the raw 18 is both less
+  // truthful (we hold 19 real comments) and fatal — the platform's source
+  // declaration requires expected === fetched and rejects the whole job after
+  // the fetch, article hydration and transcript build are already paid for.
+  const thread = await fetchThread('1400', {
+    fetchImpl: laggingThread(1400, { official: 18, indexed: 19 }),
+    maxAttempts: 1,
+  })
+
+  const proof = thread.completeness.comments
+  assert.equal(proof.fetched, 19)
+  assert.equal(proof.expected, 19, 'expected must never be below what we hold')
+  assert.equal(proof.complete, true)
+  assert.equal(proof.expected, proof.fetched, 'the platform requires these to match')
+})
+
+test('a short capture still reports the real target, not a flattered one', async () => {
+  // The clamp must only ever raise `expected` to meet reality — never lower it
+  // to manufacture a match. A genuine shortfall stays visibly short.
+  const thread = await fetchThread('1500', {
+    fetchImpl: laggingThread(1500, { official: 117, indexed: 116 }),
+    maxAttempts: 1,
+  })
+
+  const proof = thread.completeness.comments
+  assert.equal(proof.expected, 117)
+  assert.equal(proof.fetched, 116)
+  assert.equal(proof.complete, false)
+})

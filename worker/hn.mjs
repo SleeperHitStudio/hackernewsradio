@@ -487,7 +487,17 @@ export async function fetchThread(input, {
             // counted. Within tolerance but short is usable, not complete, and
             // the show says so rather than claiming a full thread.
             complete: comments.length >= expected,
-            expected,
+            // NEVER report fewer expected than we actually hold. `descendants`
+            // is a live counter read a moment before the index, so a capture
+            // that runs AHEAD of it means the counter was stale, not that we
+            // invented comments — 19 fetched against 18 expected is 19 real
+            // comments and one stale read. Reporting the raw 18 is both less
+            // truthful and rejected outright by the platform, whose source
+            // declaration requires expected === fetched
+            // (story-source-declaration.ts). That mismatch failed a whole
+            // episode after the fetch, article hydration and transcript build
+            // had already been paid for.
+            expected: Math.max(expected, comments.length),
             fetched: comments.length,
             capturedAt,
             metadataSource: 'official-hn-firebase',
