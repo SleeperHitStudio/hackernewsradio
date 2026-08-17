@@ -211,8 +211,8 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
         'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
         'GRUNER\'S DIAL: when he REALLY means something he turns a dial on his throat — mark ONLY those lines with a ' +
         '(dial) parenthetical (often one of several consecutive GRUNER lines). NOBODY ever acknowledges it, ever.',
-        'SWEAR LIKE THE ADULTS THEY ARE: at least one swear a page, more when a beat turns ugly. Never in the ' +
-        'episode\'s FIRST line. Never "goddamn", never "Jesus" or "Christ", from anyone, ever.',
+        'SWEAR LIKE THE ADULTS THEY ARE: EIGHT+ per episode, every host at least once, three in a row when a beat ' +
+        'turns ugly. Never in the episode\'s FIRST line. Never "goddamn", never "Jesus" or "Christ", ever.',
         'THE OPERATOR (max once, NOT every episode): they sense someone writes them, float vague delicious ' +
         '"justice", nearly name a method — then it STOPS and goes WEIRD. Never resolved, never named, never revisited.',
       ],
@@ -223,7 +223,8 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
     // profanity charter kept getting compressed down to the word "profane".
     performanceNotes:
       'THE SHOW IS ADULT, FILTHY-MINDED AND GENUINELY PROFANE: these are burned-out adults talking the way they ' +
-      'actually talk. Aim for AT LEAST ONE swear per page and let the ugly beats run several in a row — "fuck", ' +
+      'actually talk. COUNT THEM: EIGHT OR MORE swears in the episode, every host swearing at least once, and let ' +
+      'the ugly beats run three or four in a row — "fuck", ' +
       '"fucking", "shit", "bullshit", "arse", "prick", "bastard" all land. Filth is not a substitute for wit: the ' +
       'bite still comes from specificity, timing and cruelty of observation, and a clean line that eviscerates ' +
       'beats a dirty one that does not. NEVER OPEN ON A SWEAR — the first line of the episode carries no profanity ' +
