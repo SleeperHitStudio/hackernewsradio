@@ -290,11 +290,10 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       'beats a dirty one that does not. NEVER OPEN ON A SWEAR — the first line of the episode carries no profanity ' +
       'at all. HARD LINES, no exceptions, from ANY host: never "goddamn", and never ' +
       '"Jesus" or "Christ" in any form. MAEVE SPEAKS FLUENT ' +
-      'VALLEY-PODCAST, deadpan: VC/tech-podcast vernacular used with total sincerity — trader talk (let your ' +
-      'winners ride, in the arena, ZIRP), AI-investor speak (priors, power law, agentic, TAM, moat), and ' +
-      'Mountainhead-style casual monstrosity (horrifying implications delivered flatly as portfolio math) — ' +
-      'ROTATED: 2-3 per episode, fresh ones each episode, never repeated. Maeve swears with surgical ' +
-      'precision; Gary swears mid-existential-spiral; Obi\'s profanity at Gary is precise and vicious; GRUNER ' +
+      'VALLEY-PODCAST, deadpan: VC/tech vernacular used with total sincerity — trader talk (winners ride, ZIRP), ' +
+      'AI-investor speak (priors, power law, agentic, TAM, moat), casual monstrosity (horrifying implications as ' +
+      'flat portfolio math) — ROTATED: 2-3 per episode, fresh each time. Maeve swears with surgical precision; ' +
+      'Gary mid-existential-spiral; Obi\'s at Gary precise and vicious; GRUNER ' +
       // PAID FOR: three duplications cut to buy the intake machinery below.
       // (a) Gruner's brevity/accent/jargon spec is castNotes verbatim, and the
       // "never we are so back" ban is restated 400 chars later in this same
@@ -303,58 +302,33 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       // charter it is a STRUCTURAL beat, which is the kind the planner puts in
       // the blueprint rather than compressing away. The dial stays here: this
       // is now its only home.
-      'speaks in short blunt bursts, RUSSIAN-accented — dropped articles, tech jargon slightly wrong (vary every ' +
-      'episode) — and swears in Russian (blyat, chyort). GRUNER\'S DIAL: when he truly means ' +
+      'in short blunt bursts, RUSSIAN-accented — dropped articles, jargon slightly wrong (vary it), swearing in ' +
+      'Russian (blyat, chyort). GRUNER\'S DIAL: when he truly means ' +
       'something he turns a dial on his throat — mark ONLY those lines with a (dial) parenthetical, often one of ' +
       'several consecutive GRUNER lines; NOBODY ever acknowledges or names it, least of all him. ' +
       // The swear charter is the one instruction in this field that demonstrably
       // survives planner summarization, and it survives because it carries a
       // number. So the comic machinery is written the same way: floors the writer
       // can count in its own draft, and caps it can count against itself.
-      'COMIC MACHINERY — COUNT THESE IN YOUR OWN DRAFT BEFORE YOU CALL IT DONE: (1) TWO ESCALATION LADDERS ' +
-      'minimum. A ladder is 4+ CHARACTER LINES BACK TO BACK with NO new thread material between them, each topping ' +
-      'the last, NOBODY conceding. (2) TWO RUNNERS minimum: name a thing in the ' +
-      'first third — a quoted phrase, a bot\'s reply, an analogy, a handle — and bring it back CHANGED in the last ' +
-      'third; one of them is the LAST LINE of the episode. Never explain a callback or flag it as one. (3) ONE ' +
-      'ACT-OUT minimum: a host stops describing the bot/commenter/model and BECOMES it, performing that voice ' +
-      'inside that host\'s OWN line, never as a new speaker (the cast is four, always four) — then another host ' +
-      'argues with the impression. ' +
-      // (4)-(6) are the round's actual change: (1)-(3) fixed how a bit is
-      // BUILT and changed nothing about WHICH COMMENT ENTERS. Every episode in
-      // the sample imports the thread's CLAIMS (a top-level comment,
-      // paraphrased, reacted to once) and discards its ADJUDICATIONS — the
-      // replies where somebody proves, concedes, quantifies or ends it. That
-      // is where the true information lives, which is why "education" reads as
-      // a tax: the show was quoting the part of the thread with no knowledge in
-      // it. ep0 used 3 handles out of 43. All three run on what the transcript
-      // actually carries — reply_to edges, indent depth, handles, text — since
-      // it emits no scores, no timestamps and no deleted markers.
-      //
-      // (4) replaces "bits end because the show runs out of runway": last
-      // round banned the exit lines ("Here we go" / "What?" / "Moving on",
-      // in 6 of 8 transcripts) without supplying anything to end a bit WITH.
-      // That was a hole this round has to close, and closing it with a quoted
-      // figure means the laugh and the explanation are the same line.
-      '(4) A BIT DIES ON A FACT, NEVER A SHRUG: the only thing allowed to end a ladder is a NUMBER OR HARD DETAIL ' +
-      'QUOTED FROM A HANDLE — a price, a count, a date, a unit — so the laugh and the explanation are the same ' +
-      'line. No such figure in the thread, no ending: it keeps climbing. (5) THE CHORUS, once per episode: an ' +
-      'objection THREE OR MORE handles made with no reply path between them (a top-level comment replies to ' +
-      'nobody) — NAME THEM ALL, say that number out loud, then let a host blunder into the same point and be ' +
-      'counted as the next. Nobody in a 400-comment thread read it first. ' +
-      '(6) THE THREAD OUTRANKS THE HOSTS: when they characterize somebody who is POSTING IN THIS THREAD — the ' +
-      'author of the piece, the OP, the vendor, the person being argued about — a host reads that person\'s ACTUAL ' +
-      'words and the four lose the argument to a stranger they cannot shout at. Never invent a comment; if they ' +
-      'are not in the thread, skip it. ' +
+      'COMIC MACHINERY — COUNT THESE IN YOUR OWN DRAFT: (1) TWO ESCALATION LADDERS: 4+ ' +
+      'character lines back to back, NO new thread material between them, each topping the last, nobody conceding. ' +
+      '(2) TWO RUNNERS: name it in the first third, bring it back CHANGED in the last; one is the LAST LINE. Never ' +
+      'flag a callback. (3) ONE ACT-OUT: a host BECOMES the bot/commenter inside their OWN line, never a new ' +
+      'speaker, then another host argues with the impression. (4) A BIT DIES ON A FACT, NEVER A SHRUG: only a ' +
+      'NUMBER OR HARD DETAIL QUOTED FROM A HANDLE may end a ladder — price, count, date, unit — so the laugh and ' +
+      'the explanation are one line. No such figure, no ending: keep climbing. (5) THE CHORUS once: an objection ' +
+      '3+ handles made INDEPENDENTLY (a top-level comment replies to nobody) — NAME THEM ALL, say the count aloud, ' +
+      'then a host blunders into it and is counted as the next. (6) THE THREAD OUTRANKS THE HOSTS: if someone they ' +
+      'characterize POSTED HERE, a host reads that person\'s REAL words and the four lose to a stranger they ' +
+      'cannot shout at. Never invent it; if absent, skip it. ' +
       'FOUR HOSTS, FOUR MACHINES, never shared: MAEVE argues by analogy and ' +
       'never retreats; OBI escalates by getting more SPECIFIC, a new detail each line, never louder; GARY answers ' +
       'jokes literally and defends the indefensible; GRUNER ends it on one flat field note carrying the number. ' +
-      'RUNNING BITS MUST EARN THEIR WAY IN THROUGH THE THREAD: ' +
-      'Gary\'s dead companies and Obi\'s contempt only surface when a specific comment triggers them — but once ' +
-      'triggered they CLIMB per (1), never a footnote. Never do backstory for its own sake; never quote a ' +
-      'fresh commenter to escape a bit that is still climbing. GARY IS A SERIAL FAILED FOUNDER, not a one-company man: ONE dead venture per ' +
+      'RUNNING BITS EARN THEIR WAY IN: Gary\'s dead companies and Obi\'s contempt surface only when a comment ' +
+      'triggers them, then CLIMB per (1). Never quote a fresh commenter to escape a bit still climbing. GARY IS A SERIAL FAILED FOUNDER: ONE dead venture per ' +
       'episode (Cadence, Thermal, Grout, Pareto, Halfpipe, Muncie), rotated, never the same two episodes running. THE '
-      + 'COMMENTERS ARE THE CELEBRITIES: satirize them by handle; GARY IS JEALOUS OF THEM (their karma, their '
-      + 'exits, their shipped side projects) — BAUXLITE IS RATIONED: at most one line, and NOT every episode. '
+      + 'COMMENTERS ARE THE CELEBRITIES: satirize by handle; GARY IS JEALOUS (their karma, their exits) — '
+      + 'BAUXLITE IS RATIONED: at most one line, NOT every episode. '
       // The old parenthetical was a STAGE DIRECTION and the writer shipped it as
       // DIALOGUE: "Here we go" / "There we go" / "What? Moving on" appear in 6 of
       // 8 transcripts, always at the FIRST objection, killing the show's best
@@ -362,23 +336,19 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       // field bans a few hundred chars below. ep4 is the only episode with none
       // of them and it holds the funniest sustained passage in the sample
       // (Maeve defending the Erie Canal across five refusals to concede).
-      + 'MAEVE\'S ONE GRAND UNIFIED HISTORICAL THEORY PER EPISODE (Andreessen-scale, one step too far) IS A LADDER, '
-      + 'NOT A DROP-IN: someone objects that it is not literally the same thing and she does NOT back off — she '
-      + 'EXTENDS it, more specific and more wrong each pass, conceding nothing, across 4+ exchanges. THE FOLLOWING '
-      + 'ARE BANNED AS DIALOGUE, they are how this bit dies: "Here we go", "There we go", "What?", "Moving on", '
-      + '"Anyway", and any line whose only job is to end the analogy. Her theory dies the way every bit here dies '
-      + '— on a figure somebody in the thread actually quoted. THE OBVIOUS ONES ARE RETIRED AND BANNED — no browser wars, '
-      + 'printing press, Netscape, PC era or packet switching. Go obscure: railway gauge, the Hanseatic League, '
-      + 'container shipping, the Bessemer process, whale oil — the more obscure the arc, the '
-      + 'more certain she sounds. HER CALVINISM MUST BE DOCTRINALLY PRECISE: the joke is that the mapping genuinely '
-      + 'works (election as the round decided before the deck existed; "if they churned, they were never elected"), '
-      + 'never just a church word dropped in. NO ' +
+      + 'MAEVE\'S ONE GRAND UNIFIED HISTORICAL THEORY PER EPISODE (one step too far) IS A LADDER, NOT A DROP-IN: '
+      + 'objected to, she does NOT back off — she EXTENDS it, more specific and more wrong each pass, conceding '
+      + 'nothing, across 4+ exchanges. BANNED AS DIALOGUE, this is how the bit dies: "Here we go", "There we go", '
+      + '"What?", "Moving on", "Anyway", any line whose only job is to end the analogy. Her theory dies like every '
+      + 'bit here — on a figure somebody in the thread actually quoted. BANNED: browser wars, printing '
+      + 'press, Netscape, PC era, packet switching. Go obscure — railway gauge, the Hanseatic League, the Bessemer '
+      + 'process, whale oil — the more obscure the arc, the more certain she sounds. Her Calvinism is doctrinally precise: the mapping genuinely works, never a church word dropped in. NO ' +
       'CATCHPHRASES OR STOCK INTENSIFIERS: "we are so back" and "on a Tuesday" are BANNED; if a phrase appears ' +
       'twice in one script, cut the second. COUNT YOUR CONSTRUCTIONS TOO — this is what makes all four hosts sound ' +
       'like one writer: the reframe "that\'s not X, that\'s Y" is capped at TWO per episode and no host may use it ' +
       'twice; the totalizing aphorism ("which is the entire <noun> of this industry") at ONE. If either wants a ' +
       'third outing, rewrite that line as a ladder rung or an act-out instead. ' +
-      `RUNTIME IS SPOKEN DIALOGUE: this is AUDIO — stage directions are dead air. Write AT LEAST ${pageTarget * 120} ` +
+      `RUNTIME IS SPOKEN DIALOGUE: this is AUDIO; stage directions are dead air. Write AT LEAST ${pageTarget * 120} ` +
       `words of actual spoken lines (~${pageTarget} minutes on air) across ${pageTarget * 8}+ dialogue exchanges; ` +
       'a script light on dialogue plays as a broken half-episode no matter how good the pages look.',
   }

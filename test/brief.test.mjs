@@ -8,6 +8,29 @@ import {
   hostForCharacter,
 } from '../worker/brief.mjs'
 
+test('performanceNotes fits the artifact-request notes cap (contract test)', () => {
+  // performanceNotes rides to the platform as artifactRequests[0].notes
+  // (worker/pipeline.mjs), which the Story API caps at 5000 chars. It is a
+  // TOP-LEVEL brief field, so the cap sweep below — which only walks target /
+  // creativeBrief / styleConstraints — never saw it.
+  //
+  // 2026-08-18: it reached 6080 chars and every episode died with
+  //   `artifactRequests[0]` is invalid: notes - Too big: expected string to
+  //   have <=5000 characters
+  // while the rest of the suite stayed green. Same failure shape as the 13th
+  // mustKnow bullet: a deterministic outage that no test was watching for.
+  //
+  // The string interpolates pageTarget, so check the whole range rather than
+  // one sample.
+  for (const pageTarget of [4, 6, 8, 10, 12]) {
+    const notes = String(buildBrief({ title: 'x'.repeat(240), total: 5000, points: 9000 }, pageTarget).performanceNotes ?? '')
+    assert.ok(
+      notes.length <= 5000,
+      `performanceNotes is ${notes.length} chars at pageTarget ${pageTarget} (Sleeper cap 5000)`,
+    )
+  }
+})
+
 test('the full brief honors every Sleeper plan-schema cap (contract test)', () => {
   // Mirrors packages/web/src/server/story-plan-schema.ts on the platform:
   //   storyPlanTargetSchema, storyPlanCreativeBriefSchema, storyPlanStyleConstraintsSchema.
