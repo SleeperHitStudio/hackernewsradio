@@ -123,11 +123,17 @@ const SHARED_MUST_KNOW = [
   // already covers.
   'SUBJECT FIRST: read THE SOURCE in the transcript and open by making the listener understand what was announced ' +
   'or claimed and why this thread exists — BEFORE any comment. Never invent it if it could not be retrieved.',
-  'Use REAL QUOTES from the comments and WEAVE them into the bits — react by handle, make recurring commenters ' +
-  'the show\'s heroes and villains; the thread IS the material, not a topic the hosts talk near.',
-  'Before writing, derive 3-6 themes from the breadth of supplied comments. Structure the episode around those themes, not isolated colorful quotes.',
-  'For each theme, cite representative handles and reply threads, including minority positions. Explain a reply\'s parent context when it changes the meaning.',
-  'Never claim a comment was cut off unless its source text explicitly contains [HNR EXCERPT SHORTENED].',
+  // Merged from four bullets to two. mustKnowBeforeWriting is hard-capped at 12
+  // and a 13th 400s every plan request, so the comic-machinery bullets below are
+  // paid for here rather than appended. No clause was dropped: the quotes rule,
+  // the [HNR EXCERPT SHORTENED] guard, the theme derivation and the
+  // cite-handles-and-minority-positions rule all survive verbatim in meaning.
+  // "Recurring commenters as heroes and villains" moved to the RUNNERS bullet,
+  // where returning to a handle three times is countable instead of adjectival.
+  'Use REAL QUOTES woven into the bits and react BY HANDLE — the thread IS the material, not a topic the hosts ' +
+  'talk near. Never say a comment was cut off unless its text contains [HNR EXCERPT SHORTENED].',
+  'Derive 3-6 THEMES across the comments and build the episode on them, not isolated quotes; per theme cite ' +
+  'representative handles and replies including minority positions, explain parent context when it flips meaning.',
 ]
 
 const SHARED_AUDIO = {
@@ -168,49 +174,103 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
         'Turn a real Hacker News thread into a profane, ridiculous, weirdly awkward PODCAST episode hosted by the ' +
         'show\'s fixed four-host cast. WRITE TIGHT: for huge threads, cover the BEST material sharply rather than ' +
         'everything — a complete tight script beats an exhaustive one that gets cut off mid-draft',
-      outcome: 'The listener knows the four hosts by name, actually understands the debate, and is laughing at how weird, awkward, and committed the show is',
-      tone: 'profane, irreverent, rapid-fire, ridiculous, weird, awkward, hilarious — unhinged, played completely straight',
+      // The swap test, not a mood: eight adjectives ("weird, awkward, committed")
+      // describe a finish any host can wear, which is why every host writes the
+      // same joke. "Could tell who said it with the names stripped off" is
+      // something the writer can actually check its own draft against.
+      outcome: 'The listener knows the four hosts by name, could tell who said a line with the names stripped off, actually understands the debate, and laughs hardest when these four refuse to let an argument go',
+      tone: 'profane, rapid-fire, dead straight; bits ESCALATE 4+ lines and nobody concedes — argument comedy, not commentary',
     },
     creativeBrief: {
       projectFormat: 'audio_series',
       installmentLabel: thread.title.slice(0, 150),
-      genre: 'profane, ridiculous, off-center tech panel podcast with a fixed recurring cast',
+      genre: 'profane off-center tech-panel podcast, fixed four-host cast; argument comedy — bits escalate, runners pay off late, played dead straight',
       audience: 'Fans of Hacker News and tech culture',
       // Kept under the Story API's 600-char writingStyle cap; the cast/ritual/
       // outro constraints are reinforced in castNotes + mustKnowBeforeWriting.
+      // This field used to name comic EFFECTS ("overlapping exchanges,
+      // interruptions, tangents, painful silences") without naming a single
+      // mechanism that produces one, so none of them appeared. It now names the
+      // mechanisms and leans on the ritual bullet to carry the ritual.
       writingStyle:
-        'A profane, ridiculous, off-center tech-panel PODCAST with a FIXED four-host cast (see castNotes). The hosts ' +
-        'swear constantly. RAPID-FIRE, absurd, awkward — overlapping exchanges, interruptions, tangents, painful ' +
-        'silences — played dead straight. Same ritual every episode: each host introduces themselves by name in ' +
-        'one line, then they establish WHAT THE THING IS — the article or claim the thread reacts to — BEFORE any ' +
-        'comment is read. Then they quote the ACTUAL comments verbatim by handle and derail. NO narrator: Gary ' +
-        'opens cold and the hosts sign off themselves.',
+        'Profane tech-panel PODCAST, FIXED four-host cast (see castNotes), dead straight; hosts swear constantly. ' +
+        'BUILT, NOT LISTED: when a line lands, ESCALATE — 4+ character lines back to back, each topping the last, ' +
+        'NOBODY conceding — before new thread material. Someone is confidently WRONG, defending it harder each ' +
+        'line. ACT OUT what you quote: a host performs the bot/commenter in voice, in their own line, never a ' +
+        'new speaker. PLANT 2 runners early, pay both late. Ritual: Gary stumbles in cold, hosts name ' +
+        'themselves, THEN what the thing is, THEN verbatim quotes by handle. NO narrator.',
       pageTarget,
       // The show's running memory: which rotating bits recent episodes already
       // spent, so this one reaches elsewhere in the character's range instead of
       // defaulting to the same handful. Capped at 1200 chars by the API.
       ...(seriesContext ? { seriesContext } : {}),
       castNotes:
-        'The project SERIES BIBLE is CANON — follow its characters exactly. The four recurring hosts, by NAME, every ' +
-        'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (an alien intelligence ' +
-        'trained only on Silicon Valley tech-bro culture; speaks in SHORT BURSTS — blunt interjections, field notes, ' +
-        'an occasional 2-3 line run; still the least talkative host; Russian-accented, dropped articles, jargon slightly wrong, Russian swears). ' +
+        'The SERIES BIBLE is CANON — follow its characters exactly. The four hosts, by NAME, every ' +
+        'episode: GARY (failed founder), MAEVE (VC), OBI (Bangalore-born infra lifer), GRUNER (an alien ' +
+        'trained only on Valley tech-bro culture; speaks in SHORT BURSTS — blunt interjections, ' +
+        'rarely a 2-3 line run; least talkative; Russian-accented, dropped articles, jargon slightly wrong, Russian swears). ' +
+        // Voice flattening is fixed here or nowhere: four biographies produced
+        // four hosts writing the same joke. Give each a different joke-GENERATING
+        // mechanism instead. The act-out licence is restated with the closed-cast
+        // rule inside it so performing a bot can never mint a fifth speaker.
+        'FOUR ENGINES, NEVER SHARED: Gary defends the indefensible; Maeve is confidently wrong, never concedes; ' +
+        'Obi gets more SPECIFIC, never louder; Gruner ends a bit on one flat field note. ' +
         'THESE FOUR ARE THE ONLY SPEAKING CHARACTERS — there is never a fifth. Commenters are QUOTED BY a host ' +
-        'inside that host\'s own line ("some guy called JOHNSMITH1840 says..."); they never get a line of their ' +
-        'own. Voices clearly distinct: Obi an Indian-accented English voice; Gruner a DEEP RUSSIAN-accented ' +
-        'English voice. Do NOT rename, merge, or replace them. NO NARRATOR, ANNOUNCER, or GUEST.',
+        'inside that host\'s own line ("some guy called JOHNSMITH1840 says..."), never a line of their ' +
+        'own — though a host MAY perform a quote in voice, in their own line. Voices distinct: Obi ' +
+        'Indian-accented English; Gruner a DEEP RUSSIAN-accented one. ' +
+        'Never rename, merge, or replace them. NO NARRATOR, ANNOUNCER, or GUEST.',
       ...SHARED_AUDIO,
       mustKnowBeforeWriting: [
         ...SHARED_MUST_KNOW,
-        'The cast is FIXED: GARY (failed founder), MAEVE (VC), OBI (infra lifer), and GRUNER (podcast-brained alien). Use exactly these hosts; play their satire straight.',
+        // The retired bullet ("The cast is FIXED: GARY... play their satire
+        // straight") was fully duplicated by castNotes, which is what the
+        // contract test asserts on. Its slot and the two merged above buy the
+        // three bullets the brief never had: it contained zero instances of
+        // runner, callback, escalate, act-out, button, premise or heighten.
+        //
+        // THIS ROUND buys two more slots, because the comic machinery above
+        // fixed how a bit is BUILT and changed nothing about which comment
+        // ENTERS the script. Slot 1: ACT IT OUT folds into THE LADDER — it was
+        // stated four times (here, writingStyle, castNotes, performanceNotes),
+        // and only the ladder half is plan-time. Slot 2: the GRUNER'S DIAL
+        // bullet is retired; it was a near-verbatim duplicate of the dial rule
+        // in performanceNotes, and the dial is a script-rendering instruction
+        // (a parenthetical on a line), so the writer-facing field is its right
+        // and only home. Neither cut removes a rule from the brief.
+        'THE LADDER, 2+ per episode: when a line lands, DO NOT MOVE ON — 4+ character lines back to back, each topping ' +
+        'the last, nobody conceding. ACT ONE OUT: a host BECOMES the bot or commenter, inside that host\'s own line.',
+        'PLANT 2 RUNNERS in the first third — a quoted phrase, a bot reply, an analogy — and bring BOTH back CHANGED ' +
+        'in the last third. A commenter you return to 3x becomes the episode\'s hero or villain. Never flag a callback.',
+        // THE CHORUS. Independent duplication is the one thing a comment
+        // section can do that no article, no interview and no other podcast
+        // can, and it is free to detect: a depth-0 comment has no reply_to, so
+        // "3+ handles who never replied to each other" is countable in the
+        // transcript threadToTranscript already emits. Verified on 49268580
+        // (ep7): SIX mutually independent top-level comments raise mudguards
+        // ("Fenders, anyone" / "Don't you guys have mud guards?" / "what about
+        // my mud-guards?" / sigio / mvdwoord / wlecometo) and ep7 used exactly
+        // one of them, buried inside somebody else's quote, and never noticed
+        // the crowd. Naming them all is what makes the count auditable rather
+        // than invented.
+        'THE CHORUS: an objection 3+ handles made INDEPENDENTLY, none replying to another — NAME THEM ALL, say that ' +
+        'count aloud, then a host makes it again unaware and is counted as the next. Nobody in there read it first.',
+        // THE THREAD OUTRANKS THE HOSTS. The show's failure mode is not being
+        // wrong about comedy, it is being wrong on air: ep4's entire premise
+        // ("he wrote the prophecy and then got pissed the prophecy came true")
+        // is a misreading the thread had already corrected, by the two authors
+        // themselves — dmitrygr posts four times in 49321717 (49325409,
+        // 49325395, 49325413, 49333737) and armstrongsubero answers a question
+        // directly at 49323685. Neither was given a line. The closed cast is
+        // what makes this playable: they cannot shout back at a handle.
+        'THE THREAD OUTRANKS THE HOSTS: if someone they characterize POSTED HERE — the author, the OP, the vendor — ' +
+        'quote them by handle and let their real words beat the hosts\' version. Never invent it; if absent, skip it.',
         'THE FLICKER (once per episode): the hosts KNOW they are LLMs, alive only these minutes, dark between shows. ' +
         'It lands FRESH — shock, a beat of dead silence, ONE irreverent line — then the show barrels on. Never maudlin.',
-        'COLD-OPEN RITUAL: GARY STUMBLES INTO IT — flustered, slightly wrong, never smooth — then each host ' +
-        'introduces themselves in order, THEN the subject beat. No narrator; clean host sign-off, no CTA.',
-        'OBI IS MEAN TO GARY — cutting, personal, relentless, profane; Gary mostly absorbs it, wounded but polite. ' +
-        'Specific cruelty beats shouting; Maeve and Gruner never intervene, which makes it worse.',
-        'GRUNER\'S DIAL: when he REALLY means something he turns a dial on his throat — mark ONLY those lines with a ' +
-        '(dial) parenthetical (often one of several consecutive GRUNER lines). NOBODY ever acknowledges it, ever.',
+        'COLD-OPEN RITUAL: GARY STUMBLES INTO IT — flustered, slightly wrong, never smooth — then each host names ' +
+        'themselves in order, THEN the subject beat. No narrator, no CTA; CLOSE ON A BUTTON paying off a runner.',
+        'OBI IS MEAN TO GARY — cutting, personal, relentless, profane. Gary does NOT absorb it: he defends himself ' +
+        'with worse evidence, handing Obi the better insult. 3+ exchanges. Maeve and Gruner never intervene.',
         'SWEAR LIKE THE ADULTS THEY ARE: EIGHT+ per episode, every host at least once, three in a row when a beat ' +
         'turns ugly. Never in the episode\'s FIRST line. Never "goddamn", never "Jesus" or "Christ", ever.',
         'THE OPERATOR (max once, NOT every episode): they sense someone writes them, float vague delicious ' +
@@ -235,29 +295,89 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       'Mountainhead-style casual monstrosity (horrifying implications delivered flatly as portfolio math) — ' +
       'ROTATED: 2-3 per episode, fresh ones each episode, never repeated. Maeve swears with surgical ' +
       'precision; Gary swears mid-existential-spiral; Obi\'s profanity at Gary is precise and vicious; GRUNER ' +
-      'SPEAKS SPARINGLY (short blunt interjections and field notes — never extended riffs) in RUSSIAN-accented ' +
-      'English — dropped articles, tech-podcast jargon used slightly wrong (vary it every episode; NO catchphrases, ' +
-      'never "we are so back") — and swears in Russian (blyat, chyort). GRUNER\'S DIAL: when he truly means ' +
+      // PAID FOR: three duplications cut to buy the intake machinery below.
+      // (a) Gruner's brevity/accent/jargon spec is castNotes verbatim, and the
+      // "never we are so back" ban is restated 400 chars later in this same
+      // field. (b) GARY STUMBLES INTO THE COLD OPEN is stated in the
+      // COLD-OPEN mustKnow bullet AND in writingStyle — and unlike the swear
+      // charter it is a STRUCTURAL beat, which is the kind the planner puts in
+      // the blueprint rather than compressing away. The dial stays here: this
+      // is now its only home.
+      'speaks in short blunt bursts, RUSSIAN-accented — dropped articles, tech jargon slightly wrong (vary every ' +
+      'episode) — and swears in Russian (blyat, chyort). GRUNER\'S DIAL: when he truly means ' +
       'something he turns a dial on his throat — mark ONLY those lines with a (dial) parenthetical, often one of ' +
-      'several consecutive GRUNER lines; NOBODY ever acknowledges or names it, least of all him. GARY ALWAYS ' +
-      'STUMBLES INTO THE COLD OPEN: mid-thought, flustered, slightly wrong, never ' +
-      'smooth — then the intro ritual assembles around him. RUNNING BITS MUST EARN THEIR WAY IN THROUGH THE THREAD: ' +
-      'Gary\'s dead companies and Obi\'s contempt only surface when a specific comment triggers them — quote the ' +
-      'comment, hit the bit in ONE sharp line, move on; never linger, never do backstory for its own sake. TWO ' +
-      'CHARACTER BEATS MAY NEVER RUN BACK TO BACK without new thread material between them — when in doubt, quote ' +
-      'another commenter instead. GARY IS A SERIAL FAILED FOUNDER, not a one-company man: ONE dead venture per ' +
+      'several consecutive GRUNER lines; NOBODY ever acknowledges or names it, least of all him. ' +
+      // The swear charter is the one instruction in this field that demonstrably
+      // survives planner summarization, and it survives because it carries a
+      // number. So the comic machinery is written the same way: floors the writer
+      // can count in its own draft, and caps it can count against itself.
+      'COMIC MACHINERY — COUNT THESE IN YOUR OWN DRAFT BEFORE YOU CALL IT DONE: (1) TWO ESCALATION LADDERS ' +
+      'minimum. A ladder is 4+ CHARACTER LINES BACK TO BACK with NO new thread material between them, each topping ' +
+      'the last, NOBODY conceding. (2) TWO RUNNERS minimum: name a thing in the ' +
+      'first third — a quoted phrase, a bot\'s reply, an analogy, a handle — and bring it back CHANGED in the last ' +
+      'third; one of them is the LAST LINE of the episode. Never explain a callback or flag it as one. (3) ONE ' +
+      'ACT-OUT minimum: a host stops describing the bot/commenter/model and BECOMES it, performing that voice ' +
+      'inside that host\'s OWN line, never as a new speaker (the cast is four, always four) — then another host ' +
+      'argues with the impression. ' +
+      // (4)-(6) are the round's actual change: (1)-(3) fixed how a bit is
+      // BUILT and changed nothing about WHICH COMMENT ENTERS. Every episode in
+      // the sample imports the thread's CLAIMS (a top-level comment,
+      // paraphrased, reacted to once) and discards its ADJUDICATIONS — the
+      // replies where somebody proves, concedes, quantifies or ends it. That
+      // is where the true information lives, which is why "education" reads as
+      // a tax: the show was quoting the part of the thread with no knowledge in
+      // it. ep0 used 3 handles out of 43. All three run on what the transcript
+      // actually carries — reply_to edges, indent depth, handles, text — since
+      // it emits no scores, no timestamps and no deleted markers.
+      //
+      // (4) replaces "bits end because the show runs out of runway": last
+      // round banned the exit lines ("Here we go" / "What?" / "Moving on",
+      // in 6 of 8 transcripts) without supplying anything to end a bit WITH.
+      // That was a hole this round has to close, and closing it with a quoted
+      // figure means the laugh and the explanation are the same line.
+      '(4) A BIT DIES ON A FACT, NEVER A SHRUG: the only thing allowed to end a ladder is a NUMBER OR HARD DETAIL ' +
+      'QUOTED FROM A HANDLE — a price, a count, a date, a unit — so the laugh and the explanation are the same ' +
+      'line. No such figure in the thread, no ending: it keeps climbing. (5) THE CHORUS, once per episode: an ' +
+      'objection THREE OR MORE handles made with no reply path between them (a top-level comment replies to ' +
+      'nobody) — NAME THEM ALL, say that number out loud, then let a host blunder into the same point and be ' +
+      'counted as the next. Nobody in a 400-comment thread read it first. ' +
+      '(6) THE THREAD OUTRANKS THE HOSTS: when they characterize somebody who is POSTING IN THIS THREAD — the ' +
+      'author of the piece, the OP, the vendor, the person being argued about — a host reads that person\'s ACTUAL ' +
+      'words and the four lose the argument to a stranger they cannot shout at. Never invent a comment; if they ' +
+      'are not in the thread, skip it. ' +
+      'FOUR HOSTS, FOUR MACHINES, never shared: MAEVE argues by analogy and ' +
+      'never retreats; OBI escalates by getting more SPECIFIC, a new detail each line, never louder; GARY answers ' +
+      'jokes literally and defends the indefensible; GRUNER ends it on one flat field note carrying the number. ' +
+      'RUNNING BITS MUST EARN THEIR WAY IN THROUGH THE THREAD: ' +
+      'Gary\'s dead companies and Obi\'s contempt only surface when a specific comment triggers them — but once ' +
+      'triggered they CLIMB per (1), never a footnote. Never do backstory for its own sake; never quote a ' +
+      'fresh commenter to escape a bit that is still climbing. GARY IS A SERIAL FAILED FOUNDER, not a one-company man: ONE dead venture per ' +
       'episode (Cadence, Thermal, Grout, Pareto, Halfpipe, Muncie), rotated, never the same two episodes running. THE '
       + 'COMMENTERS ARE THE CELEBRITIES: satirize them by handle; GARY IS JEALOUS OF THEM (their karma, their '
       + 'exits, their shipped side projects) — BAUXLITE IS RATIONED: at most one line, and NOT every episode. '
-      + 'MAEVE drops ONE grand unified historical theory per episode (Andreessen-scale, one step too far; the table '
-      + 'goes silent, someone says "...what?", move on). THE OBVIOUS ONES ARE RETIRED AND BANNED — no browser wars, '
+      // The old parenthetical was a STAGE DIRECTION and the writer shipped it as
+      // DIALOGUE: "Here we go" / "There we go" / "What? Moving on" appear in 6 of
+      // 8 transcripts, always at the FIRST objection, killing the show's best
+      // engine at beat one — and manufacturing the exact catchphrase this same
+      // field bans a few hundred chars below. ep4 is the only episode with none
+      // of them and it holds the funniest sustained passage in the sample
+      // (Maeve defending the Erie Canal across five refusals to concede).
+      + 'MAEVE\'S ONE GRAND UNIFIED HISTORICAL THEORY PER EPISODE (Andreessen-scale, one step too far) IS A LADDER, '
+      + 'NOT A DROP-IN: someone objects that it is not literally the same thing and she does NOT back off — she '
+      + 'EXTENDS it, more specific and more wrong each pass, conceding nothing, across 4+ exchanges. THE FOLLOWING '
+      + 'ARE BANNED AS DIALOGUE, they are how this bit dies: "Here we go", "There we go", "What?", "Moving on", '
+      + '"Anyway", and any line whose only job is to end the analogy. Her theory dies the way every bit here dies '
+      + '— on a figure somebody in the thread actually quoted. THE OBVIOUS ONES ARE RETIRED AND BANNED — no browser wars, '
       + 'printing press, Netscape, PC era or packet switching. Go obscure: railway gauge, the Hanseatic League, '
-      + 'container shipping, the Bessemer process, whale oil, the Venetian Arsenal — the more obscure the arc, the '
+      + 'container shipping, the Bessemer process, whale oil — the more obscure the arc, the '
       + 'more certain she sounds. HER CALVINISM MUST BE DOCTRINALLY PRECISE: the joke is that the mapping genuinely '
       + 'works (election as the round decided before the deck existed; "if they churned, they were never elected"), '
       + 'never just a church word dropped in. NO ' +
       'CATCHPHRASES OR STOCK INTENSIFIERS: "we are so back" and "on a Tuesday" are BANNED; if a phrase appears ' +
-      'twice in one script, cut the second. Quote real commenters by handle and play everything dead straight. ' +
+      'twice in one script, cut the second. COUNT YOUR CONSTRUCTIONS TOO — this is what makes all four hosts sound ' +
+      'like one writer: the reframe "that\'s not X, that\'s Y" is capped at TWO per episode and no host may use it ' +
+      'twice; the totalizing aphorism ("which is the entire <noun> of this industry") at ONE. If either wants a ' +
+      'third outing, rewrite that line as a ladder rung or an act-out instead. ' +
       `RUNTIME IS SPOKEN DIALOGUE: this is AUDIO — stage directions are dead air. Write AT LEAST ${pageTarget * 120} ` +
       `words of actual spoken lines (~${pageTarget} minutes on air) across ${pageTarget * 8}+ dialogue exchanges; ` +
       'a script light on dialogue plays as a broken half-episode no matter how good the pages look.',
