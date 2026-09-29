@@ -8,6 +8,13 @@
  *   GET /credits                 → credits.balance
  *   GET /publishing-series/{id}  → series.standingApproval { apiKeyId, apiKeyName, apiKeyStart, grantedAt, grantedBy } | null
  *
+ * HNR owns its hosts' voices (D1 `pinnedVoices`). When the project says the
+ * cast is not ready, the preflight first pushes those voices into the cast
+ * canon (GET /story-projects/{id}/cast-canon, a PATCH only when stale; free)
+ * and re-reads the project, so a canon missing a voice HNR has pinned heals
+ * itself instead of stopping the show. A voice HNR has not pinned is never
+ * invented: that cast stays `cast_not_ready`.
+ *
  * HNR is UNATTENDED. It approves plans and publishes only under the series'
  * standing approval, bound to ITS API key (SLEEPERHIT_API_KEY_ID), and never by
  * claiming a human `userConfirmed`. Without that grant it spends nothing.
@@ -17,6 +24,8 @@
  * is pure except `readReadiness`, which takes the client as an argument.
  */
 import { SleeperHit } from './sleeperhit.mjs'
+import { syncCastCanonFromPins } from './cast-canon.mjs'
+import { CAST_CANON_SYNC_REFUSED_CODE } from './failure-classification.mjs'
 
 /** A table read (~20) plus its audio finalize (6): what one episode costs. */
 export const MIN_EPISODE_CREDITS = 26
@@ -235,6 +244,28 @@ export function accessFailure(stage, error) {
 }
 
 /**
+ * The failure a REFUSED cast canon push means: HNR has pinned the voices, but
+ * the Story API would not take them (a strict-schema 400, a missing write
+ * scope). Still the cast: no table read can be voiced until the push lands,
+ * and each hourly read retries it (free). `verdict` is the cast verdict the
+ * push was meant to heal.
+ */
+export function castSyncFailure(verdict, error) {
+  const refusal = refusalOf(error)
+  return {
+    ready: false,
+    failureClass: 'cast_not_ready',
+    code: CAST_CANON_SYNC_REFUSED_CODE,
+    message: `HNRadio cannot start a table read: the Story API refused HNR's push of its pinned host voices to the cast canon (${refusal.status}${refusal.code ? ` ${refusal.code}` : ''}): ${refusal.message}`,
+    details: {
+      missing: Array.isArray(verdict?.details?.missing) ? verdict.details.missing : [],
+      canonSync: { status: refusal.status, code: refusal.code },
+    },
+    measured: verdict?.measured ?? ['access', 'cast_not_ready'],
+  }
+}
+
+/**
  * Perform the preflight reads. Never throws.
  *
  * - A read that could not be made (network error, 5xx, 429) is `checked: false`:
@@ -242,8 +273,20 @@ export function accessFailure(stage, error) {
  * - A project or credits read the API REFUSED is an `access` failure: the key
  *   or the project is broken, and the operator must be told.
  * - A series read the API refused is an unreadable grant (`approval_missing`).
+ * - With `db`, a cast the project reports not ready is first synced from the
+ *   D1 `pinnedVoices` (syncCastCanonFromPins) and, when that wrote anything,
+ *   judged again on a fresh project read. A push the API refused is a
+ *   `cast_not_ready` failure naming the refusal; one that could not be made is
+ *   `checked: false`, like any read.
  */
-export async function readReadiness(sh, { projectId, seriesId = null, keyId = null, minCredits = MIN_EPISODE_CREDITS } = {}) {
+export async function readReadiness(sh, {
+  projectId,
+  seriesId = null,
+  keyId = null,
+  minCredits = MIN_EPISODE_CREDITS,
+  db = null,
+  readSetting,
+} = {}) {
   const refused = accessFailure
   let project = null
   let credits = null
@@ -270,10 +313,31 @@ export async function readReadiness(sh, { projectId, seriesId = null, keyId = nu
     }
   }
   const publishing = publishingReadiness({ seriesId, series, readError: seriesError, keyId })
+  let verdict = evaluateReadiness({ project, credits, publishing, minCredits })
+  if (db && verdict.failureClass === 'cast_not_ready') {
+    // Before a cast verdict stops the show: push the voices HNR itself pinned,
+    // then judge the canon that push wrote.
+    let written = []
+    try {
+      written = await syncCastCanonFromPins(db, sh, projectId, { readSetting })
+    } catch (error) {
+      if (!isRefusedRead(error)) return { checked: false, error: refusalOf(error), stage: 'cast canon' }
+      verdict = castSyncFailure(verdict, error)
+    }
+    if (written.length) {
+      try {
+        project = await sh.getProject(projectId)
+      } catch (error) {
+        if (isRefusedRead(error)) return refused('project', error)
+        return { checked: false, error: refusalOf(error), stage: 'project' }
+      }
+      verdict = evaluateReadiness({ project, credits, publishing, minCredits })
+    }
+  }
   return {
     checked: true,
     error: null,
-    ...evaluateReadiness({ project, credits, publishing, minCredits }),
+    ...verdict,
     balance: Number.isFinite(Number(credits?.balance)) ? Number(credits.balance) : null,
     publishing,
   }
@@ -281,7 +345,10 @@ export async function readReadiness(sh, { projectId, seriesId = null, keyId = nu
 
 /**
  * The show's readiness as this Worker reads it (the project, the balance, the
- * configured series). Null when the Worker has no Story API credentials.
+ * configured series), healing the cast canon from the D1 `pinnedVoices` first
+ * when the cast is not ready. Null when the Worker has no Story API
+ * credentials. Both the nightly tick and the community `POST /api/generate`
+ * read readiness through here, after the deploy gate.
  */
 export async function readShowReadiness(env, { seriesId = null, minCredits = MIN_EPISODE_CREDITS } = {}) {
   if (!env?.SLEEPERHIT_API_KEY || !env?.HNRADIO_PROJECT_ID) return null
@@ -294,5 +361,6 @@ export async function readShowReadiness(env, { seriesId = null, minCredits = MIN
     seriesId,
     keyId: env.SLEEPERHIT_API_KEY_ID || null,
     minCredits,
+    db: env.DB ?? null,
   })
 }

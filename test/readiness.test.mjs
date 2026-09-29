@@ -219,3 +219,32 @@ test('only a finished MP3 the feed has not taken needs the publish step alone', 
   assert.equal(needsPublishOnly({ ...finished, audioUrl: null }), false, 'no MP3 yet: post-production is still owed')
   assert.equal(needsPublishOnly({ ...finished, status: 'failed' }), false)
 })
+
+test('a cast canon push that could not be made is not a verdict: the read is unchecked', async () => {
+  const pinned = { GARY: { voiceId: 'v_gary' }, MAEVE: { voiceId: 'v_maeve' }, OBI: { voiceId: 'v_obi' }, GRUNER: { voiceId: 'v_gruner' } }
+  const castNotReady = {
+    workspaceGate: READY_GATE,
+    tableReadReadiness: { ready: false, members: [{ name: 'GRUNER', ready: false, missing: ['voice'] }] },
+  }
+  const sh = (canonError) => ({
+    async getProject() { return castNotReady },
+    async getCredits() { return { balance: 90 } },
+    async getCastCanon() { throw canonError },
+  })
+  const readSetting = async (_db, key) => (key === 'pinnedVoices' ? pinned : null)
+
+  const blip = await readReadiness(sh(Object.assign(new Error('Service Unavailable'), { status: 503 })), { projectId: 'p', db: {}, readSetting })
+  assert.equal(blip.checked, false, 'a 5xx says nothing about the cast: the tick skips')
+  assert.equal(blip.stage, 'cast canon')
+
+  const refused = await readReadiness(sh(Object.assign(new Error('Missing story:write'), { status: 403, code: 'insufficient_scope' })), { projectId: 'p', db: {}, readSetting })
+  assert.equal(refused.checked, true)
+  assert.equal(refused.failureClass, 'cast_not_ready')
+  assert.equal(refused.code, 'cast_canon_sync_refused')
+  assert.match(refused.message, /\(403 insufficient_scope\): Missing story:write/)
+  assert.deepEqual(refused.details.missing, ['GRUNER (voice)'])
+
+  const withoutDb = await readReadiness(sh(new Error('must not be called')), { projectId: 'p' })
+  assert.equal(withoutDb.failureClass, 'cast_not_ready', 'without a D1 there is nothing to push')
+  assert.equal(withoutDb.code, 'cast_precondition_failed')
+})

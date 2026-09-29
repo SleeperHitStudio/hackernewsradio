@@ -139,7 +139,13 @@ Credits (`quota`), or a read the Story API REFUSED — a revoked key, a missing
 scope, a deleted project (`access`) — opens a READ-probed generation circuit
 and emails the operator once per outage. Its hourly probe is this same free
 read, never a paid episode; a passing read closes it. A read that could not be
-made (network, 5xx, 429) only skips the tick.
+made (network, 5xx, 429) only skips the tick. Before it judges the cast, the
+preflight (tick and `POST /api/generate` alike, never under a locked deploy
+gate) pushes HNR's own pinned host voices (`pinnedVoices`) into the cast canon
+(a GET, and a free PATCH only when stale) and re-reads the project, so a canon
+missing a voice HNR has pinned heals itself. A voice HNR has not pinned is
+never invented, and a refused push is a `cast_not_ready` failure naming the
+refusal.
 
 A passing read clears an episode's failure only when the read MEASURES that
 condition and saw it failing after the episode failed. Otherwise the read

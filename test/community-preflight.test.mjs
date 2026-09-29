@@ -122,3 +122,58 @@ test('a ready show queues the visitor\'s episode, and an existing episode is reu
   assert.equal(again.reused, true)
   assert.equal(reads, 0, 'reusing an episode spends nothing, so it needs no preflight')
 })
+
+test('a visitor\'s preflight pushes HNR\'s pinned voices into the cast canon before it judges the cast, like the nightly', async (t) => {
+  const API = 'https://api.visitor.test'
+  const PROJECT = 'project_hnr'
+  const HOSTS = ['GARY', 'MAEVE', 'OBI', 'GRUNER']
+  const pinnedVoices = Object.fromEntries(HOSTS.map((name) => [name, { voiceId: `v_${name.toLowerCase()}`, provider: 'elevenlabs' }]))
+  let canon = { content: { characters: HOSTS.map((name) => ({ name, avatarUrl: `https://hnradio.net/avatars/${name.toLowerCase()}.png` })) } }
+  const requests = []
+  const realFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = realFetch })
+  const respond = (payload) => ({ ok: true, status: 200, text: async () => JSON.stringify(payload) })
+  globalThis.fetch = async (url, options = {}) => {
+    const method = options.method || 'GET'
+    const path = String(url).replace(`${API}/api/v1`, '')
+    const body = options.body ? JSON.parse(options.body) : undefined
+    requests.push({ method, path, body })
+    if (path === `/story-projects/${PROJECT}` && method === 'GET') {
+      const unvoiced = HOSTS.filter((name) => !canon.content.characters.find((c) => c.name === name)?.voiceId)
+      return respond({
+        project: {
+          id: PROJECT,
+          workspaceGate: { ready: true, stage: 'ready', canPlan: true, canStartEpisode: true },
+          tableReadReadiness: {
+            ready: unvoiced.length === 0,
+            members: HOSTS.map((name) => ({ name, ready: !unvoiced.includes(name), missing: unvoiced.includes(name) ? ['voice'] : [] })),
+          },
+        },
+      })
+    }
+    if (path === '/credits') return respond({ credits: { balance: 500 } })
+    if (path === '/publishing-series/series_hnr') {
+      return respond({ series: { id: 'series_hnr', status: 'active', medium: 'audio', standingApproval: { apiKeyId: 'key_hnr', grantedAt: '2026-09-29T00:00:00.000Z' } } })
+    }
+    if (path === `/story-projects/${PROJECT}/cast-canon` && method === 'GET') return respond({ canon })
+    if (path === `/story-projects/${PROJECT}/cast-canon` && method === 'PATCH') {
+      canon = { content: { characters: canon.content.characters.map((c) => ({ ...c, ...body.content.characters.find((p) => p.name === c.name) })) } }
+      return respond({ canon })
+    }
+    throw new Error(`unexpected ${method} ${path}`)
+  }
+  const env = {
+    DB: fakeDb({ settings: { publishingSeriesId: 'series_hnr', pinnedVoices } }),
+    SLEEPERHIT_API_BASE: API,
+    SLEEPERHIT_API_KEY: 'sh_test_key',
+    SLEEPERHIT_API_KEY_ID: 'key_hnr',
+    HNRADIO_PROJECT_ID: PROJECT,
+  }
+
+  // The default readiness read, as POST /api/generate makes it.
+  assert.equal(await communityGenerationRefusal(env), null, 'the healed show takes the visitor\'s episode')
+  const patches = requests.filter((request) => request.method === 'PATCH')
+  assert.equal(patches.length, 1)
+  assert.deepEqual(patches[0].body.content.characters.map((c) => [c.name, c.voiceId]), HOSTS.map((name) => [name, `v_${name.toLowerCase()}`]))
+  assert.equal(requests.filter((request) => request.path === `/story-projects/${PROJECT}`).length, 2, 'the project is re-read after the push')
+})

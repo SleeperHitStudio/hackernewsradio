@@ -45,6 +45,12 @@ export const PROJECT_NOT_READY_RE =
  * without the pinned map, see shouldRecastWithoutPinnedCast.)
  */
 export const CAST_NOT_READY_CODE = 'cast_precondition_failed'
+/**
+ * HNR pushes its pinned host voices into the cast canon before the preflight
+ * judges the cast; a push the Story API REFUSED leaves the cast unvoiceable,
+ * so it is the same class, under HNR's own code so the refusal is named.
+ */
+export const CAST_CANON_SYNC_REFUSED_CODE = 'cast_canon_sync_refused'
 export const CAST_NOT_READY_RE =
   /cast_precondition_failed|no finalized (?:episode screenplay|cast)|finalized episode screenplay with a complete cast|Finalize the episode screenplay and complete its Cast|uncast speaker/i
 
@@ -141,7 +147,7 @@ export function classifySystemicFailure(value) {
   if (code === 'provider_capacity_blocked' || PROVIDER_BLOCK_RE.test(message)) return 'provider'
   if (ACCESS_CODES.includes(code) || status === 401) return 'access'
   if (code === PROJECT_NOT_READY_CODE || PROJECT_NOT_READY_RE.test(message)) return 'project_not_ready'
-  if (code === CAST_NOT_READY_CODE || CAST_NOT_READY_RE.test(message)) return 'cast_not_ready'
+  if (code === CAST_NOT_READY_CODE || code === CAST_CANON_SYNC_REFUSED_CODE || CAST_NOT_READY_RE.test(message)) return 'cast_not_ready'
   if (APPROVAL_MISSING_CODES.includes(code) || APPROVAL_MISSING_RE.test(message)) return 'approval_missing'
   if (code === 'insufficient_credits' || status === 402 || PLATFORM_CREDITS_RE.test(message)) return 'quota'
   if (PROVIDER_QUOTA_RE.test(message)) return 'provider_quota'

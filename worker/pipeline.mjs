@@ -29,11 +29,10 @@ import {
   OUTPUT_BUDGET_RE,
   buildBrief,
   buildStoryJobArtifactRequests,
-  castCanonCharacters,
   hostForCharacter,
   pageTargetFor,
-  staleCastCanonCharacters,
 } from './brief.mjs'
+import { syncCastCanonFromPins } from './cast-canon.mjs'
 import {
   isRefusedRead,
   publishKeyPrefix,
@@ -214,14 +213,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
         // when the canon voices every character, so a canon without the voices
         // is a show that cannot perform. One GET; PATCH only the hosts that
         // differ, compared on the characters alone. A refusal is NOT swallowed:
-        // the old catch-all hid a 400 on every PATCH for ten weeks.
-        const canonRefreshed = await this.hardStep(step, 'ensure cast canon', async () => {
-          const desired = castCanonCharacters(await getSetting(db, 'pinnedVoices'))
-          const stale = staleCastCanonCharacters(await sh.getCastCanon(projectId), desired)
-          if (!stale.length) return []
-          await sh.patchCastCanon(projectId, { characters: stale })
-          return stale.map((character) => character.name)
-        }, { replaySafe: true })
+        // the old catch-all hid a 400 on every PATCH for ten weeks. The
+        // readiness preflight runs this same push before it judges the cast.
+        const canonRefreshed = await this.hardStep(step, 'ensure cast canon',
+          () => syncCastCanonFromPins(db, sh, projectId), { replaySafe: true })
         if (Array.isArray(canonRefreshed) && canonRefreshed.length) {
           await note(`Refreshed the show cast canon for ${canonRefreshed.join(', ')} (portraits + pinned voices)`)
         }

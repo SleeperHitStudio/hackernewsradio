@@ -2318,3 +2318,241 @@ test('a preflight reported as unreadable with a refusal status is still an acces
   assert.equal(emails.length, 1)
 })
 
+
+// ── The preflight heals the cast canon from HNR's OWN pinned voices ──────────
+//
+// Through the PRODUCTION path: the default readShowReadiness, the real
+// SleeperHit client, the D1 `pinnedVoices` setting, and a fake Story API over
+// fetch whose project reports a table read ready exactly when the canon voices
+// every member. The only code that wrote the canon used to be the pipeline,
+// which never runs while the preflight says `cast_not_ready`: a deadlock.
+
+const CANON_API = 'https://api.canon.test'
+const CANON_PROJECT = 'project_hnr'
+const HOST_NAMES = ['GARY', 'MAEVE', 'OBI', 'GRUNER']
+const PINNED_HOSTS = {
+  GARY: { voiceId: 'v_gary', voiceName: 'Gary', provider: 'elevenlabs' },
+  MAEVE: { voiceId: 'v_maeve', voiceName: 'Maeve', provider: 'elevenlabs' },
+  OBI: { voiceId: 'v_obi', voiceName: 'Obi', provider: 'elevenlabs' },
+  GRUNER: { voiceId: 'v_gruner', voiceName: 'Gruner', provider: 'hume' },
+}
+const avatar = (name) => `https://hnradio.net/avatars/${name.toLowerCase()}.png`
+const facesOnlyCanon = () => ({
+  content: { characters: HOST_NAMES.map((name) => ({ name, avatarUrl: avatar(name), bodyFigureUrl: `https://files.example/${name}.png` })) },
+})
+const voicedCanon = () => ({
+  content: {
+    characters: HOST_NAMES.map((name) => ({
+      name, avatarUrl: avatar(name), voiceId: PINNED_HOSTS[name].voiceId, voiceProvider: PINNED_HOSTS[name].provider,
+    })),
+  },
+})
+
+/** A D1 whose settings table is the harness's settings map (what store.getSetting reads). */
+function settingsD1(settings) {
+  return {
+    prepare(sql) {
+      return {
+        bind(key) {
+          return {
+            async first() {
+              if (!/^SELECT value FROM settings/.test(sql.trim())) throw new Error(`Unexpected D1 read: ${sql}`)
+              return settings.has(key) ? { value: JSON.stringify(settings.get(key)) } : null
+            },
+          }
+        },
+      }
+    },
+  }
+}
+
+function canonStoryApi(t, h, { pinned = PINNED_HOSTS, canon = facesOnlyCanon(), extraMembers = [], patchRefusal = null } = {}) {
+  const api = { canon, requests: [], emails: [] }
+  Object.assign(h.env, {
+    DB: settingsD1(h.settings),
+    SLEEPERHIT_API_BASE: CANON_API,
+    SLEEPERHIT_API_KEY: 'sh_test_key',
+    SLEEPERHIT_API_KEY_ID: HNR_KEY_ID,
+    HNRADIO_PROJECT_ID: CANON_PROJECT,
+    RESEND_API_KEY: 'test_resend_key',
+    ALERT_EMAIL: 'ops@example.com',
+  })
+  if (pinned) h.settings.set('pinnedVoices', pinned)
+  h.settings.set('publishingSeriesId', SERIES_ID)
+
+  const tableReadReadiness = () => {
+    const characters = api.canon?.content?.characters ?? []
+    const members = [
+      ...HOST_NAMES.map((name) => {
+        const ready = Boolean(characters.find((character) => character.name === name)?.voiceId)
+        return { name, narrator: false, ready, missing: ready ? [] : ['voice'] }
+      }),
+      ...extraMembers,
+    ]
+    const unvoiced = members.filter((member) => !member.ready).map((member) => member.name)
+    return {
+      ready: unvoiced.length === 0,
+      audioOnly: true,
+      narratorVoice: false,
+      reason: unvoiced.length ? `${unvoiced.join(', ')} has no voice in the cast canon.` : null,
+      members,
+    }
+  }
+  const respond = (status, payload) => ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(payload) })
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, options = {}) => {
+    const target = String(url)
+    const body = options.body ? JSON.parse(options.body) : undefined
+    if (target.startsWith('https://api.resend.com/')) {
+      api.emails.push(body)
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '{}' }
+    }
+    const method = options.method || 'GET'
+    const path = target.replace(`${CANON_API}/api/v1`, '')
+    api.requests.push({ method, path, body })
+    if (method === 'GET' && path === `/story-projects/${CANON_PROJECT}`) {
+      return respond(200, { project: { id: CANON_PROJECT, workspaceGate: PASSING_GATE, tableReadReadiness: tableReadReadiness() } })
+    }
+    if (method === 'GET' && path === '/credits') return respond(200, { credits: { balance: 500 } })
+    if (method === 'GET' && path === `/publishing-series/${SERIES_ID}`) return respond(200, { series: GRANTED_SERIES })
+    if (method === 'GET' && path === `/story-projects/${CANON_PROJECT}/cast-canon`) return respond(200, { canon: api.canon })
+    if (method === 'PATCH' && path === `/story-projects/${CANON_PROJECT}/cast-canon`) {
+      if (patchRefusal) return respond(patchRefusal.status, { error: { code: patchRefusal.code, message: patchRefusal.message } })
+      // Merge-patch: each character merges field-by-field onto the person of the same name.
+      const characters = [...(api.canon?.content?.characters ?? [])]
+      for (const patch of body.content.characters) {
+        const index = characters.findIndex((character) => character.name === patch.name)
+        if (index === -1) characters.push(patch)
+        else characters[index] = { ...characters[index], ...patch }
+      }
+      api.canon = { ...(api.canon ?? {}), content: { ...(api.canon?.content ?? {}), characters } }
+      return respond(200, { canon: api.canon })
+    }
+    throw new Error(`unexpected ${method} ${path}`)
+  }
+  t.after(() => { globalThis.fetch = realFetch })
+  return api
+}
+
+const canonCalls = (api) => api.requests.filter((request) => request.path.endsWith('/cast-canon'))
+const projectReads = (api) => api.requests.filter((request) => request.method === 'GET' && request.path === `/story-projects/${CANON_PROJECT}`)
+
+test('a canon missing voices HNR has pinned is pushed before the cast is judged, re-read, and the show goes on', async (t) => {
+  const h = harness({ topIds: [101] })
+  const api = canonStoryApi(t, h)
+  const date = '2026-09-29'
+
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  const patches = api.requests.filter((request) => request.method === 'PATCH')
+  assert.equal(patches.length, 1)
+  assert.deepEqual(patches[0].body, {
+    content: {
+      characters: [
+        { name: 'GARY', avatarUrl: avatar('GARY'), voiceId: 'v_gary', voiceProvider: 'elevenlabs' },
+        { name: 'MAEVE', avatarUrl: avatar('MAEVE'), voiceId: 'v_maeve', voiceProvider: 'elevenlabs' },
+        { name: 'OBI', avatarUrl: avatar('OBI'), voiceId: 'v_obi', voiceProvider: 'elevenlabs' },
+        { name: 'GRUNER', avatarUrl: avatar('GRUNER'), voiceId: 'v_gruner', voiceProvider: 'hume' },
+      ],
+    },
+  }, 'exactly what castCanonCharacters builds from the D1 pinnedVoices, under content.characters')
+  assert.deepEqual(api.requests.map((request) => `${request.method} ${request.path}`), [
+    `GET /story-projects/${CANON_PROJECT}`,
+    'GET /credits',
+    `GET /publishing-series/${SERIES_ID}`,
+    `GET /story-projects/${CANON_PROJECT}/cast-canon`,
+    `PATCH /story-projects/${CANON_PROJECT}/cast-canon`,
+    `GET /story-projects/${CANON_PROJECT}`,
+  ], 'the project is re-read after the push, so the verdict judges the canon HNR just wrote')
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY) ?? null, null, 'no cast circuit')
+  assert.equal(h.creates.length, 1, 'the tick proceeds to its one serialized episode')
+  assert.equal(api.emails.length, 0, 'nothing for the operator to do')
+
+  // A healthy cast costs the preflight nothing extra: no canon call at all.
+  hour(h)
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(canonCalls(api).length, 2)
+  assert.equal(projectReads(api).length, 3)
+})
+
+test('a host with no pinned voice is never invented: its voice is not pushed and the cast stays cast_not_ready', async (t) => {
+  const h = harness({ topIds: [101] })
+  const { GRUNER: _unpinned, ...threeHosts } = PINNED_HOSTS
+  const api = canonStoryApi(t, h, { pinned: threeHosts })
+
+  await reconcileNightlyBatch(h.env, '2026-09-29', { dependencies: h.dependencies })
+
+  const pushed = api.requests.filter((request) => request.method === 'PATCH').flatMap((request) => request.body.content.characters)
+  assert.deepEqual(pushed.map((character) => character.name), ['GARY', 'MAEVE', 'OBI'])
+  assert.equal(pushed.some((character) => character.name === 'GRUNER'), false, 'no voice is invented for GRUNER')
+  assert.equal(api.canon.content.characters.find((character) => character.name === 'GRUNER').voiceId, undefined)
+  assert.equal(projectReads(api).length, 2, 'the push wrote something, so the verdict is re-read')
+
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.failureClass, 'cast_not_ready')
+  assert.equal(circuit.failureCode, 'cast_precondition_failed')
+  assert.deepEqual(circuit.readiness.details.missing, ['GRUNER (voice)'])
+  assert.equal(h.creates.length, 0)
+  assert.equal(api.emails.length, 1)
+  assert.match(api.emails[0].subject, /cannot voice a table read/)
+  assert.match(api.emails[0].text, /Unvoiced: GRUNER \(voice\)/)
+  assert.match(api.emails[0].text, /Pin the voice in the cast canon/)
+})
+
+test('a canon push the Story API refuses is a cast_not_ready failure that names the refusal, never swallowed', async (t) => {
+  const h = harness({ topIds: [101] })
+  const api = canonStoryApi(t, h, {
+    patchRefusal: { status: 400, code: 'invalid_request', message: 'content.characters[0]: Unrecognized key "voiceProvider"' },
+  })
+
+  await reconcileNightlyBatch(h.env, '2026-09-29', { dependencies: h.dependencies })
+
+  assert.equal(api.requests.filter((request) => request.method === 'PATCH').length, 1)
+  assert.equal(projectReads(api).length, 1, 'nothing was written, so there is nothing to re-read')
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.failureClass, 'cast_not_ready')
+  assert.equal(circuit.failureCode, 'cast_canon_sync_refused')
+  assert.match(circuit.failureMessage,
+    /refused HNR's push of its pinned host voices to the cast canon \(400 invalid_request\): content\.characters\[0\]: Unrecognized key "voiceProvider"/)
+  assert.deepEqual(circuit.readiness.details.canonSync, { status: 400, code: 'invalid_request' })
+  assert.equal(classifySystemicFailure({ failureCode: circuit.failureCode }), 'cast_not_ready')
+  assert.equal(h.creates.length, 0)
+  assert.equal(api.emails.length, 1, 'the operator is told once')
+  assert.match(api.emails[0].text, /400 invalid_request/)
+})
+
+test('while the deploy gate is locked the tick makes no canon call at all', async (t) => {
+  const now = '2026-09-30T00:30:00.000Z'
+  const h = harness({ now, topIds: [101] })
+  const api = canonStoryApi(t, h)
+  h.settings.set(WORKFLOW_DEPLOY_GATE_KEY, { state: 'locked', runId: '123', expiresAt: '2026-09-30T01:00:00.000Z' })
+
+  const batches = await runNightlyReconciliation(h.env, { now: new Date(now), dependencies: h.dependencies })
+
+  assert.deepEqual(batches, [])
+  assert.deepEqual(api.requests, [], 'no read, no canon GET, no PATCH')
+  assert.equal(api.canon.content.characters[0].voiceId, undefined)
+
+  // Once the lock expires the same tick heals the canon.
+  h.settings.set(WORKFLOW_DEPLOY_GATE_KEY, { state: 'released' })
+  await runNightlyReconciliation(h.env, { now: new Date(now), dependencies: h.dependencies })
+  assert.equal(api.requests.filter((request) => request.method === 'PATCH').length, 1)
+})
+
+test('a canon that already carries every pinned voice is read, never written', async (t) => {
+  const h = harness({ topIds: [101] })
+  // The platform still refuses the read for a member HNR does not pin.
+  const api = canonStoryApi(t, h, {
+    canon: voicedCanon(),
+    extraMembers: [{ name: 'CALLER', narrator: false, ready: false, missing: ['voice'] }],
+  })
+
+  await reconcileNightlyBatch(h.env, '2026-09-29', { dependencies: h.dependencies })
+
+  assert.deepEqual(canonCalls(api).map((request) => request.method), ['GET'], 'one GET, no PATCH')
+  assert.equal(projectReads(api).length, 1, 'nothing was written, so no re-read')
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.failureClass, 'cast_not_ready')
+  assert.deepEqual(circuit.readiness.details.missing, ['CALLER (voice)'])
+  assert.equal(h.creates.length, 0)
+})
