@@ -47,12 +47,19 @@ jobs:
               expiresAt: process.argv[1],
             }))
           ' "$expires_at")
+          # An OWNER HOLD (a lock with no runId, e.g. a pause set by hand in D1) is never replaced:
+          # the deploy runs under it, and the release step below deletes only this run's own lock,
+          # so the hold survives the deploy. Replacing it here used to lift every pause on deploy.
+          # Only another run's lock, or a lock that is no longer active, is taken over.
           npx wrangler d1 execute DB --remote --command \
             "INSERT INTO settings (key, value, updated_at)
              VALUES ('workflowDeployGate', '$gate', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (key) DO UPDATE SET
                value = excluded.value,
-               updated_at = excluded.updated_at"
+               updated_at = excluded.updated_at
+             WHERE json_extract(settings.value, '$.runId') IS NOT NULL
+                OR json_extract(settings.value, '$.state') IS NOT 'locked'
+                OR json_extract(settings.value, '$.expiresAt') <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
       - name: Wait for every active Workflow instance
         shell: bash
         env:
