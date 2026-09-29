@@ -37,6 +37,9 @@
   "vars": {
     "SLEEPERHIT_API_BASE": "https://sleeperhit.studio",
     "HNRADIO_PROJECT_ID": "cmredn82g00f5i60609aaw3jq",
+    // HNR's own Sleeper Hit API key (named "hackernewsradio"), by id. The series'
+    // standing approval must be bound to exactly this key, or nothing spends.
+    "SLEEPERHIT_API_KEY_ID": "cmqfzqrd80001n02fpr9fnui0",
     // Nightly distress alerts (quota cliffs / repeated failures) go here via
     // Resend; RESEND_API_KEY is a wrangler secret on the same account the
     // platform uses (verified sender domain updates.sleeperhit.studio).
