@@ -170,9 +170,10 @@ export class SleeperHit {
    * source per (project, producer, externalId). A repeat submission of the same
    * thread returns the EXISTING source with `deduplicated: true` instead of a
    * second copy, so a retried episode reuses what the first attempt captured
-   * rather than paying to digest the same thread again. Returns plain data
-   * (it crosses a Workflow step boundary): the id, whether it was deduplicated,
-   * and the comment count that source was captured with.
+   * rather than paying to digest the same thread again. The platform answers
+   * `{ source, deduplicated }`. Returns plain data (it crosses a Workflow step
+   * boundary): the id, whether it was deduplicated, and what that source was
+   * captured with (its completeness proof and comment count).
    */
   async addTextSource(projectId, { content, label, metadata, producer, externalId, idempotencyKey }) {
     const res = await this.request(`/story-projects/${projectId}/sources`, {
@@ -187,11 +188,13 @@ export class SleeperHit {
       },
     })
     const source = res.source ?? {}
-    const fetched = source?.metadata?.sourceCompleteness?.comments?.fetched
+    const completeness = source?.metadata?.sourceCompleteness ?? null
+    const fetched = completeness?.comments?.fetched
     return {
       id: source.id,
-      deduplicated: res.deduplicated === true || source.deduplicated === true,
+      deduplicated: res.deduplicated === true,
       capturedComments: typeof fetched === 'number' && Number.isFinite(fetched) ? fetched : null,
+      sourceCompleteness: completeness,
       status: source.status ?? null,
     }
   }
@@ -260,10 +263,6 @@ export class SleeperHit {
       await sleep(3000)
     }
     throw new SleeperHitError('Plan generation timed out.')
-  }
-
-  async approvePlan(planId) {
-    await this.request(`/story-plans/${planId}/approve`, { method: 'POST', idempotencyKey: true, body: { userConfirmed: true } })
   }
 
   async resumePlan(planId, idempotencyKey) {
@@ -338,25 +337,53 @@ export class SleeperHit {
 
   // ── Podcast publishing ──────────────────────────────────────────────────────
 
-  /** Promote a finalized artifact into the series and queue immediate publish.
-   *  The series' public RSS feed picks it up (podcast apps poll the feed). */
+  /**
+   * Put a finalized artifact on the series' feed: ONE release per artifact.
+   *
+   * A release already published for the artifact is the answer (a lost
+   * progress note must not publish it twice). An open release created after
+   * the standing approval's `grantedAt` is reused. One created BEFORE the grant
+   * is not covered by it and could never publish unattended, so it is canceled
+   * rather than left stuck next to its replacement (how 160 releases sat
+   * 'ready' for weeks). Returns `{ releaseId, alreadyPublished }`.
+   */
   async publishEpisode(seriesId, {
     title,
     descriptionDirection,
     artifactId,
     seasonNumber = 1,
     idempotencyKeyPrefix,
+    grantedAt = null,
   }) {
-    const res = await this.request(`/publishing-series/${seriesId}/releases`, {
-      method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-release` : true,
-      body: {
-        title: title.slice(0, 200),
-        sourceArtifactId: artifactId,
-        type: 'episode',
-        seasonNumber,
-      },
-    })
-    const releaseId = (res.release ?? res).id
+    const grantedMs = Date.parse(grantedAt ?? '')
+    const existing = await this.listReleasesForArtifact(seriesId, artifactId)
+    const statusOf = (release) => String(release?.status || '').toLowerCase()
+    const published = existing.find((release) => statusOf(release) === 'published')
+    if (published) return { releaseId: published.id, alreadyPublished: true }
+    const open = existing.filter((release) => !['published', 'canceled'].includes(statusOf(release)))
+    const coveredByGrant = (release) => !Number.isFinite(grantedMs) || Date.parse(release?.createdAt ?? '') >= grantedMs
+    let release = open.find(coveredByGrant) ?? null
+    for (const stale of open) {
+      if (stale === release) continue
+      await this.request(`/publishing-releases/${encodeURIComponent(stale.id)}/cancel`, {
+        method: 'POST',
+        idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-cancel-${stale.id}` : true,
+        body: {},
+      })
+    }
+    if (!release) {
+      const res = await this.request(`/publishing-series/${seriesId}/releases`, {
+        method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-release` : true,
+        body: {
+          title: title.slice(0, 200),
+          sourceArtifactId: artifactId,
+          type: 'episode',
+          seasonNumber,
+        },
+      })
+      release = res.release ?? res
+    }
+    const releaseId = release.id
     await this.request(`/publishing-releases/${releaseId}/description/generate`, {
       method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-description` : true,
       body: { direction: descriptionDirection?.slice(0, 2_000) },
@@ -364,7 +391,19 @@ export class SleeperHit {
     await this.request(`/publishing-releases/${releaseId}/publish`, {
       method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-publish` : true, body: {},
     })
-    return releaseId
+    return { releaseId, alreadyPublished: false }
+  }
+
+  /** Every release of one artifact in the series, in any status. */
+  async listReleasesForArtifact(seriesId, artifactId) {
+    const releases = []
+    let cursor
+    do {
+      const page = await this.listPublishingReleases(seriesId, { limit: 100, cursor })
+      releases.push(...page.releases.filter((release) => release?.sourceArtifactId === artifactId))
+      cursor = page.nextCursor
+    } while (cursor)
+    return releases
   }
 
   async listPublishingReleases(seriesId, { status, limit = 100, cursor } = {}) {

@@ -33,6 +33,17 @@ function fakeD1({ episodes = [], settings = {} } = {}) {
       return {
         bind(...values) {
           return {
+            async all() {
+              if (q.startsWith('SELECT data FROM episodes WHERE hn_id')) {
+                const [hnId, mode, exceptId] = values
+                const results = [...rows.values()]
+                  .filter((row) => String(row.hnId) === hnId && (row.mode || 'podcast') === mode && row.id !== exceptId
+                    && ['queued', 'running'].includes(row.status))
+                  .map((row) => ({ data: JSON.stringify(row) }))
+                return { results }
+              }
+              throw new Error(`Unexpected D1 list: ${q}`)
+            },
             async first() {
               if (q.startsWith('SELECT data FROM episodes WHERE id')) {
                 const row = rows.get(values[0])
@@ -46,6 +57,12 @@ function fakeD1({ episodes = [], settings = {} } = {}) {
             async run() {
               if (q.startsWith('INSERT INTO episodes')) {
                 rows.set(values[0], JSON.parse(values[6]))
+                return { meta: { changes: 1 } }
+              }
+              if (q.startsWith('INSERT INTO settings') && q.includes('WHERE settings.value IS NULL')) {
+                // claimSetting: only an unset key is claimed.
+                if (store.has(values[0]) && store.get(values[0]) !== null) return { meta: { changes: 0 } }
+                store.set(values[0], JSON.parse(values[1]))
                 return { meta: { changes: 1 } }
               }
               if (q.startsWith('INSERT INTO settings')) {
@@ -122,13 +139,34 @@ function fakeNetwork(t, handler) {
 
 const refusal = (status, code, message, details) => [status, { error: { code, message, requestId: 'req_1', ...(details ? { details } : {}) } }]
 
+const KEY_ID = 'key_hnr'
+const GRANTED_AT = '2026-09-29T00:00:00.000Z'
+// The platform's (PR 6) series shape: the grant names the ONE key it is bound to.
+const GRANTED_SERIES = {
+  id: SERIES,
+  status: 'active',
+  medium: 'audio',
+  standingApproval: { apiKeyId: KEY_ID, apiKeyName: 'HNR', apiKeyStart: 'sh_te', grantedAt: GRANTED_AT, grantedBy: 'user_owner' },
+}
+
 function envFor(db, extra = {}) {
   return {
     DB: db,
     SLEEPERHIT_API_BASE: API,
     SLEEPERHIT_API_KEY: 'sh_test',
+    SLEEPERHIT_API_KEY_ID: KEY_ID,
     HNRADIO_PROJECT_ID: PROJECT,
     ...extra,
+  }
+}
+
+/** Answer the series read with `series` (the standing approval), and hand everything else on. */
+function underGrant(handler, series = GRANTED_SERIES) {
+  return (request, requests) => {
+    if (request.method === 'GET' && request.path === `/publishing-series/${SERIES}`) {
+      return typeof series === 'function' ? series(request, requests) : [200, { series }]
+    }
+    return handler(request, requests)
   }
 }
 
@@ -203,8 +241,8 @@ function newEpisode(id = 'drama_1') {
 }
 
 test('a new episode writes the canon voices, sends the thread identity, reuses a captured source, and STOPS on a typed 409', async (t) => {
-  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED } })
-  const net = fakeNetwork(t, (request) => {
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant((request) => {
     if (request.method === 'GET' && request.path === `/story-projects/${PROJECT}/cast-canon`) return [200, FACES_ONLY_CANON]
     if (request.method === 'PATCH' && request.path === `/story-projects/${PROJECT}/cast-canon`) return [200, { canon: {} }]
     if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/sources`) {
@@ -216,12 +254,13 @@ test('a new episode writes the canon voices, sends the thread identity, reuses a
     if (request.path === `/story-projects/${PROJECT}/sources/source_first`) return [200, { source: { id: 'source_first', status: 'READY' } }]
     if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/story-plans`) return GATE_REFUSAL
     throw new Error(`unexpected ${request.method} ${request.path}`)
-  })
+  }))
 
   const { error } = await runPipeline(envFor(db), { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' },
     cloudflareStep({ 'fetch complete thread': completeThread('42', 50) }))
 
   assert.ok(error, 'the refusal ends the run')
+  assert.equal(net.requests[0].path, `/publishing-series/${SERIES}`, 'the grant is read before anything is spent')
 
   // Cast canon: the hosts' voices, only keys the strict schema accepts, and
   // never the portrait-style key that 400'd every PATCH since 07-15.
@@ -254,16 +293,20 @@ test('a new episode writes the canon voices, sends the thread identity, reuses a
   assert.equal(drama.failureCode, 'project_precondition_failed', 'the code survives the step boundary')
   assert.equal(drama.sourceId, 'source_first')
   assert.equal(drama.sourceDeduplicated, true)
+  // The row records what the episode is written FROM: the reused capture.
+  assert.deepEqual(drama.sourceCompleteness, { comments: { fetched: 48 } })
+  assert.equal(drama.commentCount, 48)
+  assert.ok(Number.isFinite(Date.parse(drama.failedAt)), 'the failure is stamped for the nightly')
   assert.ok(drama.progress.some((p) => /Reusing the source already captured for HN thread 42 \(48 comments\)/.test(p.message)))
 })
 
 test('a cast canon refusal fails the episode instead of being swallowed', async (t) => {
-  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED } })
-  const net = fakeNetwork(t, (request) => {
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant((request) => {
     if (request.method === 'GET' && request.path.endsWith('/cast-canon')) return [200, FACES_ONLY_CANON]
     if (request.method === 'PATCH') return refusal(400, 'validation_failed', 'Invalid key in record: avatarStyle')
     throw new Error(`unexpected ${request.method} ${request.path}`)
-  })
+  }))
 
   const { error } = await runPipeline(envFor(db), { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' },
     cloudflareStep({ 'fetch complete thread': completeThread('42', 50) }))
@@ -276,10 +319,14 @@ test('a cast canon refusal fails the episode instead of being swallowed', async 
   assert.equal(drama.failureCode, 'validation_failed')
 })
 
+const CURRENT_CANON = [200, { canon: { content: { characters: Object.entries(PINNED).map(([name, v]) => ({
+  name, avatarUrl: `https://hnradio.net/avatars/${name.toLowerCase()}.png`, voiceId: v.voiceId, voiceProvider: v.provider,
+})) } } }]
+
 test('a thread that grew after a failed-before-plan attempt is recaptured: DELETE, then a fresh POST', async (t) => {
-  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED } })
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
   let posts = 0
-  const net = fakeNetwork(t, (request) => {
+  const net = fakeNetwork(t, underGrant((request) => {
     if (request.method === 'GET' && request.path.endsWith('/cast-canon')) {
       return [200, { canon: { content: { characters: Object.entries(PINNED).map(([name, v]) => ({
         name, avatarUrl: `https://hnradio.net/avatars/${name.toLowerCase()}.png`, voiceId: v.voiceId, voiceProvider: v.provider,
@@ -295,7 +342,7 @@ test('a thread that grew after a failed-before-plan attempt is recaptured: DELET
     if (request.path.startsWith(`/story-projects/${PROJECT}/sources/`)) return [200, { source: { status: 'READY' } }]
     if (request.path === `/story-projects/${PROJECT}/story-plans`) return GATE_REFUSAL
     throw new Error(`unexpected ${request.method} ${request.path}`)
-  })
+  }))
 
   await runPipeline(envFor(db), {
     dramaId: 'drama_1',
@@ -308,7 +355,34 @@ test('a thread that grew after a failed-before-plan attempt is recaptured: DELET
   assert.deepEqual(deletes.map((r) => r.path), [`/story-projects/${PROJECT}/sources/source_stale`])
   const uploads = net.requests.filter((r) => r.method === 'POST' && r.path === `/story-projects/${PROJECT}/sources`)
   assert.deepEqual(uploads.map((r) => r.key), ['drama_1-source', 'drama_1-source-recapture'])
-  assert.equal(db.rows.get('drama_1').sourceId, 'source_fresh')
+  const drama = db.rows.get('drama_1')
+  assert.equal(drama.sourceId, 'source_fresh')
+  assert.equal(drama.sourceCompleteness.comments.fetched, 50, 'a recapture records the thread fetched this run')
+})
+
+test('a stale capture is never retired while another episode of the thread is in flight', async (t) => {
+  const sibling = { ...newEpisode('drama_visitor'), status: 'running', createdAt: '2026-09-29T00:05:00.000Z' }
+  const db = fakeD1({ episodes: [newEpisode(), sibling], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant((request) => {
+    if (request.method === 'GET' && request.path.endsWith('/cast-canon')) return CURRENT_CANON
+    if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/sources`) {
+      return [200, { deduplicated: true, source: { id: 'source_shared', status: 'READY', metadata: { sourceCompleteness: { comments: { fetched: 20 } } } } }]
+    }
+    if (request.path.startsWith(`/story-projects/${PROJECT}/sources/`)) return [200, { source: { status: 'READY' } }]
+    if (request.path === `/story-projects/${PROJECT}/story-plans`) return GATE_REFUSAL
+    throw new Error(`unexpected ${request.method} ${request.path}`)
+  }))
+
+  await runPipeline(envFor(db), {
+    dramaId: 'drama_1',
+    url: 'https://news.ycombinator.com/item?id=42',
+    sourceRecapture: { previousCommentCount: 20 },
+  }, cloudflareStep({ 'fetch complete thread': completeThread('42', 50) }))
+
+  assert.equal(net.requests.some((r) => r.method === 'DELETE'), false, 'the visitor episode may be planning from it')
+  const drama = db.rows.get('drama_1')
+  assert.equal(drama.sourceId, 'source_shared')
+  assert.ok(drama.progress.some((p) => /drama_visitor of this thread is in flight/.test(p.message)))
 })
 
 function recoveredEpisode(extra = {}) {
@@ -320,16 +394,16 @@ function recoveredEpisode(extra = {}) {
 }
 
 test('a 402 on the job stops the run and keeps the exact request; the recovery re-sends the SAME key and body', async (t) => {
-  const db = fakeD1({ episodes: [recoveredEpisode()], settings: { pinnedVoices: PINNED } })
-  const net = fakeNetwork(t, (request) => {
+  const db = fakeD1({ episodes: [recoveredEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant((request) => {
     if (request.path === '/story-plans/plan_1/resume') return [200, { plan: { id: 'plan_1', status: 'APPROVED' } }]
     if (request.path === '/story-plans/plan_1') return [200, { plan: { id: 'plan_1', status: 'APPROVED' } }]
     if (request.path === '/story-jobs') {
-      return refusal(402, 'insufficient_credits', 'Not enough Studio Credits. This job needs 20 credits; you have 4.',
-        { required: 20, available: 4, jobId: null })
+      return refusal(402, 'insufficient_credits', 'Not enough Studio Credits. This job needs 30 credits; you have 4.',
+        { required: 30, available: 4, jobId: null })
     }
     throw new Error(`unexpected ${request.method} ${request.path}`)
-  })
+  }))
 
   const first = await runPipeline(envFor(db), {
     dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42', resumePlanId: 'plan_1', recoveryRunId: 'rec_1',
@@ -342,6 +416,7 @@ test('a 402 on the job stops the run and keeps the exact request; the recovery r
   assert.equal(drama.failureCode, 'insufficient_credits')
   assert.equal(drama.pendingJob.key, 'drama_1-recovery-rec_1-job-r1-j0')
   assert.equal(drama.pendingJob.planId, 'plan_1')
+  assert.equal(drama.pendingJob.required, 30, 'what THIS job costs, for the nightly\'s credit floor')
   assert.deepEqual(drama.pendingJob.body, jobs[0].body)
 
   // The recovery after a top-up: a NEW run id, the SAME job request.
@@ -358,27 +433,110 @@ test('a 402 on the job stops the run and keeps the exact request; the recovery r
   assert.deepEqual(resent[1].body, resent[0].body, 'the body is replayed verbatim, so the key cannot conflict')
 })
 
-for (const [label, series, expected] of [
-  ['under the series\' standing approval, plan approval claims no human confirmation', { id: SERIES, standingApproval: { keyId: 'key_hnr', grantedAt: '2026-09-29T00:00:00.000Z' } }, {}],
-  ['without a reported grant, plan approval keeps its confirmation', { id: SERIES }, { userConfirmed: true }],
-]) {
-  test(label, async (t) => {
-    const db = fakeD1({ episodes: [recoveredEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
-    const net = fakeNetwork(t, (request) => {
-      if (request.path === '/story-plans/plan_1/resume') return [200, { plan: { id: 'plan_1', status: 'REQUIRES_APPROVAL' } }]
-      if (request.path === '/story-plans/plan_1') return [200, { plan: { id: 'plan_1', status: 'REQUIRES_APPROVAL' } }]
-      if (request.path === `/publishing-series/${SERIES}`) return [200, { series }]
-      if (request.path === '/story-plans/plan_1/approve') return [200, { plan: { id: 'plan_1', status: 'APPROVED' } }]
-      if (request.path === '/story-jobs') return refusal(402, 'insufficient_credits', 'Not enough Studio Credits.')
-      throw new Error(`unexpected ${request.method} ${request.path}`)
-    })
-    await runPipeline(envFor(db), {
-      dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42', resumePlanId: 'plan_1', recoveryRunId: 'rec_1',
-    })
-    const approve = net.requests.find((r) => r.path === '/story-plans/plan_1/approve')
-    assert.deepEqual(approve.body, expected)
-  })
+function approvalRoutes({ approveSeries = GRANTED_SERIES } = {}) {
+  return (request) => {
+    if (request.path === '/story-plans/plan_1/resume') return [200, { plan: { id: 'plan_1', status: 'REQUIRES_APPROVAL' } }]
+    if (request.path === '/story-plans/plan_1') return [200, { plan: { id: 'plan_1', status: 'REQUIRES_APPROVAL' } }]
+    if (request.path === '/story-plans/plan_1/approve') return [200, { plan: { id: 'plan_1', status: 'APPROVED' } }]
+    if (request.path === '/story-jobs') return refusal(402, 'insufficient_credits', 'Not enough Studio Credits.')
+    throw new Error(`unexpected ${request.method} ${request.path}`)
+  }
 }
+
+test('under the series\' standing approval, plan approval claims no human confirmation', async (t) => {
+  const db = fakeD1({ episodes: [recoveredEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant(approvalRoutes()))
+  await runPipeline(envFor(db), {
+    dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42', resumePlanId: 'plan_1', recoveryRunId: 'rec_1',
+  })
+  const approve = net.requests.find((r) => r.path === '/story-plans/plan_1/approve')
+  assert.deepEqual(approve.body, {}, 'the grant is the approval')
+  const seriesReads = net.requests.filter((r) => r.path === `/publishing-series/${SERIES}`)
+  assert.equal(seriesReads.length, 2, 'read before spending, and again at the moment of approval')
+})
+
+// Every way the grant can fail to cover HNR. None of them approves, and none
+// of them spends: no source, no plan, no approve, no job.
+for (const [label, series, settings, env, code] of [
+  ['the platform does not report a grant', [200, { series: { id: SERIES, status: 'active', medium: 'audio' } }], {}, {}, 'standing_approval_unavailable'],
+  ['the grant was revoked (null)', [200, { series: { ...GRANTED_SERIES, standingApproval: null } }], {}, {}, 'standing_approval_missing'],
+  ['the grant is bound to another key', [200, { series: { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, apiKeyId: 'key_other' } } }], {}, {}, 'standing_approval_other_key'],
+  ['only the built-in runner holds the grant', [200, { series: { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, apiKeyId: null } } }], {}, {}, 'standing_approval_other_key'],
+  ['the series is paused', [200, { series: { ...GRANTED_SERIES, status: 'paused' } }], {}, {}, 'standing_approval_inactive'],
+  ['the series read is refused', refusal(403, 'insufficient_scope', 'Missing publishing:read'), {}, {}, 'standing_approval_unreadable'],
+  ['the series cannot be read at all', [503, { error: { message: 'Service Unavailable' } }], {}, {}, 'standing_approval_unreadable'],
+  ['HNR does not know its own key id', [200, { series: GRANTED_SERIES }], {}, { SLEEPERHIT_API_KEY_ID: '' }, 'standing_approval_unverifiable'],
+  ['no publishing series is configured', [200, { series: GRANTED_SERIES }], { publishingSeriesId: null }, {}, 'publishing_series_missing'],
+]) {
+  for (const [kind, payload] of [
+    ['a new episode', { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' }],
+    ['a plan recovery', { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42', resumePlanId: 'plan_1', recoveryRunId: 'rec_1' }],
+  ]) {
+    test(`${label}: ${kind} stops before spending — no source, plan, approve or job`, async (t) => {
+      const episode = payload.resumePlanId ? recoveredEpisode() : newEpisode()
+      const db = fakeD1({ episodes: [episode], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES, ...settings } })
+      const net = fakeNetwork(t, underGrant(() => { throw new Error('nothing but the series read may be called') }, () => series))
+
+      const { error } = await runPipeline(envFor(db, env), payload,
+        cloudflareStep({ 'fetch complete thread': completeThread('42', 50) }))
+
+      assert.ok(error, 'the run stops')
+      assert.equal(net.requests.every((r) => r.method === 'GET' && r.path === `/publishing-series/${SERIES}`), true,
+        `only the grant was read: ${net.requests.map((r) => `${r.method} ${r.path}`).join(', ')}`)
+      const drama = db.rows.get('drama_1')
+      assert.equal(drama.status, 'failed')
+      assert.equal(drama.failureClass, 'approval_missing')
+      assert.equal(drama.failureCode, code)
+    })
+  }
+}
+
+test('a grant revoked while the plan was generating stops at approval: no approve, no job', async (t) => {
+  const db = fakeD1({ episodes: [recoveredEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  let reads = 0
+  const net = fakeNetwork(t, underGrant(approvalRoutes(), () => {
+    reads++
+    return [200, { series: reads === 1 ? GRANTED_SERIES : { ...GRANTED_SERIES, standingApproval: null } }]
+  }))
+  const { error } = await runPipeline(envFor(db), {
+    dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42', resumePlanId: 'plan_1', recoveryRunId: 'rec_1',
+  })
+  assert.match(error?.message || '', /standing approval/)
+  assert.equal(net.requests.some((r) => r.path.endsWith('/approve')), false)
+  assert.equal(net.requests.some((r) => r.path === '/story-jobs'), false)
+  assert.equal(db.rows.get('drama_1').failureClass, 'approval_missing')
+})
+
+test('a typed 4xx on plan creation stops the run: a fresh plan earns the same refusal', async (t) => {
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant((request) => {
+    if (request.method === 'GET' && request.path.endsWith('/cast-canon')) return CURRENT_CANON
+    if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/sources`) return [200, { source: { id: 'source_1', status: 'READY' } }]
+    if (request.path.startsWith(`/story-projects/${PROJECT}/sources/`)) return [200, { source: { status: 'READY' } }]
+    if (request.path === `/story-projects/${PROJECT}/story-plans`) return refusal(400, 'validation_failed', '`title` must be 200 characters or fewer.')
+    throw new Error(`unexpected ${request.method} ${request.path}`)
+  }))
+  const { error } = await runPipeline(envFor(db), { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' },
+    cloudflareStep({ 'fetch complete thread': completeThread('42', 50) }))
+  assert.match(error?.message || '', /200 characters/)
+  assert.equal(net.requests.filter((r) => r.path === `/story-projects/${PROJECT}/story-plans`).length, 1, 'not re-planned four times')
+})
+
+test('a typed 4xx on job creation stops the run: another job earns the same refusal', async (t) => {
+  const db = fakeD1({ episodes: [recoveredEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant((request) => {
+    if (request.path === '/story-plans/plan_1/resume') return [200, { plan: { id: 'plan_1', status: 'APPROVED' } }]
+    if (request.path === '/story-plans/plan_1') return [200, { plan: { id: 'plan_1', status: 'APPROVED' } }]
+    if (request.path === '/story-jobs') return refusal(409, 'story_plan_state_invalid', 'Story plan must be APPROVED before a job starts.')
+    throw new Error(`unexpected ${request.method} ${request.path}`)
+  }))
+  const { error } = await runPipeline(envFor(db), {
+    dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42', resumePlanId: 'plan_1', recoveryRunId: 'rec_1',
+  })
+  assert.match(error?.message || '', /must be APPROVED/)
+  assert.equal(net.requests.filter((r) => r.path === '/story-jobs').length, 1, 'not three job attempts')
+  assert.equal(db.rows.get('drama_1').failureCode, 'story_plan_state_invalid')
+})
 
 function finishedEpisode(extra = {}) {
   return {
@@ -388,8 +546,6 @@ function finishedEpisode(extra = {}) {
   }
 }
 
-const GRANTED_SERIES = { id: SERIES, standingApproval: { keyId: 'key_hnr', grantedAt: '2026-09-29T00:00:00.000Z' } }
-
 test('publish-only under the standing approval publishes with no confirmation claim and never re-finalizes', async (t) => {
   const db = fakeD1({
     episodes: [finishedEpisode()],
@@ -397,6 +553,7 @@ test('publish-only under the standing approval publishes with no confirmation cl
   })
   const net = fakeNetwork(t, (request) => {
     if (request.path === `/publishing-series/${SERIES}`) return [200, { series: GRANTED_SERIES }]
+    if (request.path === `/publishing-series/${SERIES}/releases?limit=100`) return [200, { releases: [], nextCursor: null }]
     if (request.path === `/publishing-series/${SERIES}/releases`) return [200, { release: { id: 'release_1' } }]
     if (request.path === '/publishing-releases/release_1/description/generate') return [200, {}]
     if (request.path === '/publishing-releases/release_1/publish') return [200, { release: { id: 'release_1', status: 'published' } }]
@@ -410,6 +567,7 @@ test('publish-only under the standing approval publishes with no confirmation cl
   assert.equal(error, null)
   assert.deepEqual(net.requests.map((r) => `${r.method} ${r.path}`), [
     `GET /publishing-series/${SERIES}`,
+    `GET /publishing-series/${SERIES}/releases?limit=100`,
     `POST /publishing-series/${SERIES}/releases`,
     'POST /publishing-releases/release_1/description/generate',
     'POST /publishing-releases/release_1/publish',
@@ -417,7 +575,7 @@ test('publish-only under the standing approval publishes with no confirmation cl
   const publish = net.requests.at(-1)
   assert.deepEqual(publish.body, {}, 'no userConfirmed: the grant is the approval')
   const grantScope = `g${Date.parse('2026-09-29T00:00:00.000Z').toString(36)}`
-  assert.equal(net.requests[1].key, `drama_1-publish-${grantScope}-release`)
+  assert.equal(net.requests[2].key, `drama_1-publish-${grantScope}-release`)
   const drama = db.rows.get('drama_1')
   assert.equal(drama.status, 'ready')
   assert.equal(drama.publishState, 'published')
@@ -450,6 +608,7 @@ test('a feed refusal under the grant is recorded with its code, not swallowed', 
   const db = fakeD1({ episodes: [finishedEpisode()], settings: { publishingSeriesId: SERIES } })
   fakeNetwork(t, (request) => {
     if (request.path === `/publishing-series/${SERIES}`) return [200, { series: GRANTED_SERIES }]
+    if (request.path === `/publishing-series/${SERIES}/releases?limit=100`) return [200, { releases: [], nextCursor: null }]
     if (request.path === `/publishing-series/${SERIES}/releases`) return [200, { release: { id: 'release_1' } }]
     if (request.path === '/publishing-releases/release_1/description/generate') return [200, {}]
     if (request.path === '/publishing-releases/release_1/publish') {
@@ -469,4 +628,26 @@ test('a feed refusal under the grant is recorded with its code, not swallowed', 
   assert.equal(drama.publishFailureCode, 'validation_failed')
   assert.match(drama.publishError, /userConfirmed/)
   assert.ok(drama.progress.some((p) => /Podcast publish blocked/.test(p.message)))
+})
+
+test('a lost "published" note never publishes twice: the release already on the feed is recorded', async (t) => {
+  const db = fakeD1({ episodes: [finishedEpisode()], settings: { publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, (request) => {
+    if (request.path === `/publishing-series/${SERIES}`) return [200, { series: GRANTED_SERIES }]
+    if (request.path === `/publishing-series/${SERIES}/releases?limit=100`) {
+      return [200, { releases: [{ id: 'release_live', sourceArtifactId: 'artifact_1', status: 'published', createdAt: GRANTED_AT }], nextCursor: null }]
+    }
+    throw new Error(`unexpected ${request.method} ${request.path}`)
+  })
+
+  const { error } = await runPipeline(envFor(db), {
+    dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42', publishOnly: true, publishRunId: 'pub_1',
+  })
+
+  assert.equal(error, null)
+  assert.equal(net.requests.some((r) => r.method === 'POST'), false, 'no second release, no second publish')
+  const drama = db.rows.get('drama_1')
+  assert.equal(drama.publishState, 'published')
+  assert.equal(drama.releaseId, 'release_live')
+  assert.ok(drama.progress.some((p) => p.message === PUBLISHED_PROGRESS_MESSAGE))
 })

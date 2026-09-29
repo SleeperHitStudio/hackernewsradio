@@ -136,8 +136,14 @@ export class SleeperHit {
     throw new SleeperHitError('Plan generation timed out.')
   }
 
+  /**
+   * Approve with NO confirmation claim. Nobody is asked here, so `userConfirmed`
+   * would be a fabrication: the platform approves only when the series'
+   * standing approval covers this API key, and refuses otherwise (the run then
+   * fails with that refusal, visibly). Same rule as the Worker.
+   */
   async approvePlan(planId) {
-    await this.request(`/story-plans/${planId}/approve`, { method: 'POST', idempotencyKey: true, body: { userConfirmed: true } })
+    await this.request(`/story-plans/${planId}/approve`, { method: 'POST', idempotencyKey: true, body: {} })
   }
 
   /** artifactRequests OVERRIDE the plan's own requests on the job — this is

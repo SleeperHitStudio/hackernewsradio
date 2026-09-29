@@ -37,14 +37,20 @@ export async function sendOperatorAlert(env, { subject, lines }) {
 }
 
 /**
- * Email once per latch. The latch is written only after Resend accepts the
- * message, so a failed send is retried on the next observation.
+ * Email once per latch. The latch is CLAIMED atomically before the send (two
+ * concurrent publish runs cannot both win it), and released again when Resend
+ * does not accept the message, so a failed send is retried on the next
+ * observation.
  */
-export async function alertOnce(env, key, { subject, lines }, { getSetting, setSetting, now = () => new Date() }) {
+export async function alertOnce(env, key, { subject, lines }, { claimSetting, setSetting, now = () => new Date() }) {
   if (!alertsConfigured(env)) return false
-  if (await getSetting(env.DB, key)) return false
+  const claimed = await claimSetting(env.DB, key, { claimedAt: now().toISOString(), subject })
+  if (!claimed) return false
   const sent = await sendOperatorAlert(env, { subject, lines })
-  if (!sent) return false
+  if (!sent) {
+    await setSetting(env.DB, key, null)
+    return false
+  }
   await setSetting(env.DB, key, { sentAt: now().toISOString(), subject })
   return true
 }

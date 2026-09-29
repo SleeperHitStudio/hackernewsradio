@@ -24,6 +24,8 @@ import {
   activeWorkflowDeployGate,
   workflowDeployRetryAfterSeconds,
 } from '../worker/deploy-gate.mjs'
+import { readReadiness } from '../worker/readiness.mjs'
+import { SleeperHitError } from '../worker/sleeperhit.mjs'
 
 function harness({
   settings = new Map(),
@@ -615,7 +617,7 @@ test('a previously published slot is revalidated before batch completion', async
   assert.equal(reconciled.published, 0)
 })
 
-test('a quota-class failure opens the circuit, then retries the same job on the hourly probe', async () => {
+test('a provider quota cliff opens an episode-probed circuit, then retries the same job on the hourly probe', async () => {
   const h = harness({ topIds: [] })
   const date = '2026-07-17'
   h.dramas.set('episode_quota', {
@@ -648,9 +650,12 @@ test('a quota-class failure opens the circuit, then retries the same job on the 
   let item = batch.items[0]
   assert.equal(item.status, 'blocked')
   assert.equal(item.attempt, 3, 'quota failures must not consume the attempt budget')
-  assert.ok(item.quotaBlockedAt)
+  assert.ok(item.providerQuotaBlockedAt)
+  assert.equal(item.quotaBlockedAt, undefined, 'OpenRouter\'s balance is not Studio Credits')
   assert.equal(h.creates.length, 0, 'opening the circuit does not fan out immediately')
-  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).failureClass, 'quota')
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.failureClass, 'provider_quota')
+  assert.equal(circuit.probe, 'episode')
 
   h.clock.now = new Date(h.clock.now.getTime() + NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS)
   batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
@@ -934,7 +939,7 @@ test('a quota-blocked batch emails the operator exactly once', async (t) => {
   seed()
   await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
   assert.equal(emails.length, 1)
-  assert.match(emails[0].body.subject, /quota cliff/)
+  assert.match(emails[0].body.subject, /provider quota cliff/)
   assert.deepEqual(emails[0].body.to, ['ops@example.com'])
 
   await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
@@ -1650,7 +1655,7 @@ test('a failure that never reached an episode still classifies from the item', a
 
   const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
   assert.ok(circuit, 'with no episode row, the item is the only signal and must still count')
-  assert.equal(circuit.failureClass, 'quota')
+  assert.equal(circuit.failureClass, 'provider_quota')
 })
 
 // ── Readiness preflight (H-B), publish-only recovery (H-A), new classes ─────
@@ -1677,7 +1682,8 @@ function countingSelection(h) {
   return counts
 }
 
-const READY_PUBLISHING = { state: 'granted', code: null, reason: null }
+const READY_PUBLISHING = { state: 'granted', code: null, reason: null, grant: { keyId: 'key_hnr', grantedAt: '2026-07-01T00:00:00.000Z' } }
+const ALL_MEASURED = ['access', 'project_not_ready', 'cast_not_ready', 'approval_missing', 'quota']
 const notReady = (failureClass, extra = {}) => ({
   checked: true,
   ready: false,
@@ -1685,15 +1691,19 @@ const notReady = (failureClass, extra = {}) => ({
   code: { project_not_ready: 'project_precondition_failed', cast_not_ready: 'cast_precondition_failed', quota: 'insufficient_credits' }[failureClass],
   message: `not ready: ${failureClass}`,
   details: failureClass === 'project_not_ready' ? { stage: 'full_coverage', missingFields: [] } : {},
+  measured: ALL_MEASURED,
+  balance: 500,
   publishing: READY_PUBLISHING,
   ...extra,
 })
-const ready = (extra = {}) => ({ checked: true, ready: true, failureClass: null, publishing: READY_PUBLISHING, ...extra })
+const ready = (extra = {}) => ({
+  checked: true, ready: true, failureClass: null, measured: ALL_MEASURED, balance: 500, publishing: READY_PUBLISHING, ...extra,
+})
 
 for (const [failureClass, subject] of [
   ['project_not_ready', /has not finished a development stage/],
   ['cast_not_ready', /cannot voice a table read/],
-  ['quota', /quota cliff/],
+  ['quota', /out of Studio Credits/],
 ]) {
   test(`a ${failureClass} preflight stops the show before anything is fetched, and alerts once`, async (t) => {
     const h = harness({ topIds: [101, 102] })
@@ -1752,6 +1762,7 @@ test('a passing read closes a readiness circuit and re-sends the job a 402 refus
   })
   h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
     state: 'open',
+    probe: 'read',
     failureClass: 'quota',
     failureMessage: 'Not enough Studio Credits.',
     openedAt: '2026-07-16T04:00:00.000Z',
@@ -1977,3 +1988,333 @@ test('a held episode stops keeping its night alive after the hold window', async
   assert.equal(batch.status, 'superseded', 'old nights are not walked forever while the feed is blocked')
   assert.equal(h.creates.length, 0)
 })
+
+// ── The preflight through the REAL readReadiness, against a fake Story API ──
+//
+// These drive `readReadiness` itself (not a stub of its result), so they hold
+// the nightly to what the platform actually answers.
+
+const HNR_KEY_ID = 'key_hnr'
+const SERIES_ID = 'series_hnr'
+const PASSING_GATE = { ready: true, stage: 'ready', reason: null, missingFields: [], canPlan: true, canStartEpisode: true }
+const GRANTED_SERIES = {
+  id: SERIES_ID,
+  status: 'active',
+  medium: 'audio',
+  standingApproval: { apiKeyId: HNR_KEY_ID, apiKeyName: 'HNR', apiKeyStart: 'sh_hn', grantedAt: '2026-07-01T00:00:00.000Z', grantedBy: 'owner' },
+}
+
+/** A live, mutable platform: flip its fields between ticks. */
+function platform(h, overrides = {}) {
+  const state = {
+    project: { id: 'p', workspaceGate: PASSING_GATE },
+    credits: { balance: 500 },
+    series: GRANTED_SERIES,
+    projectError: null,
+    seriesError: null,
+    reads: [],
+    ...overrides,
+  }
+  h.settings.set('publishingSeriesId', SERIES_ID)
+  h.dependencies.readReadiness = async (_env, { seriesId, minCredits } = {}) => {
+    state.reads.push({ seriesId, minCredits })
+    return readReadiness({
+      async getProject() {
+        if (state.projectError) throw state.projectError
+        return state.project
+      },
+      async getCredits() { return state.credits },
+      async getPublishingSeries() {
+        if (state.seriesError) throw state.seriesError
+        return state.series
+      },
+    }, { projectId: 'p', seriesId, keyId: HNR_KEY_ID, minCredits })
+  }
+  return state
+}
+
+const hour = (h, n = 1) => { h.clock.now = new Date(h.clock.now.getTime() + n * NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS) }
+
+// MUST FIX 1: the grant gates SPENDING, not just publishing.
+for (const [label, series, seriesError, code] of [
+  ['revoked (the platform reports null)', { ...GRANTED_SERIES, standingApproval: null }, null, 'standing_approval_missing'],
+  ['bound to another key', { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, apiKeyId: 'key_other' } }, null, 'standing_approval_other_key'],
+  ['not reported by the platform', { id: SERIES_ID, status: 'active', medium: 'audio' }, null, 'standing_approval_unavailable'],
+  ['unreadable (403)', null, new SleeperHitError('Missing publishing:read', { status: 403, code: 'insufficient_scope' }), 'standing_approval_unreadable'],
+]) {
+  test(`a grant that is ${label} starts no episode Workflow, opens the circuit, and alerts once`, async (t) => {
+    const h = harness({ topIds: [101, 102] })
+    const emails = withAlerts(t, h)
+    const selection = countingSelection(h)
+    platform(h, { series, seriesError })
+    const date = '2026-09-29'
+
+    for (let tick = 0; tick < 4; tick++) {
+      await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+      hour(h)
+    }
+
+    assert.equal(h.creates.length, 0, 'no episode Workflow: nothing is uploaded, planned, approved or bought')
+    assert.deepEqual(selection, { fetchJson: 0, fetchThread: 0 })
+    const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+    assert.equal(circuit.failureClass, 'approval_missing')
+    assert.equal(circuit.failureCode, code)
+    assert.equal(circuit.probe, 'read')
+    assert.equal(emails.length, 1, 'one email per outage')
+    assert.match(emails[0].subject, /no standing approval/)
+  })
+}
+
+test('a readiness result that is ready but reports no grant is still not permission to spend', async (t) => {
+  const h = harness({ topIds: [101] })
+  const emails = withAlerts(t, h)
+  h.dependencies.readReadiness = async () => ready({
+    publishing: { state: 'blocked', code: 'standing_approval_missing', reason: 'The HNR series has no standing approval.' },
+  })
+  await reconcileNightlyBatch(h.env, '2026-09-29', { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 0)
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).failureClass, 'approval_missing')
+  assert.equal(emails.length, 1)
+})
+
+test('a re-grant closes the approval circuit on the next read and the show resumes', async () => {
+  const h = harness({ topIds: [101] })
+  const api = platform(h, { series: { ...GRANTED_SERIES, standingApproval: null } })
+  const date = '2026-09-29'
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 0)
+
+  api.series = GRANTED_SERIES
+  hour(h)
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY), null)
+  assert.equal(h.creates.length, 1, 'one serialized episode starts')
+})
+
+// MUST FIX 2: a passing read clears only what it measures, and only a failure
+// it saw after the episode failed.
+
+function failedEpisodeBatch(h, date, drama, itemExtra = {}) {
+  h.dramas.set(drama.id, {
+    hnId: '77', status: 'failed', url: 'https://news.ycombinator.com/item?id=77', progress: [], ...drama,
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date, status: 'running', target: 5, errors: [],
+    items: [{
+      hnId: '77', url: 'https://news.ycombinator.com/item?id=77', title: 'Story 77',
+      episodeId: drama.id, workflowId: drama.id, attempt: 1, recoveryAttempts: 0, status: 'failed', ...itemExtra,
+    }],
+  })
+  h.workflowStatuses.set(drama.id, 'errored')
+}
+
+/** Re-fail whatever Workflow the nightly just started for the episode. */
+function failAgain(h, dramaId, patch) {
+  const created = h.creates.at(-1)
+  if (created) h.workflowStatuses.set(created.id, 'errored')
+  h.dramas.set(dramaId, { ...h.dramas.get(dramaId), status: 'failed', ...patch, failedAt: h.clock.now.toISOString() })
+}
+
+for (const [label, drama, blockedAt, subject, expectedClass] of [
+  ['a cast refusal the read cannot measure (no tableReadReadiness)', {
+    failureCode: 'cast_precondition_failed',
+    failureMessage: 'Finalize the episode screenplay and complete its Cast before starting Table Read.',
+    planId: 'plan_77',
+  }, 'castBlockedAt', /cannot voice a table read/, 'cast_not_ready'],
+  ['a provider quota cliff the credit read cannot see', {
+    failureMessage: 'You exceeded your current quota, please check your plan and billing details.',
+    jobId: 'job_77', planId: 'plan_77',
+  }, 'providerQuotaBlockedAt', /provider quota cliff/, 'provider_quota'],
+]) {
+  test(`${label} reaches a circuit and an alert, never an hourly resume loop`, async (t) => {
+    const h = harness({ topIds: [] })
+    const emails = withAlerts(t, h)
+    platform(h)
+    const date = '2026-09-29'
+    failedEpisodeBatch(h, date, { id: 'episode_77', failedAt: '2026-07-16T05:30:00.000Z', ...drama })
+
+    let batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+    assert.equal(h.creates.length, 0, 'the read passed, but it cannot vouch for this failure')
+    assert.equal(batch.items[0].status, 'blocked')
+    assert.ok(batch.items[0][blockedAt])
+    const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+    assert.equal(circuit.failureClass, expectedClass)
+    assert.equal(circuit.probe, 'episode', 'probed by resuming the stopped episode, never by the read')
+    assert.equal(emails.length, 1)
+    assert.match(emails[0].subject, subject)
+
+    // Four hours of the same refusal: the probe is rate-limited, the circuit
+    // stays open, and the operator is not re-emailed.
+    for (let tick = 0; tick < 4; tick++) {
+      hour(h)
+      batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+      failAgain(h, 'episode_77', drama)
+    }
+    assert.equal(h.creates.length, 2, 'one probe, then a full window after each failed probe (5 ticks, 2 probes)')
+    assert.ok(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY), 'the circuit is still open')
+    assert.equal(batch.items[0].attempt, 1, 'a systemic block does not spend attempts')
+    assert.equal(emails.length, 1)
+  })
+}
+
+test('a 402 that needs more than one typical episode waits for THAT balance, and says so', async (t) => {
+  const h = harness({ topIds: [] })
+  const emails = withAlerts(t, h)
+  const api = platform(h, { credits: { balance: 28 } })
+  const date = '2026-09-29'
+  const pendingJob = { key: 'episode_q-job-r1-j0', planId: 'plan_q', body: { storyPlanId: 'plan_q' }, required: 30 }
+  failedEpisodeBatch(h, date, {
+    id: 'episode_q', failureClass: 'quota', failureCode: 'insufficient_credits',
+    failureMessage: 'Not enough Studio Credits to start this job (need 30, have 4).',
+    planId: 'plan_q', pendingJob, failedAt: '2026-07-16T05:00:00.000Z',
+  })
+
+  let batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 0, '28 covers a typical episode, not this job')
+  let circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.failureClass, 'quota')
+  assert.equal(circuit.probe, 'read')
+  assert.deepEqual(circuit.readiness.details, { balance: 28, required: 30 })
+  assert.equal(emails.length, 1)
+  assert.match(emails[0].subject, /out of Studio Credits/)
+  assert.ok(emails[0].text.includes('Balance: 28 (an episode needs 30).'))
+
+  for (let tick = 0; tick < 3; tick++) {
+    hour(h)
+    batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  }
+  assert.equal(h.creates.length, 0)
+  assert.deepEqual(api.reads.slice(1).map((read) => read.minCredits), [30, 30, 30], 'the read waits for the job\'s price')
+  assert.equal(emails.length, 1)
+  assert.equal(batch.items[0].attempt, 1)
+
+  api.credits = { balance: 40 }
+  hour(h)
+  batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY), null)
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.jobKey, pendingJob.key, 'the same job request, re-sent')
+})
+
+test('a condition the read SAW failing after the episode failed is cleared by the passing read, spending nothing', async () => {
+  const h = harness({ topIds: [] })
+  const api = platform(h, { project: { id: 'p', workspaceGate: { ...PASSING_GATE, ready: false, canStartEpisode: false, stage: 'full_coverage' } } })
+  const date = '2026-09-29'
+  failedEpisodeBatch(h, date, {
+    id: 'episode_gate', failureCode: 'project_precondition_failed',
+    failureMessage: 'Pass full Series Bible coverage before starting episodes.',
+    planId: 'plan_gate', failedAt: '2026-07-16T05:30:00.000Z',
+  })
+
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).probe, 'read')
+
+  api.project = { id: 'p', workspaceGate: PASSING_GATE }
+  hour(h)
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY), null)
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.resumePlanId, 'plan_gate')
+  assert.equal(batch.items[0].attempt, 1, 'an outage never spends an attempt')
+  assert.equal(batch.items[0].projectBlockedAt, undefined)
+})
+
+test('a measured condition that failed AFTER a passing read is not cleared by the next one', async (t) => {
+  // The read said the gate was open, the episode started, and the platform
+  // refused it on the gate anyway. Another passing read proves nothing.
+  const h = harness({ topIds: [] })
+  const emails = withAlerts(t, h)
+  platform(h)
+  const date = '2026-09-29'
+  failedEpisodeBatch(h, date, {
+    id: 'episode_gate', failureCode: 'project_precondition_failed',
+    failureMessage: 'Pass full Series Bible coverage before starting episodes.',
+    planId: 'plan_gate', failedAt: '2026-07-16T05:30:00.000Z',
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 0)
+  assert.equal(batch.items[0].status, 'blocked')
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.failureClass, 'project_not_ready')
+  assert.equal(circuit.probe, 'episode')
+  assert.equal(emails.length, 1)
+})
+
+test('a cast refusal the read measured as ready is this plan\'s roster: it spends the attempt and re-plans', async () => {
+  const h = harness({ topIds: [] })
+  platform(h, {
+    project: {
+      id: 'p',
+      workspaceGate: PASSING_GATE,
+      tableReadReadiness: { ready: true, audioOnly: true, reason: 'ready', narratorVoice: false, members: [] },
+    },
+  })
+  const date = '2026-09-29'
+  failedEpisodeBatch(h, date, {
+    id: 'episode_guest', failureCode: 'cast_precondition_failed',
+    failureMessage: 'A speaker the cast does not cover: HN_COMMENTER.',
+    planId: 'plan_guest', jobId: 'job_guest', failedAt: '2026-07-16T05:30:00.000Z',
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY) ?? null, null, 'the project is fine; the show is not stopped')
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.resumePlanId, undefined, 'the same plan would be refused again')
+  assert.equal(h.creates[0].params.resumeJobId, undefined)
+  assert.equal(batch.items[0].attempt, 2, 'a per-episode failure spends its attempt, so it is bounded')
+})
+
+// MUST FIX 3: a refused read is an outage with a name, not a silent skip.
+
+test('a 401 on the preflight opens an access circuit, alerts exactly once, and a passing read closes it', async (t) => {
+  const h = harness({ topIds: [101] })
+  const emails = withAlerts(t, h)
+  const api = platform(h, { projectError: new SleeperHitError('API key revoked.', { status: 401, code: 'api_key_revoked' }) })
+
+  const dates = ['2026-09-29', '2026-09-30']
+  for (const date of dates) {
+    for (let tick = 0; tick < 24; tick++) {
+      await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+      hour(h)
+    }
+  }
+  assert.equal(h.creates.length, 0)
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.failureClass, 'access')
+  assert.equal(circuit.failureCode, 'api_key_revoked')
+  assert.equal(circuit.probe, 'read')
+  assert.equal(emails.length, 1, 'one email for the whole outage, across batch dates')
+  assert.match(emails[0].subject, /refuses HNR's key or project/)
+  assert.ok(emails[0].text.includes('Refused read: project (401 api_key_revoked).'))
+
+  api.projectError = null
+  await reconcileNightlyBatch(h.env, '2026-09-30', { dependencies: h.dependencies })
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY), null)
+  assert.equal(h.creates.length, 1, 'the show resumes')
+})
+
+test('a 5xx on the preflight still only skips the tick', async () => {
+  const h = harness({ topIds: [101] })
+  platform(h, { projectError: new SleeperHitError('Bad Gateway', { status: 502 }) })
+  const batch = await reconcileNightlyBatch(h.env, '2026-09-29', { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 0)
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY) ?? null, null)
+  assert.match(batch.errors.at(-1).message, /could not read the project: Bad Gateway/)
+})
+
+test('a preflight reported as unreadable with a refusal status is still an access outage, never a silent skip', async (t) => {
+  const h = harness({ topIds: [101] })
+  const emails = withAlerts(t, h)
+  h.dependencies.readReadiness = async () => ({ checked: false, stage: 'project', error: { message: 'Unauthorized', status: 401 } })
+  for (let tick = 0; tick < 48; tick++) {
+    await reconcileNightlyBatch(h.env, tick < 24 ? '2026-09-29' : '2026-09-30', { dependencies: h.dependencies })
+    hour(h)
+  }
+  assert.equal(h.creates.length, 0)
+  const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+  assert.equal(circuit.failureClass, 'access')
+  assert.equal(circuit.failureCode, 'http_401')
+  assert.equal(emails.length, 1)
+})
+

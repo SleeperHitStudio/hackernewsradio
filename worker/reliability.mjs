@@ -579,9 +579,8 @@ export function storyJobKey({ jobScope, round, jobRoll, resumeJobKey = null }) {
   return `${jobScope}-job-r${round}-j${jobRoll}`
 }
 
-/** Normalize the 'add source' step result (an older in-flight run cached a bare id). */
+/** The 'add source' step result (SleeperHit.addTextSource), as the pipeline uses it. */
 export function capturedSource(value) {
-  if (typeof value === 'string') return { id: value, deduplicated: false, capturedComments: null }
   const comments = value?.capturedComments
   return {
     id: value?.id ?? null,
@@ -589,5 +588,16 @@ export function capturedSource(value) {
     capturedComments: comments !== null && comments !== undefined && Number.isFinite(Number(comments))
       ? Number(comments)
       : null,
+    sourceCompleteness: value?.sourceCompleteness ?? null,
   }
+}
+
+/**
+ * A typed 4xx refusal that crossed a step boundary (see refusalError): the
+ * platform said no on the request itself. Another plan or another job cannot
+ * change that answer, so it stops the run instead of spending a retry.
+ */
+export function isHttpRefusal(error) {
+  const status = Number(error?.status)
+  return error?.refusal === true && Number.isInteger(status) && status >= 400 && status < 500
 }

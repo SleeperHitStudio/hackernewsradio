@@ -21,11 +21,45 @@ import { sourceIdentity, threadGrewMaterially } from '../worker/hn.mjs'
 
 // ── Classification ──────────────────────────────────────────────────────────
 
-test('the platform\'s own balance refusal is a quota cliff, by message and by code', () => {
+test('the platform\'s own balance refusal is quota, by message, by code and by status', () => {
   // Three outages (07-29, 09-02..11, 09-22..27) went unclassified on this text.
-  assert.equal(classifySystemicFailure('Not enough Studio Credits. This job needs 20 credits; you have 4.'), 'quota')
-  assert.equal(classifySystemicFailure('Top up to keep generating.'), 'quota')
+  assert.equal(classifySystemicFailure('Not enough Studio Credits to start this job (need 20, have 4). Top up or wait for next month\'s bucket.'), 'quota')
   assert.equal(classifySystemicFailure({ failureCode: 'insufficient_credits', failureMessage: 'opaque' }), 'quota')
+  assert.equal(classifySystemicFailure({ status: 402, message: 'opaque' }), 'quota')
+})
+
+test('a provider\'s quota, billing or rate cliff is provider_quota: the Studio Credit read cannot see it', () => {
+  for (const message of [
+    'You exceeded your current quota, please check your plan and billing details.',
+    'You have reached your specified API usage limits.',
+    'This request requires more credits, or fewer max_tokens. You requested up to 24000 tokens, but can only afford 7900.',
+    'Rate limit reached for requests.',
+    'Your credit balance is too low to access the Anthropic API.',
+    'Insufficient credits on the voice provider account.',
+    'Please top-up your balance.',
+  ]) {
+    const failureClass = classifySystemicFailure(message)
+    assert.equal(failureClass === 'provider_quota' || failureClass === null, true, message)
+    assert.notEqual(failureClass, 'quota', `${message} is not a Studio Credit refusal`)
+  }
+  assert.equal(classifySystemicFailure('You exceeded your current quota.'), 'provider_quota')
+  assert.equal(isReadinessClass('provider_quota'), false)
+})
+
+test('a missing or uncovered standing approval is approval_missing', () => {
+  for (const code of ['standing_approval_missing', 'standing_approval_other_key', 'standing_approval_unreadable', 'publishing_series_missing']) {
+    assert.equal(classifySystemicFailure({ failureCode: code, failureMessage: 'x' }), 'approval_missing', code)
+  }
+  assert.equal(classifySystemicFailure(
+    '`userConfirmed: true` is required after the user explicitly approves this StoryPlan. A show\'s standing approval stands in for it only for the API key it is bound to.',
+  ), 'approval_missing')
+})
+
+test('a refused key or a deleted project is access', () => {
+  for (const code of ['invalid_api_key', 'api_key_revoked', 'insufficient_scope', 'project_not_found']) {
+    assert.equal(classifySystemicFailure({ failureCode: code, failureMessage: 'x' }), 'access', code)
+  }
+  assert.equal(classifySystemicFailure({ status: 401, message: 'Unauthorized' }), 'access')
 })
 
 test('a typed 409 on project state is project_not_ready, not a contract bug', () => {
@@ -35,6 +69,10 @@ test('a typed 409 on project state is project_not_ready, not a contract bug', ()
 
 test('a table read with an unvoiced cast is cast_not_ready; the in-run voiceMap recast stays contract', () => {
   assert.equal(classifySystemicFailure({ failureCode: 'cast_precondition_failed', failureMessage: 'x' }), 'cast_not_ready')
+  // The platform's own refusal text, for paths that only see the message.
+  assert.equal(classifySystemicFailure(
+    'Finalize the episode screenplay and complete its Cast before starting Table Read. A plan alone cannot start a read.',
+  ), 'cast_not_ready')
   assert.equal(
     classifySystemicFailure('Preassigned voiceMap is missing a voice for: JOHNSMITH1840. Supply every speaking character.'),
     'contract',
@@ -48,8 +86,9 @@ test('source lag stays a per-item hold, never a readiness class', () => {
 })
 
 test('readiness classes are the ones a free read can probe', () => {
-  assert.deepEqual(['project_not_ready', 'cast_not_ready', 'quota', 'provider', 'contract'].map(isReadinessClass),
-    [true, true, true, false, false])
+  assert.deepEqual(
+    ['access', 'project_not_ready', 'cast_not_ready', 'approval_missing', 'quota', 'provider', 'provider_quota', 'contract'].map(isReadinessClass),
+    [true, true, true, true, true, false, false, false])
 })
 
 // ── 409s and the step boundary ──────────────────────────────────────────────
@@ -144,10 +183,13 @@ test('a 402 recovery re-sends the refused key; every other job gets its own', ()
   assert.equal(storyJobKey({ jobScope: 'd', round: 2, jobRoll: 0 }), 'd-job-r2-j0')
 })
 
-test('an add-source result cached by an older run still reads as a source', () => {
-  assert.deepEqual(capturedSource('source_1'), { id: 'source_1', deduplicated: false, capturedComments: null })
-  assert.deepEqual(capturedSource({ id: 's', deduplicated: true, capturedComments: 12 }), { id: 's', deduplicated: true, capturedComments: 12 })
-  assert.deepEqual(capturedSource({ id: 's', capturedComments: null }), { id: 's', deduplicated: false, capturedComments: null })
+test('an add-source result reads as one shape: the client\'s', () => {
+  const completeness = { comments: { fetched: 12 } }
+  assert.deepEqual(capturedSource({ id: 's', deduplicated: true, capturedComments: 12, sourceCompleteness: completeness }),
+    { id: 's', deduplicated: true, capturedComments: 12, sourceCompleteness: completeness })
+  assert.deepEqual(capturedSource({ id: 's', capturedComments: null }),
+    { id: 's', deduplicated: false, capturedComments: null, sourceCompleteness: null })
+  assert.equal(capturedSource('source_1').id, null, 'a bare id is not a source result')
 })
 
 // ── Client ─────────────────────────────────────────────────────────────────
@@ -243,7 +285,6 @@ test('a capture is replaced only when the thread grew materially', () => {
   assert.equal(threadGrewMaterially(null, 50), false, 'an unknown capture is kept')
 })
 
-test('"top up" is matched as words, never inside another word', () => {
+test('ordinary prose about credits or laptops is not a quota class', () => {
   assert.equal(classifySystemicFailure('Could not capture the laptop upgrade thread.'), null)
-  assert.equal(classifySystemicFailure('Please top-up your balance.'), 'quota')
 })

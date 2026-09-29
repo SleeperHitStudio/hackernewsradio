@@ -462,7 +462,11 @@ async function runPipeline(id, thread, { sourceTranscript, sourceMetadata }) {
       await note(id, 'Published to the HNR podcast feed.')
     }
   } catch (err) {
-    await note(id, `Podcast publish skipped (${err?.message || err})`)
+    // Not swallowed: the episode records the refusal where the operator reads
+    // it, and publishes nothing a human did not approve (publishEpisode sends
+    // no confirmation claim; only a standing approval covers it).
+    await patchDrama(id, { publishState: 'blocked', publishError: err?.message || String(err), publishFailureCode: err?.code || null })
+    await note(id, `Podcast publish blocked (${err?.message || err})`)
   }
 }
 

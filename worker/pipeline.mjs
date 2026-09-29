@@ -35,16 +35,25 @@ import {
   staleCastCanonCharacters,
 } from './brief.mjs'
 import {
+  isRefusedRead,
   publishKeyPrefix,
   publishingReadiness,
-  standingApprovalOf,
 } from './readiness.mjs'
 import {
   PUBLISH_BLOCKED_ALERT_KEY,
   alertOnce,
   clearAlertLatch,
 } from './alerts.mjs'
-import { patchDrama, appendProgress, getDrama, getSetting, setSetting, deleteOtherEpisodesOfThread } from './store.mjs'
+import {
+  appendProgress,
+  claimSetting,
+  deleteOtherEpisodesOfThread,
+  getDrama,
+  getSetting,
+  listLiveEpisodesOfThread,
+  patchDrama,
+  setSetting,
+} from './store.mjs'
 import {
   STORY_JOB_POLL_CHUNKS,
   audibleMiddleSceneIndexes,
@@ -70,15 +79,15 @@ import {
   storyJobIdempotencyScope,
   storyJobPollOutcome,
   terminalStoryJobFallbackPlanId,
-  typedRefusal,
   capturedSource,
+  isHttpRefusal,
   isInsufficientCredits,
   storyJobKey,
 } from './reliability.mjs'
 import {
   EPISODE_DESCRIPTION_DIRECTION,
+  PLAN_APPROVAL_BODY,
   PUBLISHED_PROGRESS_MESSAGE,
-  planApprovalBody,
 } from './publishing.mjs'
 
 export class HnrPipeline extends WorkflowEntrypoint {
@@ -128,6 +137,15 @@ export class HnrPipeline extends WorkflowEntrypoint {
           payload: event.payload,
         })
         return
+      }
+
+      // An unattended producer spends NOTHING without the series' standing
+      // approval bound to its own key: no upload, no plan, no job. Revoking the
+      // grant is how the owner stops the show, so it must stop the spending,
+      // not just the publishing. Post-production of an existing performance
+      // (resume/repair) is already paid for and is not gated here.
+      if (!isRepair && !isResume) {
+        await this.requireStandingApproval(step, { env, db, sh, label: 'standing approval' })
       }
 
       if (staggerSec > 0) await step.sleep('stagger', `${staggerSec} seconds`)
@@ -222,14 +240,27 @@ export class HnrPipeline extends WorkflowEntrypoint {
           }), { replaySafe: true })
         await note('Adding the verified full article and comment thread to HNRadio…')
         let captured = capturedSource(await addSource('add source', `${dramaId}-source`))
+        let recaptured = false
         if (captured.deduplicated) {
           // Recapture only when the earlier attempt failed BEFORE any plan read
-          // the source and the thread has grown materially since: then the old
-          // capture is stale and nothing depends on it. Otherwise the episode
-          // is written from the capture the first attempt paid for.
+          // the source, the thread has grown materially since, and no other
+          // episode of this thread is in flight: the source is one per thread,
+          // so a concurrent episode (a visitor's /api/generate) may be planning
+          // from it right now. Otherwise the episode is written from the
+          // capture the first attempt paid for.
           const recapture = event.payload.sourceRecapture ?? null
           const previousComments = captured.capturedComments ?? recapture?.previousCommentCount ?? null
-          if (recapture && threadGrewMaterially(previousComments, thread.total)) {
+          const otherLiveEpisodes = recapture
+            ? await runWorkflowStepOnce(step, 'other live episodes of this thread', async () =>
+              (await listLiveEpisodesOfThread(db, thread.id, 'podcast', dramaId)).map((episode) => episode.id))
+            : []
+          if (recapture && otherLiveEpisodes.length) {
+            await note(
+              `Keeping the captured source for HN thread ${thread.id}: episode ${otherLiveEpisodes.join(', ')} of this thread is in flight and may be reading it.`,
+              'source-recapture-skipped',
+            )
+          }
+          if (recapture && !otherLiveEpisodes.length && threadGrewMaterially(previousComments, thread.total)) {
             await note(`HN thread ${thread.id} grew from ${previousComments} to ${thread.total} comments since the failed attempt — recapturing it…`)
             const staleSourceId = captured.id
             await this.hardStep(step, 'retire stale source', async () => {
@@ -243,6 +274,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
               }
             }, { replaySafe: true })
             captured = capturedSource(await addSource('recapture source', `${dramaId}-source-recapture`))
+            recaptured = true
           } else {
             await note(
               `Reusing the source already captured for HN thread ${thread.id}`
@@ -253,10 +285,14 @@ export class HnrPipeline extends WorkflowEntrypoint {
         }
         sourceId = captured.id
         if (!sourceId) throw new Error('Sleeper Hit returned no source id for the HN thread.')
+        // Record what the episode is written FROM. A reused capture is the
+        // earlier thread, not the one fetched this run.
+        const reused = captured.deduplicated && !recaptured
         await patchDrama(db, dramaId, {
           sourceId,
           sourceDeduplicated: captured.deduplicated,
-          sourceCompleteness: sourceMetadata.sourceCompleteness,
+          sourceCompleteness: reused ? captured.sourceCompleteness : sourceMetadata.sourceCompleteness,
+          ...(reused && captured.capturedComments !== null ? { commentCount: captured.capturedComments } : {}),
         })
         await this.pollChunked(step, 'source', 8, async () => {
           const res = await sh.request(`/story-projects/${projectId}/sources/${sourceId}`)
@@ -325,19 +361,16 @@ export class HnrPipeline extends WorkflowEntrypoint {
       }
       const approvePlanForNightly = async (label, planId, status) => {
         if (status !== 'REQUIRES_APPROVAL') return
-        // HNR runs unattended under the series' STANDING APPROVAL (bound to its
-        // API key). When the platform reports that grant, the approval carries
-        // no human confirmation claim; see planApprovalBody.
-        const approval = await runWorkflowStepOnce(step, `${label} standing approval`, () =>
-          this.readStandingApproval(env, db, sh))
-        await note(approval?.granted
-          ? 'Approving the blueprint under the series\' standing approval…'
-          : 'Approving the blueprint…')
+        // HNR runs unattended under the series' STANDING APPROVAL, bound to its
+        // API key. It approves with no human confirmation claim, and only after
+        // re-reading that grant: a revoke since the run began stops it here.
+        await this.requireStandingApproval(step, { env, db, sh, label: `${label} standing approval` })
+        await note('Approving the blueprint under the series\' standing approval…')
         await this.hardStep(step, label, () =>
           sh.request(`/story-plans/${planId}/approve`, {
             method: 'POST',
             idempotencyKey: `${dramaId}-approve-${planId}`,
-            body: planApprovalBody(approval),
+            body: PLAN_APPROVAL_BODY,
           }), { replaySafe: true })
       }
 
@@ -410,7 +443,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
               await approvePlanForNightly(`approve r${round}a${attempt}`, plan.id, status)
               planId = plan.id
             } catch (err) {
-              if (classifySystemicFailure(err)) throw err
+              // A typed 4xx is the platform refusing the request itself: a
+              // fresh plan earns the same answer. Only failures AROUND a
+              // request (a plan that failed to generate, a timeout) re-plan.
+              if (classifySystemicFailure(err) || isHttpRefusal(err)) throw err
               if (attempt === 4) throw err
               await note(`Plan attempt ${attempt} failed (${err?.message || err}); retrying…`)
             }
@@ -466,6 +502,9 @@ export class HnrPipeline extends WorkflowEntrypoint {
                           planId: jobBody.storyPlanId,
                           body: jobBody,
                           refusedJobId: err?.details?.jobId ?? null,
+                          // What the refused job costs: the nightly waits for a
+                          // balance that covers THIS, not just the typical episode.
+                          required: err?.details?.required != null && Number.isFinite(Number(err.details.required)) ? Number(err.details.required) : null,
                           refusedAt: new Date().toISOString(),
                         },
                       })
@@ -540,7 +579,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
                   await note('The blueprint cast a guest commenter — recasting with automatic voice assignment…')
                   continue
                 }
-                if (classifySystemicFailure(err)) throw err
+                // A typed 4xx refusal is final for this request: another job
+                // attempt only earns it again (the voiceMap recast above is
+                // the one refusal a different request can answer).
+                if (classifySystemicFailure(err) || isHttpRefusal(err)) throw err
                 const overBudget = OUTPUT_BUDGET_RE.test(msg)
                 const transient = !/time budget|timed out/i.test(msg)
                 if (attempt === 3 || !transient || (overBudget && attempt >= 2)) throw err
@@ -752,6 +794,9 @@ export class HnrPipeline extends WorkflowEntrypoint {
         failureClass,
         failureCode: err?.code || null,
         failureMessage: message,
+        // When it failed: the nightly lets a passing readiness read clear a
+        // failure only when the read saw the condition AFTER this moment.
+        failedAt: new Date().toISOString(),
       }
       if ((isRepair || isResume || isPublishOnly) && recoveryOriginal?.status === 'ready' && recoveryOriginal?.audioUrl) {
         // Do not take the currently published/playable episode offline merely
@@ -1098,17 +1143,41 @@ export class HnrPipeline extends WorkflowEntrypoint {
     await note(`music: required jazz bookends READY at scenes ${introIndex} + ${outroIndex}`)
   }
 
-  /** The series' standing approval as the platform reports it (never throws). */
-  async readStandingApproval(env, db, sh) {
-    const seriesId = await getSetting(db, 'publishingSeriesId')
-    if (!seriesId) return { known: false, granted: false }
+  /**
+   * Read the series' standing approval for HNR's key, or STOP. Returns the
+   * publishing readiness when the grant covers HNR; otherwise throws a typed
+   * `approval_missing` error (the grant is absent, revoked, bound to another
+   * key, on a paused series, or could not be read). Never approves on doubt.
+   */
+  async requireStandingApproval(step, { env, db, sh, label }) {
+    let publishing
     try {
-      return standingApprovalOf(await sh.getPublishingSeries(seriesId), {
-        keyId: env.SLEEPERHIT_API_KEY_ID || null,
+      publishing = await runWorkflowStepOnce(step, label, async () => {
+        const seriesId = await getSetting(db, 'publishingSeriesId')
+        let series = null
+        let readError = null
+        if (seriesId) {
+          try {
+            series = await sh.getPublishingSeries(seriesId)
+          } catch (error) {
+            if (!isRefusedRead(error)) throw error
+            readError = { status: error.status ?? null, code: error.code ?? null, message: error.message }
+          }
+        }
+        return publishingReadiness({ seriesId, series, readError, keyId: env.SLEEPERHIT_API_KEY_ID || null })
       })
-    } catch {
-      return { known: false, granted: false }
+    } catch (error) {
+      publishing = {
+        state: 'blocked',
+        code: 'standing_approval_unreadable',
+        reason: `The HNR publishing series could not be read (${error?.message || error}).`,
+      }
     }
+    if (publishing?.state === 'granted') return publishing
+    throw new SleeperHitError(
+      `Stopped before spending: HNR runs only under the series' standing approval. ${publishing?.reason || ''}`.trim(),
+      { code: publishing?.code || 'standing_approval_missing' },
+    )
   }
 
   /**
@@ -1152,8 +1221,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
         try {
           series = await sh.getPublishingSeries(seriesId)
         } catch (error) {
-          readError = typedRefusal(error)
-          if (!readError) throw error
+          if (!isRefusedRead(error)) throw error
+          readError = { status: error.status ?? null, code: error.code ?? null, message: error.message }
         }
         const publishing = publishingReadiness({
           seriesId, series, readError, keyId: env.SLEEPERHIT_API_KEY_ID || null,
@@ -1163,14 +1232,15 @@ export class HnrPipeline extends WorkflowEntrypoint {
           // grant is not covered by it, and would sit unpublishable forever.
           return { kind: 'blocked', code: publishing.code, reason: publishing.reason }
         }
-        const releaseId = await sh.publishEpisode(seriesId, {
+        const { releaseId, alreadyPublished } = await sh.publishEpisode(seriesId, {
           title,
           descriptionDirection: EPISODE_DESCRIPTION_DIRECTION,
           artifactId,
           seasonNumber: 1,
-          idempotencyKeyPrefix: publishKeyPrefix(dramaId, publishing.approval),
+          idempotencyKeyPrefix: publishKeyPrefix(dramaId, publishing.grant),
+          grantedAt: publishing.grant?.grantedAt ?? null,
         })
-        return { kind: 'published', releaseId }
+        return { kind: 'published', releaseId, alreadyPublished }
       }, { replaySafe: true })
     } catch (err) {
       if (repairPublicationRequired) throw err
@@ -1182,9 +1252,6 @@ export class HnrPipeline extends WorkflowEntrypoint {
       }
     }
 
-    // A run replaying a publish step an older deployment completed has no
-    // outcome to report; that step already did its work.
-    if (!outcome || typeof outcome !== 'object') return 'replayed'
     if (outcome.kind === 'refreshed') {
       await note(`Refreshed repaired media on published release ${outcome.releaseId}.`)
       return outcome.kind
@@ -1197,6 +1264,9 @@ export class HnrPipeline extends WorkflowEntrypoint {
         publishFailureCode: null,
         publishBlockedAt: null,
       })
+      if (outcome.alreadyPublished) {
+        await note(`Release ${outcome.releaseId} was already on the feed; nothing was published twice.`)
+      }
       await note(PUBLISHED_PROGRESS_MESSAGE)
       await runWorkflowStepOnce(step, 'clear publish alert latch', () =>
         clearAlertLatch(env, PUBLISH_BLOCKED_ALERT_KEY, { getSetting, setSetting }))
@@ -1225,7 +1295,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
         '(no post-production, no re-finalize) once the series reports a standing approval for HNR\'s key.',
         'This email is sent once per outage; the next successful publish re-arms it.',
       ],
-    }, { getSetting, setSetting }))
+    }, { claimSetting, setSetting }))
     return outcome.kind
   }
 }

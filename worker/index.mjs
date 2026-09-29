@@ -4,7 +4,7 @@
  * OG tags. Generation runs as a durable Workflow (see pipeline.mjs); the daily
  * 7pm America/Chicago sweep fires from an hourly cron trigger (DST-proof).
  */
-import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread } from './store.mjs'
+import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread, getSetting } from './store.mjs'
 import {
   buildSourceMetadata,
   fetchThread,
@@ -16,6 +16,7 @@ import { spotifyCallback, spotifyStart, spotifyStatus } from './spotify.mjs'
 import { operatorAuthorization } from './operator-auth.mjs'
 import { operatorNightlyReconcile } from './operator-nightly.mjs'
 import { runNightlyReconciliation } from './nightly.mjs'
+import { approvalFailure, readShowReadiness } from './readiness.mjs'
 import {
   getActiveWorkflowDeployGate,
   workflowDeployRetryAfterSeconds,
@@ -69,11 +70,57 @@ async function workflowDeployGateResponse(env) {
   }, 503, { 'Retry-After': String(retryAfter) })
 }
 
-async function startGeneration(request, env, url, { force = false, requireEntitlement = true } = {}) {
-  const thread = await fetchThread(url)
+/**
+ * A visitor's episode spends exactly what a nightly one does, so it passes the
+ * same READINESS PREFLIGHT first: the project's workspace gate and table-read
+ * readiness, a balance that covers an episode, and the publishing series'
+ * standing approval for HNR's key. Returns null when an episode may start, or
+ * the refusal to send the visitor (the reason class, not the internals).
+ */
+export async function communityGenerationRefusal(env, { readReadiness = readShowReadiness } = {}) {
+  let readiness
+  try {
+    readiness = await readReadiness(env, { seriesId: await getSetting(env.DB, 'publishingSeriesId') })
+  } catch {
+    readiness = { checked: false }
+  }
+  if (!readiness?.checked) {
+    return {
+      status: 503,
+      code: 'show_readiness_unavailable',
+      error: 'HN Radio could not confirm it can take a new episode right now. Try again in a few minutes.',
+    }
+  }
+  const failure = readiness.ready ? approvalFailure(readiness.publishing) : readiness
+  if (!failure) return null
+  return {
+    status: 503,
+    code: 'show_not_ready',
+    reason: failure.failureClass,
+    error: 'HN Radio is not taking new episodes right now. Existing episodes are still playable.',
+  }
+}
+
+export async function startGeneration(request, env, url, {
+  force = false,
+  requireEntitlement = true,
+  deps = {},
+} = {}) {
+  const { fetchThread: readThread = fetchThread, readReadiness = readShowReadiness } = deps
+  const thread = await readThread(url)
   if (!force) {
     const existing = await findByHnIdAndMode(env.DB, thread.id, 'podcast')
     if (existing && ['queued', 'running', 'ready'].includes(existing.status)) return { drama: existing, reused: true }
+  }
+  // Nothing new is claimed, uploaded, planned or approved while the show
+  // cannot start an episode — or has no standing approval to approve one.
+  const refusal = await communityGenerationRefusal(env, { readReadiness })
+  if (refusal) {
+    const err = new Error(refusal.error)
+    err.code = refusal.code
+    err.status = refusal.status
+    err.reason = refusal.reason ?? null
+    throw err
   }
   await hydrateThreadArticle(thread)
   const sourceTranscript = threadToTranscript(thread)
@@ -223,6 +270,9 @@ async function handleApi(request, env, url) {
     } catch (err) {
       if (String(err?.code || '').startsWith('community_')) {
         return json({ error: err.code, code: err.code, generatedHnId: err.generatedHnId || null }, 403)
+      }
+      if (err?.code === 'show_not_ready' || err?.code === 'show_readiness_unavailable') {
+        return json({ error: err.message, code: err.code, reason: err.reason ?? null }, 503, { 'Retry-After': '3600' })
       }
       return json({
         error: err?.message || String(err),
