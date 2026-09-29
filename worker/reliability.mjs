@@ -8,8 +8,23 @@ export const AUTOTUNE_CLICK_PROMPT =
   'One clear, dry, definitive mechanical switch click. A single isolated transient with no tail.'
 export const AUTOTUNE_CLICK_VOLUME = 0.42
 
+// "already processing" is the platform's 409 `idempotency_conflict` for a key
+// whose first attempt is still running. It is matched by message as well as by
+// code because a thrown error crossing step.do loses its code.
 const TRANSIENT_WORKFLOW_ERROR_RE =
-  /Too many subrequests|Durable Object reset because its code was updated|network error reaching|fetch failed|connection reset|timed out/i
+  /Too many subrequests|Durable Object reset because its code was updated|network error reaching|fetch failed|connection reset|timed out|Idempotency-Key is already processing/i
+
+/**
+ * The ONE 409 that is transient: an Idempotency-Key whose first attempt is
+ * still running. Every other 409 is the platform refusing on STATE — a project
+ * that has not finished a development stage (`project_precondition_failed`), a
+ * table read with no voiced cast (`cast_precondition_failed`), a plan in the
+ * wrong state — and the identical call refuses the same way until someone
+ * changes that state. Treating those as transient is how HNR retried the same
+ * refusal every hour.
+ */
+export const TRANSIENT_CONFLICT_CODE = 'idempotency_conflict'
+const DIFFERENT_BODY_CONFLICT_RE = /different request body/i
 
 // The pipeline owns retry classification so a terminal Story API response is
 // never retried five times by Workflows before our code can react to it. This
@@ -37,16 +52,85 @@ export function isTransientWorkflowError(error) {
   while (current && !seen.has(current)) {
     seen.add(current)
     const status = Number(current?.status)
-    if (status === 0 || status === 408 || status === 409 || status === 425 || status === 429 || status >= 500) {
+    if (status === 0 || status === 408 || status === 425 || status === 429 || status >= 500) {
       return true
     }
+    // …unless the key was reused with a DIFFERENT body: that is deterministic.
+    if (status === 409 && current?.code === TRANSIENT_CONFLICT_CODE
+      && !DIFFERENT_BODY_CONFLICT_RE.test(String(current?.message || ''))) return true
     current = current?.cause
   }
   return TRANSIENT_WORKFLOW_ERROR_RE.test(errorText(error))
 }
 
+const STEP_REFUSAL_KEY = '__storyApiRefusal'
+
+function jsonSafe(value) {
+  if (value === undefined) return null
+  try { return JSON.parse(JSON.stringify(value)) } catch { return null }
+}
+
+/**
+ * A Story API refusal that no retry can change, as plain data: an authoritative
+ * 4xx (not 408/429/425, not a 409 idempotency_conflict), or a coded terminal
+ * failure the client raised from a status read (a FAILED plan or source).
+ * Returns null for everything else, which keeps its old thrown behaviour.
+ */
+export function typedRefusal(error) {
+  if (!error || typeof error !== 'object') return null
+  if (isTransientWorkflowError(error)) return null
+  const status = Number(error.status)
+  const hasStatus = Number.isInteger(status) && status >= 400 && status < 500
+  const code = typeof error.code === 'string' && error.code ? error.code : null
+  if (!hasStatus && !(error.name === 'SleeperHitError' && code)) return null
+  return {
+    name: error.name || 'SleeperHitError',
+    message: String(error.message || ''),
+    status: hasStatus ? status : null,
+    code,
+    requestId: error.requestId ?? null,
+    details: jsonSafe(error.details),
+  }
+}
+
+/** Rebuild the thrown error a refusal came from, with its status, code and details intact. */
+export function refusalError(refusal) {
+  const error = new Error(refusal?.message || 'Story API refused the request.')
+  error.name = refusal?.name || 'SleeperHitError'
+  error.status = refusal?.status ?? undefined
+  error.code = refusal?.code ?? undefined
+  error.requestId = refusal?.requestId ?? undefined
+  error.details = refusal?.details ?? null
+  error.refusal = true
+  return error
+}
+
+function unwrapStepResult(result) {
+  if (result && typeof result === 'object' && STEP_REFUSAL_KEY in result) {
+    throw refusalError(result[STEP_REFUSAL_KEY])
+  }
+  return result
+}
+
+/**
+ * Run one Workflow step. A typed refusal thrown inside the step is RETURNED as
+ * data and rethrown outside it, because Cloudflare rehydrates a thrown step
+ * error as a bare Error: its `status`, `code` and `details` do not survive
+ * step.do. Without them a 409 `project_precondition_failed` reads as prose, a
+ * 402's `details.jobId` is gone, and the classifier is left to guess from the
+ * message. As data the refusal also skips step.do's own retry, which could
+ * only have earned the same refusal twice.
+ */
 export function runWorkflowStepOnce(step, label, fn) {
-  return step.do(label, WORKFLOW_STEP_ONCE, fn)
+  return Promise.resolve(step.do(label, WORKFLOW_STEP_ONCE, async () => {
+    try {
+      return await fn()
+    } catch (error) {
+      const refusal = typedRefusal(error)
+      if (refusal) return { [STEP_REFUSAL_KEY]: refusal }
+      throw error
+    }
+  })).then(unwrapStepResult)
 }
 
 export function minimumSpokenWords(pageTarget) {
@@ -476,4 +560,34 @@ export async function ensureAutotuneClickReady({ cues, entryIndex, addCue, updat
     throw new Error(`Gruner dial click incomplete at entry ${targetEntryIndex}: ${problems.join(', ')}.`)
   }
   return { cue, operation: existing ? 'update' : 'add' }
+}
+
+/** A 402: the balance cannot cover what the call would spend. */
+export function isInsufficientCredits(error) {
+  return Number(error?.status) === 402 || error?.code === 'insufficient_credits'
+}
+
+/**
+ * The key a table-read job is created under. A recovery that follows a 402
+ * re-sends the SAME key it was refused under: the platform binds a story job to
+ * its Idempotency-Key, so the same key resumes the job an earlier attempt
+ * created (the 402's `details.jobId`) or creates it once — never a second one.
+ * Only the recovery's first job uses it; a deliberate re-roll gets a fresh key.
+ */
+export function storyJobKey({ jobScope, round, jobRoll, resumeJobKey = null }) {
+  if (resumeJobKey && round === 1 && jobRoll === 0) return resumeJobKey
+  return `${jobScope}-job-r${round}-j${jobRoll}`
+}
+
+/** Normalize the 'add source' step result (an older in-flight run cached a bare id). */
+export function capturedSource(value) {
+  if (typeof value === 'string') return { id: value, deduplicated: false, capturedComments: null }
+  const comments = value?.capturedComments
+  return {
+    id: value?.id ?? null,
+    deduplicated: value?.deduplicated === true,
+    capturedComments: comments !== null && comments !== undefined && Number.isFinite(Number(comments))
+      ? Number(comments)
+      : null,
+  }
 }

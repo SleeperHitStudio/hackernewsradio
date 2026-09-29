@@ -5,7 +5,9 @@ import {
   buildBrief,
   buildStoryJobArtifactRequests,
   canonicalPinnedVoiceMap,
+  castCanonCharacters,
   hostForCharacter,
+  staleCastCanonCharacters,
 } from '../worker/brief.mjs'
 
 test('performanceNotes fits the artifact-request notes cap (contract test)', () => {
@@ -182,4 +184,54 @@ test('every host the brief names is one the pinned voice map can cast', () => {
     assert.ok(notes.includes(name), `castNotes should name ${name}`)
     assert.ok(hostForCharacter(name), `${name} must resolve to a pinned host`)
   }
+})
+
+const PINNED_FOUR = {
+  GARY: { voiceId: 'v_gary', voiceName: 'Gary', provider: 'elevenlabs' },
+  maeve: { voiceId: 'v_maeve', provider: 'elevenlabs' },
+  OBI: { voiceId: 'v_obi' },
+  GRUNER: { voiceId: 'v_gruner', provider: 'hume' },
+}
+
+test('the cast canon carries each host\'s portrait and pinned voice, and nothing the strict schema refuses', () => {
+  const characters = castCanonCharacters(PINNED_FOUR)
+  assert.deepEqual(characters, [
+    { name: 'GARY', avatarUrl: 'https://hnradio.net/avatars/gary.png', voiceId: 'v_gary', voiceProvider: 'elevenlabs' },
+    { name: 'MAEVE', avatarUrl: 'https://hnradio.net/avatars/maeve.png', voiceId: 'v_maeve', voiceProvider: 'elevenlabs' },
+    { name: 'OBI', avatarUrl: 'https://hnradio.net/avatars/obi.png', voiceId: 'v_obi' },
+    { name: 'GRUNER', avatarUrl: 'https://hnradio.net/avatars/gruner.png', voiceId: 'v_gruner', voiceProvider: 'hume' },
+  ])
+  const allowed = new Set(['name', 'avatarUrl', 'voiceId', 'voiceProvider'])
+  for (const character of characters) {
+    for (const key of Object.keys(character)) assert.ok(allowed.has(key), `${key} is not a cast canon field HNR writes`)
+  }
+})
+
+test('before any voice is pinned the canon still gets the portraits', () => {
+  assert.deepEqual(castCanonCharacters(null).map((c) => Object.keys(c)), Array(4).fill(['name', 'avatarUrl']))
+})
+
+test('a current canon writes nothing; a missing voice rewrites only that host', () => {
+  const desired = castCanonCharacters(PINNED_FOUR)
+  const stored = {
+    content: {
+      characters: desired.map((c) => ({ ...c, bodyFigureUrl: 'https://files.example/body.png' })),
+    },
+  }
+  assert.deepEqual(staleCastCanonCharacters(stored, desired), [], 'extra stored fields (bodies, sheets) do not count')
+
+  const noGrunerVoice = structuredClone(stored)
+  delete noGrunerVoice.content.characters[3].voiceId
+  assert.deepEqual(staleCastCanonCharacters(noGrunerVoice, desired).map((c) => c.name), ['GRUNER'])
+})
+
+test('a host stored under a full name with the cue name as an alias is the same person', () => {
+  const desired = castCanonCharacters({ GARY: { voiceId: 'v_gary' } }).filter((c) => c.name === 'GARY')
+  const stored = {
+    content: {
+      characters: [{ name: 'Gary Bauxlite', aliases: ['gary'], avatarUrl: 'https://hnradio.net/avatars/gary.png', voiceId: 'v_gary' }],
+    },
+  }
+  assert.deepEqual(staleCastCanonCharacters(stored, desired), [])
+  assert.deepEqual(staleCastCanonCharacters(null, desired).map((c) => c.name), ['GARY'], 'an empty canon needs every host')
 })

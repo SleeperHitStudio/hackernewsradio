@@ -73,13 +73,16 @@ export class SleeperHit {
   }
 
   /** Add the verified thread/article pack as a plain-text source. */
-  async addTextSource(projectId, { content, label, metadata }) {
+  /** `producer` + `externalId` identify the thread: a repeat returns the existing source. */
+  async addTextSource(projectId, { content, label, metadata, producer, externalId }) {
     const res = await this.request(`/story-projects/${projectId}/sources`, {
       method: 'POST', idempotencyKey: true,
       body: {
         type: 'text',
         content,
         ...(label ? { label } : {}),
+        ...(producer ? { producer } : {}),
+        ...(externalId ? { externalId: String(externalId) } : {}),
         ...(metadata ? { metadata } : {}),
       },
     })
@@ -168,23 +171,6 @@ export class SleeperHit {
       await sleep(4000)
     }
     throw new SleeperHitError('Table read generation timed out.')
-  }
-
-  // ── Series Bible (project canon) ────────────────────────────────────────────
-  // The bible holds the show's canon (cast, world rules, jazz theme) and the
-  // episode map; the planner auto-loads it for every plan.
-
-  /** The project's Series Bible document ({ content: { episodes, characters, … } }). */
-  async getSeriesBible(projectId) {
-    const res = await this.request(`/story-projects/${projectId}/series-bible`)
-    return res.document ?? null
-  }
-
-  /** Merge-patch the bible (e.g. { content: { episodes } } replaces just that field). */
-  async patchSeriesBible(projectId, patch) {
-    await this.request(`/story-projects/${projectId}/series-bible`, {
-      method: 'PATCH', idempotencyKey: true, body: patch,
-    })
   }
 
   // ── Podcast publishing ──────────────────────────────────────────────────────

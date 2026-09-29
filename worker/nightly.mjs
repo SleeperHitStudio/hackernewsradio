@@ -21,15 +21,23 @@ import {
   PROVIDER_BLOCK_RE,
   QUOTA_CLASS_RE,
   classifySystemicFailure,
+  isCastNotReadyFailure,
   isContractClassFailure,
+  isProjectNotReadyFailure,
   isProviderBlockedFailure,
   isQuotaClassFailure,
+  isReadinessClass,
+  isSystemicClass,
   isTransientSourceFailure,
 } from './failure-classification.mjs'
 import {
   WORKFLOW_DEPLOY_GATE_KEY,
   activeWorkflowDeployGate,
 } from './deploy-gate.mjs'
+import { alertsConfigured, sendOperatorAlert } from './alerts.mjs'
+import { PUBLISHED_PROGRESS_MESSAGE, needsPublishOnly } from './publishing.mjs'
+import { MIN_EPISODE_CREDITS, readReadiness } from './readiness.mjs'
+import { SleeperHit } from './sleeperhit.mjs'
 
 export {
   CONTRACT_CLASS_RE,
@@ -41,6 +49,7 @@ export {
   isQuotaClassFailure,
   isTransientSourceFailure,
 } from './failure-classification.mjs'
+export { PUBLISHED_PROGRESS_MESSAGE } from './publishing.mjs'
 
 export const NIGHTLY_TARGET = 5
 export const NIGHTLY_MAX_ATTEMPTS = 3
@@ -52,7 +61,14 @@ export const NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS = 60 * 60 * 1000
 export const NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS = 2
 export const NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS = 60 * 60 * 1000
 export const NIGHTLY_GENERATION_CIRCUIT_KEY = 'nightlyGenerationCircuit'
-export const PUBLISHED_PROGRESS_MESSAGE = 'Published to the HNR podcast feed.'
+// Publish-only retries back off from one hour to a day. They cost no credits,
+// but a feed that refuses on state refuses the same way until the state moves.
+export const NIGHTLY_PUBLISH_RETRY_BASE_MS = 60 * 60 * 1000
+export const NIGHTLY_PUBLISH_RETRY_MAX_MS = 24 * 60 * 60 * 1000
+// How long a superseded night keeps draining for an episode the feed has not
+// taken. The episode stays on hnradio.net either way; this only bounds how many
+// old batches every hourly tick walks while publishing is blocked.
+export const NIGHTLY_PUBLISH_HOLD_DAYS = 14
 
 const MUSIC_WRITE_BUDGET_CHECKPOINT = Object.freeze({
   name: 'music write budget break',
@@ -66,12 +82,13 @@ const MUSIC_WATCHDOG_RESUME_MESSAGE =
 
 const ACTIVE_WORKFLOW_STATUSES = new Set(['queued', 'running', 'waiting', 'waitingforpause', 'paused'])
 
-const ALERT_FROM = 'HN Radio <noreply@updates.sleeperhit.studio>'
 // One full first-wave wipeout (five stories, zero published) is alertable.
 export const ALERT_MIN_FAILURES = 5
 
 const ALERT_SUBJECTS = {
   contract: 'blocked by a contract/validation error — needs a fix, retries cannot help',
+  project_not_ready: 'blocked: the HNRadio project has not finished a development stage',
+  cast_not_ready: 'blocked: the cast canon cannot voice a table read',
   provider: 'blocked by a provider policy throttle',
   quota: 'blocked by a provider quota cliff',
   failing: 'is failing repeatedly',
@@ -79,9 +96,20 @@ const ALERT_SUBJECTS = {
 
 const ALERT_FOOTERS = {
   contract: 'The platform is REJECTING our requests (schema/validation). This is deterministic. The global generation circuit is open and permits only one hourly recovery probe until a fix deploys.',
+  project_not_ready: 'Sleeper Hit refuses episodes until the HNRadio project finishes the stage named above (its workspace gate). No retry can pass it. The generation circuit is open; each hour it re-reads the project (free, read-only) and resumes the moment the stage is done.',
+  cast_not_ready: 'Sleeper Hit cannot voice a table read: a character in the roster has no voice in the project cast canon. Pin the voice in the cast canon. The generation circuit is open; each hour it re-reads readiness (free) and resumes once the cast is voiced.',
   provider: 'The configured writer/planner provider is policy-throttling requests. The global generation circuit is open and permits only one hourly recovery probe; provider failover or the reset window must clear it.',
-  quota: 'A provider quota/funding cliff is blocking generation. The global generation circuit is open and permits only one hourly recovery probe; a top-up, cap reset, or provider rebind must clear it.',
+  quota: 'A quota/funding cliff is blocking generation. The global generation circuit is open; each hour it re-reads the Studio Credit balance (free) instead of building an episode, and resumes — re-sending the same job request — once a top-up covers an episode.',
   failing: 'Repeated failures with nothing published tonight. Check the episode progress logs on hnradio.net/api/dramas?includeFailed=true.',
+}
+
+// Which batch flag marks an item blocked by each class (the distress alert reads them).
+const BLOCKED_AT_FIELD = {
+  provider: 'providerBlockedAt',
+  quota: 'quotaBlockedAt',
+  contract: 'contractBlockedAt',
+  project_not_ready: 'projectBlockedAt',
+  cast_not_ready: 'castBlockedAt',
 }
 
 /**
@@ -93,22 +121,25 @@ const ALERT_FOOTERS = {
  * per distress type; the hourly cron would otherwise spam.
  */
 export async function maybeSendDistressAlert(env, batch, deps) {
-  if (!env.RESEND_API_KEY || !env.ALERT_EMAIL) return null
+  if (!alertsConfigured(env)) return null
 
   const recentErrors = [
     ...(batch.errors ?? []).map((entry) => entry.message),
     ...(batch.items ?? []).map((item) => item.lastError),
   ].filter(Boolean)
-  const contract = (batch.items ?? []).some((item) => item.contractBlockedAt)
-    || recentErrors.some((message) => isContractClassFailure(message))
-  const provider = (batch.items ?? []).some((item) => item.providerBlockedAt)
-    || recentErrors.some((message) => isProviderBlockedFailure(message))
-  const quota = (batch.items ?? []).some((item) => item.quotaBlockedAt)
-    || recentErrors.some((message) => isQuotaClassFailure(message))
+  const flagged = (field, predicate) => (batch.items ?? []).some((item) => item[field])
+    || recentErrors.some((message) => predicate(message))
+  const contract = flagged('contractBlockedAt', isContractClassFailure)
+  const project = flagged('projectBlockedAt', isProjectNotReadyFailure)
+  const cast = flagged('castBlockedAt', isCastNotReadyFailure)
+  const provider = flagged('providerBlockedAt', isProviderBlockedFailure)
+  const quota = flagged('quotaBlockedAt', isQuotaClassFailure)
   const published = (batch.items ?? []).filter((item) => item.status === 'published').length
 
   let type = null
   if (contract) type = 'contract'
+  else if (project) type = 'project_not_ready'
+  else if (cast) type = 'cast_not_ready'
   else if (provider) type = 'provider'
   else if (quota) type = 'quota'
   else if (published === 0 && Number(batch.failureEvents || 0) >= ALERT_MIN_FAILURES) type = 'failing'
@@ -130,23 +161,32 @@ export async function maybeSendDistressAlert(env, batch, deps) {
     ALERT_FOOTERS[type],
   ]
 
-  try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: ALERT_FROM,
-        to: [env.ALERT_EMAIL],
-        subject: `[hnradio] nightly ${batch.date} ${ALERT_SUBJECTS[type]}`,
-        text: lines.join('\n'),
-      }),
-    })
-    if (!res.ok) return null
-    await deps.setSetting(env.DB, sentKey, nowIso())
-    return type
-  } catch {
-    return null
-  }
+  const sent = await sendOperatorAlert(env, {
+    subject: `[hnradio] nightly ${batch.date} ${ALERT_SUBJECTS[type]}`,
+    lines,
+  })
+  if (!sent) return null
+  await deps.setSetting(env.DB, sentKey, nowIso())
+  return type
+}
+
+/**
+ * The default readiness reader: the project's workspace gate and table-read
+ * readiness, the credit balance, and the publishing series' standing approval.
+ * Null when the Worker has no Story API credentials (nothing to read with).
+ */
+async function defaultReadReadiness(env, { seriesId = null } = {}) {
+  if (!env?.SLEEPERHIT_API_KEY || !env?.HNRADIO_PROJECT_ID) return null
+  const sh = new SleeperHit({
+    baseUrl: env.SLEEPERHIT_API_BASE || 'https://sleeperhit.studio',
+    apiKey: env.SLEEPERHIT_API_KEY,
+  })
+  return readReadiness(sh, {
+    projectId: env.HNRADIO_PROJECT_ID,
+    seriesId,
+    keyId: env.SLEEPERHIT_API_KEY_ID || null,
+    minCredits: MIN_EPISODE_CREDITS,
+  })
 }
 
 const defaultDependencies = {
@@ -161,6 +201,7 @@ const defaultDependencies = {
   upsertDrama,
   fetchArticle,
   fetchThread,
+  readReadiness: defaultReadReadiness,
   now: () => new Date(),
   randomUUID: () => crypto.randomUUID(),
   async fetchJson(url) {
@@ -238,7 +279,138 @@ async function loadGenerationController(env, deps) {
     probeStarted: false,
     probeStatusChecked: false,
     probeStillActive: false,
+    // The tick's readiness preflight (see ensureReadiness): read at most once.
+    readinessChecked: false,
+    readiness: null,
   }
+}
+
+function readinessAlertLines(batch, circuit) {
+  const details = circuit.readiness?.details ?? {}
+  return [
+    `hnradio cannot start episodes (${circuit.failureClass}). Nothing was spent: the readiness preflight caught it before any upload, plan, or job.`,
+    '',
+    circuit.failureMessage,
+    ...(details.stage ? [`Stage: ${details.stage}${details.missingFields?.length ? ` (missing: ${details.missingFields.join(', ')})` : ''}`] : []),
+    ...(details.missing?.length ? [`Unvoiced: ${details.missing.join(', ')}`] : []),
+    ...(Number.isFinite(Number(details.balance)) ? [`Balance: ${details.balance} (an episode needs ${details.required}).`] : []),
+    '',
+    `Batch ${batch.date}. ${ALERT_FOOTERS[circuit.failureClass] ?? ''}`,
+    'This email is sent once per outage.',
+  ]
+}
+
+/**
+ * Open (or keep open) the generation circuit on a readiness failure, and email
+ * the operator ONCE per class per outage. Nothing was spent to learn this.
+ */
+async function openReadinessCircuit(env, controller, deps, { batch, readiness }) {
+  const now = dependencyNow(deps)
+  const current = controller.circuit
+  const circuit = {
+    ...(current ?? {}),
+    state: 'open',
+    failureClass: readiness.failureClass,
+    failureCode: readiness.code,
+    failureMessage: readiness.message,
+    readiness: {
+      details: readiness.details ?? null,
+      checkedAt: now.toISOString(),
+    },
+    openedAt: current?.openedAt ?? now.toISOString(),
+    updatedAt: now.toISOString(),
+    lastFailureAt: now.toISOString(),
+    lastFailureBatchDate: batch.date,
+    // The check just ran; on an already-open circuit it IS this hour's probe.
+    lastProbeAt: current ? now.toISOString() : null,
+    probeCount: current ? Number(current.probeCount || 0) + 1 : 0,
+    nextProbeAt: new Date(now.getTime() + NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS).toISOString(),
+  }
+  await saveGenerationCircuit(env, controller, circuit, deps)
+  if (circuit.alertedClass !== readiness.failureClass) {
+    const sent = await sendOperatorAlert(env, {
+      subject: `[hnradio] ${ALERT_SUBJECTS[readiness.failureClass] ?? `blocked (${readiness.failureClass})`}`,
+      lines: readinessAlertLines(batch, circuit),
+    })
+    if (sent) {
+      await saveGenerationCircuit(env, controller, {
+        ...circuit,
+        alertedClass: readiness.failureClass,
+        alertedAt: now.toISOString(),
+      }, deps)
+    }
+  }
+  return controller.circuit
+}
+
+/**
+ * THE READINESS PREFLIGHT, once per tick, before anything is fetched, uploaded,
+ * planned, or bought. The project's workspace gate, its table-read readiness,
+ * and a balance that covers one episode must all hold; when one does not, the
+ * circuit opens with that class and the operator is told once.
+ *
+ * The preflight is also the PROBE for readiness-class circuits (project not
+ * ready, cast not ready, out of credits): an hourly read, never another paid
+ * episode. When it passes, such a circuit closes and this tick may start its
+ * one serialized generation — typically the episode the outage stopped.
+ *
+ * A read that fails is not evidence of anything: it skips this tick's
+ * generation and records a batch error, and changes no circuit.
+ */
+async function ensureReadiness(env, controller, deps, batch) {
+  if (controller.readinessChecked) return controller.readiness
+  controller.readinessChecked = true
+  const circuit = controller.circuit
+  if (circuit) {
+    // An open circuit that is not due permits no generation this tick, so a
+    // read could not change anything.
+    const nextProbeMs = Date.parse(circuit.nextProbeAt)
+    if (Number.isFinite(nextProbeMs) && dependencyNow(deps).getTime() < nextProbeMs) return null
+  }
+  if (typeof deps.readReadiness !== 'function') return null
+  const seriesId = await deps.getSetting(env.DB, 'publishingSeriesId')
+  let readiness
+  try {
+    readiness = await deps.readReadiness(env, { seriesId })
+  } catch (error) {
+    readiness = { checked: false, stage: 'preflight', error: { message: error?.message || String(error) } }
+  }
+  controller.readiness = readiness ?? null
+  if (!readiness) return null
+  if (!readiness.checked) {
+    controller.readinessUnreadable = true
+    recordBatchError(batch, `Readiness preflight could not read the ${readiness.stage || 'project'}: ${readiness.error?.message || 'unknown error'}`)
+    return readiness
+  }
+  if (!readiness.ready) {
+    await openReadinessCircuit(env, controller, deps, { batch, readiness })
+    return readiness
+  }
+  if (circuit && isReadinessClass(circuit.failureClass)) {
+    controller.circuit = null
+    controller.restrictedForRun = false
+    await deps.setSetting(env.DB, NIGHTLY_GENERATION_CIRCUIT_KEY, null)
+  }
+  return readiness
+}
+
+/** True when this tick's preflight read the project and found it able to start an episode. */
+function readinessCleared(controller) {
+  return controller.readiness?.checked === true && controller.readiness.ready === true
+}
+
+/**
+ * A readiness-class circuit that cannot grant anything this tick: its probe
+ * was the preflight read (already done), or it is not due. Selection must not
+ * even fetch a thread then — the point of reading readiness first is that
+ * nothing is fetched, uploaded, or bought for an episode that cannot start.
+ */
+function readinessCircuitHolds(controller, deps) {
+  const circuit = controller.circuit
+  if (!circuit || !isReadinessClass(circuit.failureClass)) return false
+  if (controller.readiness?.checked) return true
+  const nextProbeMs = Date.parse(circuit.nextProbeAt)
+  return Number.isFinite(nextProbeMs) && dependencyNow(deps).getTime() < nextProbeMs
 }
 
 function generationSelectionBlocked(controller) {
@@ -246,6 +418,7 @@ function generationSelectionBlocked(controller) {
   // which is the single authority for due/active probe decisions. Once a
   // successful probe closes the circuit, restrictedForRun remains true and
   // this helper prevents a same-invocation refill fan-out.
+  if (controller.readinessUnreadable) return true
   return controller.restrictedForRun && !controller.circuit
 }
 
@@ -309,7 +482,14 @@ async function acquireGenerationSlot(env, controller, deps, {
   batch,
   item,
 }) {
+  // A preflight that could not read the project is not permission to spend.
+  if (controller.readinessUnreadable) return { allowed: false, probe: false }
   const circuit = controller.circuit
+  // A readiness-class circuit is probed by the preflight read, never by an
+  // episode — except when this Worker has no preflight to run.
+  if (circuit && isReadinessClass(circuit.failureClass) && controller.readiness?.checked) {
+    return { allowed: false, probe: false }
+  }
   if (!circuit) {
     if (controller.restrictedForRun || controller.generationStarted) {
       return { allowed: false, probe: false }
@@ -535,6 +715,7 @@ async function createEpisodeWorkflow(env, preparedSource, {
   batchDate,
   attempt,
   staggerSec = 0,
+  sourceRecapture = null,
 }, deps) {
   const { thread, sourceMetadata } = preparedSource
   const drama = {
@@ -563,7 +744,12 @@ async function createEpisodeWorkflow(env, preparedSource, {
   try {
     const instance = await env.PIPELINE.create({
       id: drama.id,
-      params: { dramaId: drama.id, url: thread.url, staggerSec },
+      params: {
+        dramaId: drama.id,
+        url: thread.url,
+        staggerSec,
+        ...(sourceRecapture ? { sourceRecapture } : {}),
+      },
     })
     return {
       drama,
@@ -587,6 +773,75 @@ async function resumeArtifactWorkflow(env, drama) {
     },
   })
   return workflowId
+}
+
+/**
+ * Publish a finished MP3 and do NOTHING else: no post-production, no
+ * re-finalize. Both are paid, and re-running them for an episode whose only
+ * missing step was the feed is the loop that bought 364 finalizes in a week.
+ */
+async function publishOnlyWorkflow(env, drama, deps) {
+  const workflowId = deps.randomUUID()
+  await env.PIPELINE.create({
+    id: workflowId,
+    params: {
+      dramaId: drama.id,
+      url: drama.url,
+      publishOnly: true,
+      publishRunId: workflowId,
+    },
+  })
+  return workflowId
+}
+
+function publishHoldActive(batch, deps) {
+  const startedMs = Date.parse(`${batch?.date}T00:00:00.000Z`)
+  if (!Number.isFinite(startedMs)) return true
+  return dependencyNow(deps).getTime() - startedMs < NIGHTLY_PUBLISH_HOLD_DAYS * 24 * 60 * 60 * 1000
+}
+
+export function publishRetryDelayMs(attemptsSoFar) {
+  const n = Math.max(0, Number(attemptsSoFar) || 0)
+  return Math.min(NIGHTLY_PUBLISH_RETRY_MAX_MS, NIGHTLY_PUBLISH_RETRY_BASE_MS * 2 ** n)
+}
+
+/**
+ * A finished episode the feed has not taken. It holds its batch slot and never
+ * exhausts (exhausting would free the slot for ANOTHER paid episode that the
+ * same feed would refuse); it retries the publish step alone, backing off.
+ */
+async function recoverPublication(env, item, drama, deps, generationController) {
+  const now = dependencyNow(deps)
+  const hold = (reason) => {
+    item.status = 'publish_blocked'
+    item.lastWorkflowStatus = 'publish_blocked'
+    item.episodeId = drama.id
+    item.lastError = reason
+    item.updatedAt = now.toISOString()
+  }
+  const publishing = generationController.readiness?.publishing
+  if (publishing?.state === 'blocked') {
+    hold(publishing.reason || drama.publishError || 'The podcast feed is not accepting HNR episodes.')
+    return
+  }
+  if (publishing?.state === 'none') {
+    hold('No publishing series is configured (settings.publishingSeriesId).')
+    return
+  }
+  const retryAtMs = Date.parse(item.publishRetryAt)
+  if (Number.isFinite(retryAtMs) && now.getTime() < retryAtMs) {
+    hold(drama.publishError || 'Waiting to retry the podcast publish.')
+    return
+  }
+  const attempts = Number(item.publishAttempts || 0)
+  item.workflowId = await publishOnlyWorkflow(env, drama, deps)
+  item.episodeId = drama.id
+  item.publishAttempts = attempts + 1
+  item.publishRetryAt = new Date(now.getTime() + publishRetryDelayMs(attempts)).toISOString()
+  item.status = 'queued'
+  item.lastWorkflowStatus = 'queued'
+  item.lastError = null
+  item.updatedAt = now.toISOString()
 }
 
 /**
@@ -620,11 +875,16 @@ export function canResumeGeneration(drama, failureClass) {
 async function resumeGenerationWorkflow(env, drama, deps, failureClass = null) {
   if (!canResumeGeneration(drama, failureClass)) return null
   const workflowId = deps.randomUUID()
-  const resource = drama?.jobId
-    ? { resumeJobId: drama.jobId }
-    : drama?.planId
-      ? { resumePlanId: drama.planId }
-      : null
+  // A job refused for credits (402) is re-sent under the SAME key from its
+  // plan; resuming an older job id here would revive an abandoned take.
+  const pendingJob = drama?.pendingJob?.key && drama.pendingJob.planId ? drama.pendingJob : null
+  const resource = pendingJob
+    ? { resumePlanId: pendingJob.planId, jobKey: pendingJob.key }
+    : drama?.jobId
+      ? { resumeJobId: drama.jobId }
+      : drama?.planId
+        ? { resumePlanId: drama.planId }
+        : null
   if (!resource) return null
   await env.PIPELINE.create({
     id: workflowId,
@@ -658,23 +918,27 @@ async function recoverItem(
   const failureMessage = drama
     ? (drama.failureMessage || drama.error || null)
     : item.lastError
-  const failureClass = ['provider', 'quota', 'contract'].includes(drama?.failureClass)
+  const failureClass = isSystemicClass(drama?.failureClass)
     ? drama.failureClass
     : classifySystemicFailure({
       failureCode: drama?.failureCode,
       failureMessage,
     })
-  const blocked = Boolean(failureClass)
-  if (failureClass === 'provider') item.providerBlockedAt = nowIso()
-  if (failureClass === 'quota') item.quotaBlockedAt = nowIso()
-  if (failureClass === 'contract') item.contractBlockedAt = nowIso()
+  // Systemic failures never spend the item's attempt budget. A readiness-class
+  // failure (project/cast not ready, out of credits) that this tick's preflight
+  // has since seen cleared no longer BLOCKS: the item resumes normally instead
+  // of reopening the circuit the preflight just closed.
+  const systemic = Boolean(failureClass)
+  const blocked = systemic
+    && !(isReadinessClass(failureClass) && readinessCleared(generationController))
+  if (blocked && BLOCKED_AT_FIELD[failureClass]) item[BLOCKED_AT_FIELD[failureClass]] = nowIso()
 
   // A thread whose index has not caught up costs the item nothing for the first
   // few ticks: it is expected to settle within minutes, and spending a third of
   // a three-attempt budget on it would drop the story for the night. The hold
   // is capped so a thread that never converges still exhausts normally.
   const lagHolds = Number(item.sourceLagHolds || 0)
-  const heldForSourceLag = !blocked
+  const heldForSourceLag = !systemic
     && lagHolds < NIGHTLY_MAX_SOURCE_LAG_HOLDS
     && isTransientSourceFailure({ failureCode: drama?.failureCode, failureMessage })
   if (heldForSourceLag) {
@@ -683,21 +947,36 @@ async function recoverItem(
   }
   // Both a systemic block and an unconverged source leave the attempt budget
   // untouched; only a real generation attempt spends it.
-  const spendsAttempt = !blocked && !heldForSourceLag
+  const spendsAttempt = !systemic && !heldForSourceLag
 
   // An existing performance is already past generation. Keep its
   // post-production/publishing recovery independent from the generation
   // circuit so an MP3 can finish while writer/planner probes are restricted.
   if (drama?.artifactId) {
+    // The MP3 exists and only the feed is missing: publish, nothing else.
+    if (needsPublishOnly(drama)) {
+      await recoverPublication(env, item, drama, deps, generationController)
+      return
+    }
+    // Post-production and finalize SPEND credits. While the account is out of
+    // them, resuming would only buy the same refusal every hour.
+    if (generationController.circuit?.failureClass === 'quota') {
+      item.status = 'blocked'
+      item.lastWorkflowStatus = 'blocked'
+      item.episodeId = drama.id
+      item.lastError = generationController.circuit.failureMessage || 'Waiting for Studio Credits to finish post-production.'
+      item.updatedAt = nowIso()
+      return
+    }
     const recoveryAttempts = Number(item.recoveryAttempts || 0)
-    if (!blocked && recoveryAttempts >= NIGHTLY_MAX_ATTEMPTS) {
+    if (!systemic && recoveryAttempts >= NIGHTLY_MAX_ATTEMPTS) {
       item.status = 'exhausted'
       item.lastError = 'Artifact publishing recovery exhausted.'
       return
     }
     item.workflowId = await resumeArtifactWorkflow(env, drama)
     item.episodeId = drama.id
-    item.recoveryAttempts = blocked ? recoveryAttempts : recoveryAttempts + 1
+    item.recoveryAttempts = systemic ? recoveryAttempts : recoveryAttempts + 1
     item.status = 'queued'
     item.lastWorkflowStatus = 'queued'
     item.updatedAt = nowIso()
@@ -758,9 +1037,16 @@ async function recoverItem(
     // pipeline sends with the source. Passing the bare thread here left every
     // retry throwing before it could queue anything.
     const preparedSource = await prepareEpisodeSource(thread, deps)
+    // The earlier attempt failed before any plan read its source. If the
+    // thread has grown materially since, the pipeline may retire that capture
+    // and take a fresh one; otherwise it reuses it (one source per thread).
+    const failedBeforePlan = drama && !drama.planId && !drama.jobId
     const replacement = await createEpisodeWorkflow(env, preparedSource, {
       batchDate: batch.date,
       attempt: spendsAttempt ? attempt + 1 : attempt,
+      sourceRecapture: failedBeforePlan
+        ? { previousCommentCount: Number.isFinite(Number(drama.commentCount)) ? Number(drama.commentCount) : null }
+        : null,
     }, deps)
     const oldEpisodeId = item.episodeId
     item.episodeId = replacement.drama.id
@@ -803,6 +1089,13 @@ async function reconcileItem(
     return
   }
 
+  // A finished episode held for the feed: no Workflow to inspect, just the
+  // publish step's own schedule (this keeps held episodes cheap to walk).
+  if (item.status === 'publish_blocked' && needsPublishOnly(drama)) {
+    await recoverPublication(env, item, drama, deps, generationController)
+    return
+  }
+
   if (drama?.status === 'failed') {
     // Cumulative across the whole night — item.lastError alone undercounts
     // (a five-story batch shows at most five concurrent errors no matter how
@@ -841,7 +1134,9 @@ async function reconcileItem(
   item.updatedAt = nowIso()
   if (isActiveWorkflowStatus(status)) {
     item.status = status
-    await recoverStalledMusicWake(env, batch, item, drama, instance, deps)
+    // The music watchdog guards post-production; once an MP3 exists the only
+    // work left is the publish step, which has no music checkpoint to restart.
+    if (!drama?.audioUrl) await recoverStalledMusicWake(env, batch, item, drama, instance, deps)
     return
   }
 
@@ -872,6 +1167,7 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
   if (!allowGeneration) return
   if (activeBatchItems(batch).length >= NIGHTLY_TARGET) return
   if (generationSelectionBlocked(generationController)) return
+  if (readinessCircuitHolds(generationController, deps)) return
   const attempted = new Set((batch.items ?? []).map((item) => String(item.hnId)))
   const seenThisPass = new Set()
   for (const id of await topStories(deps)) {
@@ -992,6 +1288,8 @@ export async function reconcileNightlyBatch(env, date, {
     batch.generationSupersededAt ??= nowIso()
     batch.supersededByDate ??= supersededByDate
   }
+  // Read readiness once per tick, before any item can start paid work.
+  await ensureReadiness(env, generationController, deps, batch)
 
   for (const item of batch.items) {
     const ownerDates = itemOwnerDateByKey
@@ -1037,7 +1335,11 @@ export async function reconcileNightlyBatch(env, date, {
   if (published >= NIGHTLY_TARGET) {
     batch.status = 'complete'
   } else if (!allowGeneration) {
-    batch.status = batch.items.some((item) => isActiveWorkflowStatus(item.status))
+    // A finished episode waiting on the feed keeps its batch alive, or it would
+    // be forgotten when the batch is superseded and never published.
+    const holding = publishHoldActive(batch, deps)
+    batch.status = batch.items.some((item) => isActiveWorkflowStatus(item.status)
+      || (holding && item.status === 'publish_blocked'))
       ? 'draining'
       : 'superseded'
   } else {

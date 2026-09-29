@@ -528,7 +528,10 @@ test('nightly records full article and comment proof before creating a workflow'
   assert.match(drama.progress[0].message, /50\/50 comments and full article/)
 })
 
-test('a ready but unpublished terminal Workflow resumes the same artifact', async () => {
+test('a ready but unpublished MP3 gets a publish-only recovery, never a re-finalize', async () => {
+  // The paid loop this closes: a publish refusal was swallowed, the episode
+  // stayed unpublished, and every hour the reconciler re-ran post-production
+  // AND finalize on an MP3 that was already finished — 364 finalizes in a week.
   const date = '2026-07-15'
   const drama = {
     id: 'episode_2',
@@ -561,10 +564,16 @@ test('a ready but unpublished terminal Workflow resumes the same artifact', asyn
   const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
 
   assert.equal(h.creates.length, 1)
-  assert.equal(h.creates[0].params.dramaId, drama.id)
-  assert.equal(h.creates[0].params.resumeArtifactId, drama.artifactId)
+  assert.deepEqual(h.creates[0].params, {
+    dramaId: drama.id,
+    url: drama.url,
+    publishOnly: true,
+    publishRunId: 'resume_watchdog_1',
+  })
+  assert.equal(h.creates[0].params.resumeArtifactId, undefined, 'no post-production, no re-finalize')
   assert.equal(reconciled.items[0].episodeId, drama.id)
-  assert.equal(reconciled.items[0].recoveryAttempts, 1)
+  assert.equal(reconciled.items[0].recoveryAttempts, 0, 'publishing spends no artifact-recovery attempt')
+  assert.equal(reconciled.items[0].publishAttempts, 1)
   assert.equal(reconciled.status, 'running')
 })
 
@@ -601,7 +610,8 @@ test('a previously published slot is revalidated before batch completion', async
   const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
 
   assert.equal(reconciled.items[0].status, 'queued')
-  assert.equal(reconciled.items[0].recoveryAttempts, 1)
+  assert.equal(reconciled.items[0].publishAttempts, 1)
+  assert.equal(h.creates[0].params.publishOnly, true)
   assert.equal(reconciled.published, 0)
 })
 
@@ -1261,7 +1271,9 @@ test('the newest batch exclusively owns artifact recovery for a shared episode',
   })
 
   assert.equal(h.creates.length, 1)
-  assert.equal(h.creates[0].params.resumeArtifactId, episode.artifactId)
+  // The MP3 exists, so the recovery is the publish step alone.
+  assert.equal(h.creates[0].params.publishOnly, true)
+  assert.equal(h.creates[0].params.dramaId, episode.id)
   assert.equal(batches[0].items[0].status, 'superseded')
   assert.equal(batches[1].items[0].status, 'queued')
 })
@@ -1639,4 +1651,329 @@ test('a failure that never reached an episode still classifies from the item', a
   const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
   assert.ok(circuit, 'with no episode row, the item is the only signal and must still count')
   assert.equal(circuit.failureClass, 'quota')
+})
+
+// ── Readiness preflight (H-B), publish-only recovery (H-A), new classes ─────
+
+function withAlerts(t, h) {
+  h.env.RESEND_API_KEY = 'test_resend_key'
+  h.env.ALERT_EMAIL = 'ops@example.com'
+  const emails = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (_url, options) => {
+    emails.push(JSON.parse(options.body))
+    return { ok: true, json: async () => ({}) }
+  }
+  t.after(() => { globalThis.fetch = realFetch })
+  return emails
+}
+
+function countingSelection(h) {
+  const counts = { fetchJson: 0, fetchThread: 0 }
+  const fetchJson = h.dependencies.fetchJson
+  const fetchThread = h.dependencies.fetchThread
+  h.dependencies.fetchJson = async (...args) => { counts.fetchJson++; return fetchJson(...args) }
+  h.dependencies.fetchThread = async (...args) => { counts.fetchThread++; return fetchThread(...args) }
+  return counts
+}
+
+const READY_PUBLISHING = { state: 'granted', code: null, reason: null }
+const notReady = (failureClass, extra = {}) => ({
+  checked: true,
+  ready: false,
+  failureClass,
+  code: { project_not_ready: 'project_precondition_failed', cast_not_ready: 'cast_precondition_failed', quota: 'insufficient_credits' }[failureClass],
+  message: `not ready: ${failureClass}`,
+  details: failureClass === 'project_not_ready' ? { stage: 'full_coverage', missingFields: [] } : {},
+  publishing: READY_PUBLISHING,
+  ...extra,
+})
+const ready = (extra = {}) => ({ checked: true, ready: true, failureClass: null, publishing: READY_PUBLISHING, ...extra })
+
+for (const [failureClass, subject] of [
+  ['project_not_ready', /has not finished a development stage/],
+  ['cast_not_ready', /cannot voice a table read/],
+  ['quota', /quota cliff/],
+]) {
+  test(`a ${failureClass} preflight stops the show before anything is fetched, and alerts once`, async (t) => {
+    const h = harness({ topIds: [101, 102] })
+    const emails = withAlerts(t, h)
+    const selection = countingSelection(h)
+    let reads = 0
+    h.dependencies.readReadiness = async () => { reads++; return notReady(failureClass) }
+    const date = '2026-09-29'
+
+    let batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+    assert.equal(reads, 1)
+    assert.deepEqual(selection, { fetchJson: 0, fetchThread: 0 }, 'no story is fetched for an episode that cannot start')
+    assert.equal(h.creates.length, 0)
+    assert.equal(batch.items.length, 0)
+    const circuit = h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)
+    assert.equal(circuit.failureClass, failureClass)
+    assert.equal(emails.length, 1)
+    assert.match(emails[0].subject, subject)
+
+    // Within the hour: no read (the circuit is not due), no email.
+    h.clock.now = new Date(h.clock.now.getTime() + 10 * 60 * 1000)
+    batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+    assert.equal(reads, 1)
+    assert.equal(emails.length, 1)
+
+    // The hourly probe is the READ, never an episode — and it does not re-alert.
+    h.clock.now = new Date(h.clock.now.getTime() + NIGHTLY_SYSTEMIC_PROBE_COOLDOWN_MS)
+    await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+    assert.equal(reads, 2)
+    assert.equal(h.creates.length, 0)
+    assert.equal(emails.length, 1, 'one email per outage')
+    assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).probeCount, 1)
+  })
+}
+
+test('a passing read closes a readiness circuit and re-sends the job a 402 refused, under the same key', async () => {
+  const h = harness({ topIds: [] })
+  const date = '2026-09-29'
+  const pendingJob = {
+    key: 'episode_q-recovery-run_1-job-r1-j0',
+    planId: 'plan_q',
+    body: { storyPlanId: 'plan_q', artifactRequests: [{ type: 'table_read' }] },
+  }
+  h.dramas.set('episode_q', {
+    id: 'episode_q',
+    hnId: '88',
+    status: 'failed',
+    failureClass: 'quota',
+    failureCode: 'insufficient_credits',
+    error: 'Not enough Studio Credits. This job needs 20 credits; you have 4.',
+    planId: 'plan_q',
+    jobId: 'job_older_take',
+    pendingJob,
+    url: 'https://news.ycombinator.com/item?id=88',
+    progress: [],
+  })
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open',
+    failureClass: 'quota',
+    failureMessage: 'Not enough Studio Credits.',
+    openedAt: '2026-07-16T04:00:00.000Z',
+    nextProbeAt: '2026-07-16T05:00:00.000Z',
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date, status: 'running', target: 5, errors: [],
+    items: [{
+      hnId: '88', url: 'https://news.ycombinator.com/item?id=88', title: 'Story 88',
+      episodeId: 'episode_q', workflowId: 'episode_q', attempt: 2, recoveryAttempts: 0, status: 'blocked',
+    }],
+  })
+  h.dependencies.readReadiness = async () => ready()
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY), null, 'the read closed the circuit')
+  assert.equal(h.creates.length, 1)
+  assert.deepEqual(h.creates[0].params, {
+    dramaId: 'episode_q',
+    url: 'https://news.ycombinator.com/item?id=88',
+    resumePlanId: 'plan_q',
+    jobKey: pendingJob.key,
+    recoveryRunId: 'resume_watchdog_1',
+  }, 'the refused job is re-sent, not the older take resumed')
+  assert.equal(batch.items[0].status, 'queued')
+  assert.equal(batch.items[0].attempt, 2, 'an outage never spends an attempt')
+  assert.equal(batch.items[0].quotaBlockedAt, undefined, 'a cleared class is not flagged as blocking')
+})
+
+test('a preflight that cannot read spends nothing and changes no circuit', async () => {
+  const h = harness({ topIds: [101] })
+  const selection = countingSelection(h)
+  h.dependencies.readReadiness = async () => ({ checked: false, stage: 'credits', error: { message: 'Service Unavailable', status: 503 } })
+  const date = '2026-09-29'
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.creates.length, 0)
+  assert.equal(selection.fetchThread, 0)
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY) ?? null, null)
+  assert.match(batch.errors.at(-1).message, /Readiness preflight could not read the credits: Service Unavailable/)
+})
+
+function heldEpisodeFixture({ item: itemExtra = {}, drama: dramaExtra = {} } = {}) {
+  const date = '2026-09-29'
+  const drama = {
+    id: 'episode_held',
+    hnId: '55',
+    status: 'ready',
+    audioUrl: 'https://files.example/held.mp3',
+    artifactId: 'artifact_held',
+    publishState: 'blocked',
+    publishError: 'The HNR series has no standing approval.',
+    url: 'https://news.ycombinator.com/item?id=55',
+    title: 'Story 55',
+    progress: [{ message: 'Done — your podcast is ready.' }],
+    ...dramaExtra,
+  }
+  const item = {
+    hnId: '55', url: drama.url, title: drama.title,
+    episodeId: drama.id, workflowId: 'publish_run_0', attempt: 1, recoveryAttempts: 0, status: 'queued',
+    ...itemExtra,
+  }
+  const h = harness({
+    settings: new Map([[nightlyBatchKey(date), { date, status: 'running', target: 5, items: [item], errors: [] }]]),
+    dramas: new Map([[drama.id, drama]]),
+    topIds: [],
+  })
+  h.workflowStatuses.set('publish_run_0', 'complete')
+  return { date, drama, h }
+}
+
+test('a finished episode waits for the grant: no workflow while the feed is known to refuse it', async () => {
+  const { date, h } = heldEpisodeFixture()
+  h.dependencies.readReadiness = async () => ready({
+    publishing: { state: 'blocked', code: 'standing_approval_missing', reason: 'The HNR series has no standing approval; grant it.' },
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.creates.length, 0)
+  const [item] = batch.items
+  assert.equal(item.status, 'publish_blocked')
+  assert.match(item.lastError, /no standing approval/)
+  assert.equal(item.attempt, 1)
+  assert.equal(item.recoveryAttempts, 0)
+  assert.equal(batch.failureEvents ?? 0, 0, 'a held episode is not a failure')
+})
+
+test('publish-only retries back off instead of running every hour', async () => {
+  const { date, h } = heldEpisodeFixture()
+  let batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.publishOnly, true)
+  const firstRetryAt = Date.parse(batch.items[0].publishRetryAt)
+  assert.equal(firstRetryAt - h.clock.now.getTime(), 60 * 60 * 1000)
+
+  h.workflowStatuses.set(h.creates[0].id, 'complete')
+  h.clock.now = new Date(h.clock.now.getTime() + 30 * 60 * 1000)
+  batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 1, 'not before the retry time')
+  assert.equal(batch.items[0].status, 'publish_blocked')
+
+  h.clock.now = new Date(firstRetryAt + 1)
+  batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 2)
+  assert.equal(batch.items[0].publishAttempts, 2)
+  assert.equal(Date.parse(batch.items[0].publishRetryAt) - h.clock.now.getTime(), 2 * 60 * 60 * 1000)
+})
+
+test('a superseded batch keeps draining while it holds a finished, unpublished episode', async () => {
+  const { date, h } = heldEpisodeFixture({ item: { status: 'publish_blocked', publishRetryAt: '2026-07-17T00:00:00.000Z' } })
+  const batch = await reconcileNightlyBatch(h.env, date, {
+    dependencies: h.dependencies, allowGeneration: false, supersededByDate: '2026-09-30',
+  })
+  assert.equal(batch.items[0].status, 'publish_blocked')
+  assert.equal(batch.status, 'draining', 'the episode is not forgotten when its night is over')
+})
+
+test('post-production waits while the account is out of credits', async () => {
+  const h = harness({ topIds: [] })
+  const date = '2026-09-29'
+  h.dramas.set('episode_pp', {
+    id: 'episode_pp', hnId: '66', status: 'failed', artifactId: 'artifact_pp', audioUrl: null,
+    failureClass: 'quota', error: 'Not enough Studio Credits to finalize.',
+    url: 'https://news.ycombinator.com/item?id=66', progress: [],
+  })
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open', failureClass: 'quota', failureMessage: 'Not enough Studio Credits.',
+    nextProbeAt: '2026-07-16T07:00:00.000Z',
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date, status: 'running', target: 5, errors: [],
+    items: [{ hnId: '66', url: 'https://news.ycombinator.com/item?id=66', title: 'Story 66', episodeId: 'episode_pp', workflowId: 'episode_pp', attempt: 1, recoveryAttempts: 0, status: 'failed' }],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.creates.length, 0, 'finalize would only buy the same 402')
+  assert.equal(batch.items[0].status, 'blocked')
+  assert.equal(batch.items[0].recoveryAttempts, 0)
+})
+
+test('an episode refused on project state opens a project_not_ready circuit, keeps its attempts, and alerts', async (t) => {
+  const h = harness({ topIds: [] })
+  const emails = withAlerts(t, h)
+  const date = '2026-09-29'
+  h.dramas.set('episode_gate', {
+    id: 'episode_gate', hnId: '77', status: 'failed',
+    failureCode: 'project_precondition_failed',
+    failureMessage: 'Pass full Series Bible coverage before starting episodes, project videos, or publishing.',
+    url: 'https://news.ycombinator.com/item?id=77', progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date, status: 'running', target: 5, errors: [],
+    items: [{ hnId: '77', url: 'https://news.ycombinator.com/item?id=77', title: 'Story 77', episodeId: 'episode_gate', workflowId: 'episode_gate', attempt: 3, recoveryAttempts: 0, status: 'failed' }],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(batch.items[0].status, 'blocked')
+  assert.equal(batch.items[0].attempt, 3, 'state is not an attempt')
+  assert.ok(batch.items[0].projectBlockedAt)
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).failureClass, 'project_not_ready')
+  assert.equal(h.creates.length, 0)
+  assert.equal(emails.length, 1)
+  assert.match(emails[0].subject, /has not finished a development stage/)
+})
+
+test('only an attempt that failed before any plan may recapture its source', async () => {
+  const h = harness({ topIds: [] })
+  const date = '2026-09-29'
+  h.dramas.set('episode_early', {
+    id: 'episode_early', hnId: '77', status: 'failed', commentCount: 20,
+    error: 'Table-read script generation produced empty output.',
+    url: 'https://news.ycombinator.com/item?id=77', progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date, status: 'running', target: 5, errors: [],
+    items: [
+      { hnId: '77', url: 'https://news.ycombinator.com/item?id=77', title: 'Story 77', episodeId: 'episode_early', workflowId: 'episode_early', attempt: 1, recoveryAttempts: 0, status: 'failed' },
+    ],
+  })
+
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 1)
+  assert.deepEqual(h.creates[0].params.sourceRecapture, { previousCommentCount: 20 })
+})
+
+test('an attempt that failed after its plan never recaptures (the plan read that source)', async () => {
+  const h = harness({ topIds: [] })
+  const date = '2026-09-29'
+  // A contract failure after a job exists replans from scratch — a replacement
+  // — but a plan already consumed the capture, so it is reused, not replaced.
+  h.dramas.set('episode_late', {
+    id: 'episode_late', hnId: '78', status: 'failed', commentCount: 20, planId: 'plan_late', jobId: 'job_late',
+    failureClass: 'contract', error: '`creativeBrief` is invalid: Too big',
+    url: 'https://news.ycombinator.com/item?id=78', progress: [],
+  })
+  h.settings.set(NIGHTLY_GENERATION_CIRCUIT_KEY, {
+    state: 'open', failureClass: 'contract', failureMessage: 'x', nextProbeAt: '2026-07-16T05:00:00.000Z',
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date, status: 'running', target: 5, errors: [],
+    items: [
+      { hnId: '78', url: 'https://news.ycombinator.com/item?id=78', title: 'Story 78', episodeId: 'episode_late', workflowId: 'episode_late', attempt: 1, recoveryAttempts: 0, status: 'failed' },
+    ],
+  })
+
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.creates.length, 1, 'the due contract probe replans')
+  assert.equal(h.creates[0].params.sourceRecapture, undefined)
+})
+
+test('a held episode stops keeping its night alive after the hold window', async () => {
+  const { date, h } = heldEpisodeFixture({ item: { status: 'publish_blocked', publishRetryAt: '2026-12-31T00:00:00.000Z' } })
+  h.clock.now = new Date('2026-10-14T00:00:00.000Z')
+  const batch = await reconcileNightlyBatch(h.env, date, {
+    dependencies: h.dependencies, allowGeneration: false, supersededByDate: '2026-10-13',
+  })
+  assert.equal(batch.items[0].status, 'publish_blocked')
+  assert.equal(batch.status, 'superseded', 'old nights are not walked forever while the feed is blocked')
+  assert.equal(h.creates.length, 0)
 })

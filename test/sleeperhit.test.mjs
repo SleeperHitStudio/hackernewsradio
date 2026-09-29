@@ -13,27 +13,28 @@ test('Sleeper client StoryJob polling budget is at least 60 minutes', () => {
   assert.ok(STORY_JOB_POLL_ATTEMPTS * STORY_JOB_POLL_INTERVAL_MS >= 60 * 60 * 1000)
 })
 
-test('text source uploads preserve the full-context policy and completeness proof', async () => {
+test('text source uploads carry the item identity top-level and the full-context policy in metadata', async () => {
   const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
   const calls = []
   client.request = async (path, options) => {
     calls.push({ path, options })
-    return { source: { id: 'source_1' } }
+    return { source: { id: 'source_1', status: 'PENDING' } }
   }
   const metadata = {
-    sourceProducer: 'hackernewsradio',
     sourceContextMode: 'full',
     sourceCompleteness: { comments: { complete: true, expected: 2, fetched: 2 } },
   }
 
-  const sourceId = await client.addTextSource('project_1', {
+  const captured = await client.addTextSource('project_1', {
     content: 'ARTICLE-END\nCOMMENT-END',
     label: 'HN thread 42',
     metadata,
+    producer: 'hackernewsradio',
+    externalId: '42',
     idempotencyKey: 'episode-source',
   })
 
-  assert.equal(sourceId, 'source_1')
+  assert.deepEqual(captured, { id: 'source_1', deduplicated: false, capturedComments: null, status: 'PENDING' })
   assert.deepEqual(calls, [{
     path: '/story-projects/project_1/sources',
     options: {
@@ -43,10 +44,29 @@ test('text source uploads preserve the full-context policy and completeness proo
         type: 'text',
         content: 'ARTICLE-END\nCOMMENT-END',
         label: 'HN thread 42',
+        producer: 'hackernewsradio',
+        externalId: '42',
         metadata,
       },
     },
   }])
+  assert.equal('sourceProducer' in calls[0].options.body.metadata, false)
+})
+
+test('a repeat submission of the same thread reports the existing source and what it captured', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  client.request = async () => ({
+    deduplicated: true,
+    source: {
+      id: 'source_first',
+      status: 'READY',
+      metadata: { sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } } },
+    },
+  })
+  const captured = await client.addTextSource('project_1', {
+    content: 'x', producer: 'hackernewsradio', externalId: '42', idempotencyKey: 'retry-source',
+  })
+  assert.deepEqual(captured, { id: 'source_first', deduplicated: true, capturedComments: 57, status: 'READY' })
 })
 
 test('plan and job recovery call the same-resource resume endpoints with stable keys', async () => {

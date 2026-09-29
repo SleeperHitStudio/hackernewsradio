@@ -11,6 +11,8 @@ import {
   buildSourceMetadata,
   fetchArticle,
   fetchThread,
+  sourceIdentity,
+  threadGrewMaterially,
   threadToTranscript,
   verifiedSourceProgress,
 } from './hn.mjs'
@@ -21,18 +23,27 @@ import {
   appendMemory,
   buildSeriesContext,
   extractEpisodeMemory,
-  trimBibleEpisodes,
 } from './show-memory.mjs'
 import {
-  AVATAR_STYLE,
   HOSTS,
   OUTPUT_BUDGET_RE,
   buildBrief,
   buildStoryJobArtifactRequests,
-  hostAvatarUrl,
+  castCanonCharacters,
   hostForCharacter,
   pageTargetFor,
+  staleCastCanonCharacters,
 } from './brief.mjs'
+import {
+  publishKeyPrefix,
+  publishingReadiness,
+  standingApprovalOf,
+} from './readiness.mjs'
+import {
+  PUBLISH_BLOCKED_ALERT_KEY,
+  alertOnce,
+  clearAlertLatch,
+} from './alerts.mjs'
 import { patchDrama, appendProgress, getDrama, getSetting, setSetting, deleteOtherEpisodesOfThread } from './store.mjs'
 import {
   STORY_JOB_POLL_CHUNKS,
@@ -59,7 +70,16 @@ import {
   storyJobIdempotencyScope,
   storyJobPollOutcome,
   terminalStoryJobFallbackPlanId,
+  typedRefusal,
+  capturedSource,
+  isInsufficientCredits,
+  storyJobKey,
 } from './reliability.mjs'
+import {
+  EPISODE_DESCRIPTION_DIRECTION,
+  PUBLISHED_PROGRESS_MESSAGE,
+  planApprovalBody,
+} from './publishing.mjs'
 
 export class HnrPipeline extends WorkflowEntrypoint {
   async run(event, step) {
@@ -76,14 +96,40 @@ export class HnrPipeline extends WorkflowEntrypoint {
       appendProgress(db, dramaId, message, { runId: progressRunId, eventKey }).catch(() => {})
     const isRepair = Boolean(event.payload.repairArtifactId)
     const isResume = Boolean(event.payload.resumeArtifactId)
+    // Publish-only recovery: the MP3 already exists and only the feed step is
+    // missing. No post-production, no re-finalize — those are paid, and a
+    // swallowed publish error used to re-run them every hour (364 finalizes in
+    // one week for episodes that were already finished).
+    const isPublishOnly = Boolean(event.payload.publishOnly)
     const resumePlanId = event.payload.resumePlanId ?? null
     const resumeJobId = event.payload.resumeJobId ?? null
     const isUpstreamRecovery = Boolean(resumePlanId || resumeJobId)
-    const recoveryOriginal = (isRepair || isResume || isUpstreamRecovery)
+    const recoveryOriginal = (isRepair || isResume || isUpstreamRecovery || isPublishOnly)
       ? await getDrama(db, dramaId)
+      : null
+    // The job request a 402 refused, when this run is the recovery that
+    // re-sends it (see the job step).
+    const pendingJob = event.payload.jobKey
+      && recoveryOriginal?.pendingJob?.key === event.payload.jobKey
+      && recoveryOriginal.pendingJob.body
+      ? recoveryOriginal.pendingJob
       : null
 
     try {
+      if (isPublishOnly) {
+        if (!recoveryOriginal?.artifactId || !recoveryOriginal?.audioUrl) {
+          throw new Error(`Cannot publish ${dramaId}: the episode has no finished MP3.`)
+        }
+        await note('Publishing the finished episode to the HNR podcast feed…', `publish-only:${progressRunId}`)
+        await this.publishToFeed(step, {
+          env, db, sh, dramaId, note,
+          artifactId: recoveryOriginal.artifactId,
+          title: recoveryOriginal.title || 'Hacker News Radio',
+          payload: event.payload,
+        })
+        return
+      }
+
       if (staggerSec > 0) await step.sleep('stagger', `${staggerSec} seconds`)
 
       const recoversExistingSource = isRepair || isResume || isUpstreamRecovery
@@ -145,37 +191,71 @@ export class HnrPipeline extends WorkflowEntrypoint {
 
       let sourceId = null
       if (!isUpstreamRecovery) {
-        // Project cast canon: pinned host portraits + the show's portrait style,
-        // inherited by every episode at creation (the platform seeds them before
-        // generation, so hosts are never re-rendered). One GET, PATCH only when
-        // out of date; tolerant of platform builds that predate the endpoint —
-        // the per-episode 'pin headshots' step stays as the fallback.
-        await runWorkflowStepOnce(step, 'ensure cast canon', async () => {
-          try {
-            const canon = await sh.getCastCanon(projectId)
-            const have = new Map((canon?.content?.characters ?? []).map((c) => [c.name.toUpperCase(), c.avatarUrl]))
-            const current = canon?.content?.avatarStyle === AVATAR_STYLE
-              && HOSTS.every((h) => have.get(h.name) === hostAvatarUrl(h.name))
-            if (!current) {
-              await sh.patchCastCanon(projectId, {
-                avatarStyle: AVATAR_STYLE,
-                characters: HOSTS.map((h) => ({ name: h.name, avatarUrl: hostAvatarUrl(h.name) })),
-              })
-              await note('Refreshed the show cast canon (portraits + style)')
-            }
-          } catch { /* endpoint not deployed yet — pin step covers the hosts */ }
-        })
+        // Project cast canon: the hosts' pinned portraits AND voices, inherited
+        // by every episode at creation. The platform starts a table read only
+        // when the canon voices every character, so a canon without the voices
+        // is a show that cannot perform. One GET; PATCH only the hosts that
+        // differ, compared on the characters alone. A refusal is NOT swallowed:
+        // the old catch-all hid a 400 on every PATCH for ten weeks.
+        const canonRefreshed = await this.hardStep(step, 'ensure cast canon', async () => {
+          const desired = castCanonCharacters(await getSetting(db, 'pinnedVoices'))
+          const stale = staleCastCanonCharacters(await sh.getCastCanon(projectId), desired)
+          if (!stale.length) return []
+          await sh.patchCastCanon(projectId, { characters: stale })
+          return stale.map((character) => character.name)
+        }, { replaySafe: true })
+        if (Array.isArray(canonRefreshed) && canonRefreshed.length) {
+          await note(`Refreshed the show cast canon for ${canonRefreshed.join(', ')} (portraits + pinned voices)`)
+        }
 
-        await note('Adding the verified full article and comment thread to HNRadio…')
-        sourceId = await this.hardStep(step, 'add source', () =>
+        // One source per thread: the platform returns the source an earlier
+        // attempt already captured (`deduplicated`) instead of taking a second
+        // copy, so a retry never pays to digest the same thread twice.
+        const identity = sourceIdentity(thread)
+        const addSource = (label, idempotencyKey) => this.hardStep(step, label, () =>
           sh.addTextSource(projectId, {
             content: sourceTranscript,
             label: `HN thread ${thread.id}`,
             metadata: sourceMetadata,
-            idempotencyKey: `${dramaId}-source`,
+            ...identity,
+            idempotencyKey,
           }), { replaySafe: true })
+        await note('Adding the verified full article and comment thread to HNRadio…')
+        let captured = capturedSource(await addSource('add source', `${dramaId}-source`))
+        if (captured.deduplicated) {
+          // Recapture only when the earlier attempt failed BEFORE any plan read
+          // the source and the thread has grown materially since: then the old
+          // capture is stale and nothing depends on it. Otherwise the episode
+          // is written from the capture the first attempt paid for.
+          const recapture = event.payload.sourceRecapture ?? null
+          const previousComments = captured.capturedComments ?? recapture?.previousCommentCount ?? null
+          if (recapture && threadGrewMaterially(previousComments, thread.total)) {
+            await note(`HN thread ${thread.id} grew from ${previousComments} to ${thread.total} comments since the failed attempt — recapturing it…`)
+            const staleSourceId = captured.id
+            await this.hardStep(step, 'retire stale source', async () => {
+              try {
+                await sh.deleteSource(projectId, staleSourceId, {
+                  idempotencyKey: `${dramaId}-source-retire-${staleSourceId}`,
+                })
+              } catch (error) {
+                // Already gone (an earlier attempt of this step landed).
+                if (Number(error?.status) !== 404) throw error
+              }
+            }, { replaySafe: true })
+            captured = capturedSource(await addSource('recapture source', `${dramaId}-source-recapture`))
+          } else {
+            await note(
+              `Reusing the source already captured for HN thread ${thread.id}`
+              + `${previousComments !== null ? ` (${previousComments} comments)` : ''}.`,
+              'source-deduplicated',
+            )
+          }
+        }
+        sourceId = captured.id
+        if (!sourceId) throw new Error('Sleeper Hit returned no source id for the HN thread.')
         await patchDrama(db, dramaId, {
           sourceId,
+          sourceDeduplicated: captured.deduplicated,
           sourceCompleteness: sourceMetadata.sourceCompleteness,
         })
         await this.pollChunked(step, 'source', 8, async () => {
@@ -245,14 +325,19 @@ export class HnrPipeline extends WorkflowEntrypoint {
       }
       const approvePlanForNightly = async (label, planId, status) => {
         if (status !== 'REQUIRES_APPROVAL') return
-        await note('Approving the blueprint…')
+        // HNR runs unattended under the series' STANDING APPROVAL (bound to its
+        // API key). When the platform reports that grant, the approval carries
+        // no human confirmation claim; see planApprovalBody.
+        const approval = await runWorkflowStepOnce(step, `${label} standing approval`, () =>
+          this.readStandingApproval(env, db, sh))
+        await note(approval?.granted
+          ? 'Approving the blueprint under the series\' standing approval…'
+          : 'Approving the blueprint…')
         await this.hardStep(step, label, () =>
           sh.request(`/story-plans/${planId}/approve`, {
             method: 'POST',
             idempotencyKey: `${dramaId}-approve-${planId}`,
-            // The nightly pipeline runs with the operator's standing approval;
-            // Sleeper requires the confirmation flag explicitly.
-            body: { userConfirmed: true },
+            body: planApprovalBody(approval),
           }), { replaySafe: true })
       }
 
@@ -342,24 +427,58 @@ export class HnrPipeline extends WorkflowEntrypoint {
                 // job would double-spend credits. jobRoll bumps only when we
                 // DELIBERATELY abandon a job (terminal failure / thin script);
                 // without it the idempotency key would hand back the corpse.
-                jobId = jobId ?? await this.hardStep(step, `create job r${round}j${jobRoll}`, async () => {
-                  const artifactRequests = buildStoryJobArtifactRequests({
-                    existingArtifactId: artifactId,
-                    pinnedVoices: includePinnedCast ? pinnedVoices : null,
-                    narrationPolicy: 'suppress',
-                    notes: brief.performanceNotes,
-                  })
-                  if (!artifactRequests) throw new Error('Existing artifacts must use resume/repair, not createJob.')
-                  return sh.request('/story-jobs', {
-                    method: 'POST',
-                    idempotencyKey: `${jobScope}-job-r${round}-j${jobRoll}`,
-                    body: {
-                      storyPlanId: planId,
-                      artifactRequests,
-                    },
-                  }).then((r) => r.job.id)
-                }, { replaySafe: true })
-                await patchDrama(db, dramaId, { jobId })
+                if (!jobId) {
+                  // After a 402 the recovery re-sends the refused request
+                  // VERBATIM — same key, same body. The platform binds the job
+                  // to the key, and a key re-sent with a different body is a
+                  // 409, so the body is replayed from the episode row rather
+                  // than rebuilt from a brief whose show memory has moved on.
+                  const replay = round === 1 && jobRoll === 0 ? pendingJob : null
+                  const jobKey = storyJobKey({ jobScope, round, jobRoll, resumeJobKey: replay?.key })
+                  let jobBody = replay?.body ?? null
+                  if (!jobBody) {
+                    const artifactRequests = buildStoryJobArtifactRequests({
+                      existingArtifactId: artifactId,
+                      pinnedVoices: includePinnedCast ? pinnedVoices : null,
+                      narrationPolicy: 'suppress',
+                      notes: brief.performanceNotes,
+                    })
+                    if (!artifactRequests) throw new Error('Existing artifacts must use resume/repair, not createJob.')
+                    jobBody = { storyPlanId: planId, artifactRequests }
+                  }
+                  try {
+                    jobId = await this.hardStep(step, `create job r${round}j${jobRoll}`, () =>
+                      sh.request('/story-jobs', {
+                        method: 'POST',
+                        idempotencyKey: jobKey,
+                        body: jobBody,
+                      }).then((r) => r.job.id), { replaySafe: true })
+                  } catch (err) {
+                    if (isInsufficientCredits(err)) {
+                      // STOP: no retry buys credits. Keep the request, so the
+                      // recovery after a top-up re-sends exactly it (the 402's
+                      // details.jobId, when the platform already created the
+                      // job, is resumed by the same key — never a second job).
+                      await patchDrama(db, dramaId, {
+                        planId: jobBody.storyPlanId,
+                        pendingJob: {
+                          key: jobKey,
+                          planId: jobBody.storyPlanId,
+                          body: jobBody,
+                          refusedJobId: err?.details?.jobId ?? null,
+                          refusedAt: new Date().toISOString(),
+                        },
+                      })
+                      await note(
+                        `Out of Studio Credits for the table read (${err?.message || err}) — stopping; `
+                        + 'the same job request is re-sent after a top-up.',
+                        `insufficient-credits:${jobKey}`,
+                      )
+                    }
+                    throw err
+                  }
+                }
+                await patchDrama(db, dramaId, { jobId, pendingJob: null })
                 artifactId = await pollJobArtifact(`job r${round}a${attempt}`, jobId)
 
                 // Length gate: the writer is high-variance — some rolls produce
@@ -370,8 +489,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
                 // A valid fast panel take lands around 56-60 spoken words/page;
                 // reject only below 55/page so we stop discarding good audio.
                 const take = await runWorkflowStepOnce(step, `measure r${round}a${attempt}`, async () => {
-                  const res = await sh.request(`/artifacts/${artifactId}/script?limit=500`)
-                  const entries = res.script?.selection?.entries ?? res.script?.entries ?? []
+                  const entries = await sh.getScriptEntries(artifactId)
                   return {
                     spokenWords: entries.reduce(
                       (sum, e) => sum + String(e.text ?? '').trim().split(/\s+/).filter(Boolean).length, 0),
@@ -561,8 +679,9 @@ export class HnrPipeline extends WorkflowEntrypoint {
           }
         } catch (err) {
           // Memory is an improvement to the NEXT episode, never a reason to
-          // fail this one.
-          console.log(`[hnr] show memory skipped: ${err?.message || err}`)
+          // fail this one — but a failure is written where the operator reads,
+          // not only to a console nobody tails (887 of these went unseen).
+          await note(`Show memory not recorded (${err?.message || err})`)
         }
       })
       await step.sleep('post-prod break 3', '2 seconds')
@@ -611,49 +730,20 @@ export class HnrPipeline extends WorkflowEntrypoint {
 
       await step.sleep('post-ready break', '2 seconds')
       await runWorkflowStepOnce(step, 'replace + log', async () => {
+        // HNR no longer logs episodes into the Series Bible: the show's memory
+        // lives on its releases (decided 2026-08-08), and the Bible's 100-row
+        // episode cap 400'd every append from 08-05 on.
         try {
           const removed = await deleteOtherEpisodesOfThread(db, thread.id, 'podcast', dramaId)
           if (removed) await note(`Replaced ${removed} older episode(s) of this thread.`)
         } catch { /* best-effort */ }
-        try { await this.logEpisodeInBible(sh, projectId, thread) } catch (err) {
-          await note(`Series Bible episode log skipped (${err?.message || err})`)
-        }
       })
-      await step.sleep('pre-publish budget break', '6 minutes')
-      const repairPublicationRequired = Boolean(event.payload.repairArtifactId) && !event.payload.skipPublish
-      try {
-        if (event.payload.skipPublish) return
-        await this.hardStep(step, 'publish podcast feed', async () => {
-          const seriesId = await getSetting(db, 'publishingSeriesId')
-          if (seriesId) {
-            const repairRun = event.payload.repairArtifactId || event.payload.repairRunId
-            const refreshedReleaseId = repairRun
-              ? await sh.refreshPublishedEpisodeMedia(seriesId, artifactId, {
-                  idempotencyKey: `${dramaId}-refresh-media-${event.payload.repairRunId || 'repair'}`,
-                })
-              : null
-            if (refreshedReleaseId) {
-              await note(`Refreshed repaired media on published release ${refreshedReleaseId}.`)
-            } else if (repairRun) {
-              throw new Error(`No published release exists for repaired artifact ${artifactId}; refusing to create a duplicate.`)
-            } else {
-              await sh.publishEpisode(seriesId, {
-                title: thread.title,
-                descriptionDirection: 'Write one pithy sentence, 20-40 words, that sells this specific episode. Be irreverent, playful, and sharp, but use no profanity. Lead with the transcript’s actual tension, argument, or absurdity. Avoid host roll calls, generic show boilerplate, and phrases like “the hosts discuss” or “this episode explores.”',
-                artifactId,
-                seasonNumber: 1,
-                idempotencyKeyPrefix: `${dramaId}-publish`,
-              })
-              await note('Published to the HNR podcast feed.')
-            }
-          } else if (repairPublicationRequired) {
-            throw new Error('Repair publication requires the publishingSeriesId setting.')
-          }
-        }, { replaySafe: true })
-      } catch (err) {
-        if (repairPublicationRequired) throw err
-        await note(`Podcast publish skipped (${err?.message || err})`)
-      }
+      if (!event.payload.skipPublish) await step.sleep('pre-publish budget break', '6 minutes')
+      await this.publishToFeed(step, {
+        env, db, sh, dramaId, note, artifactId,
+        title: thread.title,
+        payload: event.payload,
+      })
     } catch (err) {
       const message = err?.message || String(err)
       const failureClass = classifySystemicFailure(err)
@@ -663,7 +753,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
         failureCode: err?.code || null,
         failureMessage: message,
       }
-      if ((isRepair || isResume) && recoveryOriginal?.status === 'ready' && recoveryOriginal?.audioUrl) {
+      if ((isRepair || isResume || isPublishOnly) && recoveryOriginal?.status === 'ready' && recoveryOriginal?.audioUrl) {
         // Do not take the currently published/playable episode offline merely
         // because replacement post-production or feed refresh failed.
         await patchDrama(db, dramaId, {
@@ -1008,18 +1098,134 @@ export class HnrPipeline extends WorkflowEntrypoint {
     await note(`music: required jazz bookends READY at scenes ${introIndex} + ${outroIndex}`)
   }
 
-  async logEpisodeInBible(sh, projectId, thread) {
-    const doc = await sh.getSeriesBible(projectId)
-    const episodes = Array.isArray(doc?.content?.episodes) ? [...doc.content.episodes] : []
-    const label = `HN ${thread.id}`
-    if (episodes.some((e) => e.label === label)) return
-    episodes.push({
-      id: crypto.randomUUID(),
-      label,
-      title: thread.title.slice(0, 200),
-      summary: `Produced episode on the Hacker News thread "${thread.title}" (${thread.total} comments) — ${thread.url}`,
-      status: 'produced',
+  /** The series' standing approval as the platform reports it (never throws). */
+  async readStandingApproval(env, db, sh) {
+    const seriesId = await getSetting(db, 'publishingSeriesId')
+    if (!seriesId) return { known: false, granted: false }
+    try {
+      return standingApprovalOf(await sh.getPublishingSeries(seriesId), {
+        keyId: env.SLEEPERHIT_API_KEY_ID || null,
+      })
+    } catch {
+      return { known: false, granted: false }
+    }
+  }
+
+  /**
+   * Put a finished episode on the podcast feed — or record exactly why not.
+   *
+   * HNR publishes UNATTENDED, so it publishes only under the series' standing
+   * approval (bound to HNR's API key) and never claims a human `userConfirmed`.
+   * Without the grant, or when the feed refuses, the episode stays 'ready' and
+   * playable on hnradio.net with `publishState: 'blocked'` and the refusal's
+   * code, and the operator is emailed once. It is never marked 'failed' (that
+   * hides it from the site), and a refusal is never swallowed: the old catch-all
+   * turned "publishing needs approval" into a nightly paid re-finalize loop.
+   */
+  async publishToFeed(step, { env, db, sh, dramaId, note, artifactId, title, payload }) {
+    if (payload.skipPublish) return 'skipped'
+    const repairRun = payload.repairArtifactId || payload.repairRunId
+    const repairPublicationRequired = Boolean(payload.repairArtifactId)
+    let outcome
+    try {
+      outcome = await this.hardStep(step, 'publish podcast feed', async () => {
+        const seriesId = await getSetting(db, 'publishingSeriesId')
+        if (!seriesId) {
+          if (repairPublicationRequired) throw new Error('Repair publication requires the publishingSeriesId setting.')
+          return {
+            kind: 'blocked',
+            code: 'publishing_series_missing',
+            reason: 'No publishing series is configured (settings.publishingSeriesId).',
+          }
+        }
+        if (repairRun) {
+          const releaseId = await sh.refreshPublishedEpisodeMedia(seriesId, artifactId, {
+            idempotencyKey: `${dramaId}-refresh-media-${payload.repairRunId || 'repair'}`,
+          })
+          if (!releaseId) {
+            throw new Error(`No published release exists for repaired artifact ${artifactId}; refusing to create a duplicate.`)
+          }
+          return { kind: 'refreshed', releaseId }
+        }
+        let series = null
+        let readError = null
+        try {
+          series = await sh.getPublishingSeries(seriesId)
+        } catch (error) {
+          readError = typedRefusal(error)
+          if (!readError) throw error
+        }
+        const publishing = publishingReadiness({
+          seriesId, series, readError, keyId: env.SLEEPERHIT_API_KEY_ID || null,
+        })
+        if (publishing.state !== 'granted') {
+          // No release is created without the grant: a release made before the
+          // grant is not covered by it, and would sit unpublishable forever.
+          return { kind: 'blocked', code: publishing.code, reason: publishing.reason }
+        }
+        const releaseId = await sh.publishEpisode(seriesId, {
+          title,
+          descriptionDirection: EPISODE_DESCRIPTION_DIRECTION,
+          artifactId,
+          seasonNumber: 1,
+          idempotencyKeyPrefix: publishKeyPrefix(dramaId, publishing.approval),
+        })
+        return { kind: 'published', releaseId }
+      }, { replaySafe: true })
+    } catch (err) {
+      if (repairPublicationRequired) throw err
+      outcome = {
+        kind: 'blocked',
+        code: err?.code || null,
+        status: Number.isInteger(Number(err?.status)) ? Number(err.status) : null,
+        reason: err?.message || String(err),
+      }
+    }
+
+    // A run replaying a publish step an older deployment completed has no
+    // outcome to report; that step already did its work.
+    if (!outcome || typeof outcome !== 'object') return 'replayed'
+    if (outcome.kind === 'refreshed') {
+      await note(`Refreshed repaired media on published release ${outcome.releaseId}.`)
+      return outcome.kind
+    }
+    if (outcome.kind === 'published') {
+      await patchDrama(db, dramaId, {
+        publishState: 'published',
+        releaseId: outcome.releaseId ?? null,
+        publishError: null,
+        publishFailureCode: null,
+        publishBlockedAt: null,
+      })
+      await note(PUBLISHED_PROGRESS_MESSAGE)
+      await runWorkflowStepOnce(step, 'clear publish alert latch', () =>
+        clearAlertLatch(env, PUBLISH_BLOCKED_ALERT_KEY, { getSetting, setSetting }))
+      return outcome.kind
+    }
+    if (outcome.kind !== 'blocked') return outcome.kind
+
+    await patchDrama(db, dramaId, {
+      publishState: 'blocked',
+      publishError: outcome.reason,
+      publishFailureCode: outcome.code ?? null,
+      publishBlockedAt: new Date().toISOString(),
     })
-    await sh.patchSeriesBible(projectId, { content: { episodes: trimBibleEpisodes(episodes) } })
+    await note(
+      `Podcast publish blocked (${outcome.reason}) — the episode stays on hnradio.net and publishes once the feed accepts it.`,
+      `publish-blocked:${outcome.code || 'refused'}`,
+    )
+    await runWorkflowStepOnce(step, 'publish blocked alert', () => alertOnce(env, PUBLISH_BLOCKED_ALERT_KEY, {
+      subject: '[hnradio] finished episodes cannot reach the podcast feed',
+      lines: [
+        `Episode ${dramaId} ("${title}") is finished and playable on hnradio.net, but the podcast feed refused it.`,
+        '',
+        `Reason${outcome.code ? ` (${outcome.code})` : ''}: ${outcome.reason}`,
+        '',
+        'Held episodes keep status "ready" with publishState "blocked"; the nightly retries ONLY the publish step',
+        '(no post-production, no re-finalize) once the series reports a standing approval for HNR\'s key.',
+        'This email is sent once per outage; the next successful publish re-arms it.',
+      ],
+    }, { getSetting, setSetting }))
+    return outcome.kind
   }
 }

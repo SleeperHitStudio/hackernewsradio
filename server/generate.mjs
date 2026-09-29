@@ -16,6 +16,7 @@ import { SleeperHit } from './sleeperhit.mjs'
 import { config } from './config.mjs'
 import {
   buildSourceMetadata,
+  sourceIdentity,
   fetchThread,
   hydrateThreadArticle,
   threadToTranscript,
@@ -281,6 +282,7 @@ async function runPipeline(id, thread, { sourceTranscript, sourceMetadata }) {
     content: sourceTranscript,
     label: `HN thread ${thread.id}`,
     metadata: sourceMetadata,
+    ...sourceIdentity(thread),
   })
   await patchDrama(id, {
     sourceId,
@@ -446,14 +448,6 @@ async function runPipeline(id, thread, { sourceTranscript, sourceMetadata }) {
     await note(id, `Old-episode cleanup skipped (${err?.message || err})`)
   }
 
-  // Log the aired episode in the project's Series Bible episode map — the
-  // bible is the show's canon, so what actually aired belongs there too.
-  try {
-    await logEpisodeInBible(sh, projectId, thread)
-  } catch (err) {
-    await note(id, `Series Bible episode log skipped (${err?.message || err})`)
-  }
-
   // Publish to the podcast feed (settings key 'publishingSeriesId'; the RSS
   // feed is what Apple/Spotify/podcast apps poll). Best-effort.
   try {
@@ -472,25 +466,6 @@ async function runPipeline(id, thread, { sourceTranscript, sourceMetadata }) {
   }
 }
 
-
-/**
- * Keep the Series Bible's episode map in sync with what actually aired:
- * append one entry per produced thread, deduped by the HN item id label.
- */
-async function logEpisodeInBible(sh, projectId, thread) {
-  const doc = await sh.getSeriesBible(projectId)
-  const episodes = Array.isArray(doc?.content?.episodes) ? [...doc.content.episodes] : []
-  const label = `HN ${thread.id}`
-  if (episodes.some((e) => e.label === label)) return
-  episodes.push({
-    id: randomUUID(),
-    label,
-    title: thread.title.slice(0, 200),
-    summary: `Produced episode on the Hacker News thread "${thread.title}" (${thread.total} comments) — ${thread.url}`,
-    status: 'produced',
-  })
-  await sh.patchSeriesBible(projectId, { content: { episodes } })
-}
 
 /**
  * Keep the hosts' voices identical across episodes. The Story API can't pin
