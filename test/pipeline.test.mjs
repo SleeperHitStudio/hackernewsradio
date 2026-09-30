@@ -146,7 +146,7 @@ const GRANTED_SERIES = {
   id: SERIES,
   status: 'active',
   medium: 'audio',
-  standingApproval: { apiKeyId: KEY_ID, apiKeyName: 'HNR', apiKeyStart: 'sh_te', grantedAt: GRANTED_AT, grantedBy: 'user_owner' },
+  standingApproval: { keyId: KEY_ID, keyName: 'HNR', keyStart: 'sh_te', grantedAt: GRANTED_AT, grantedBy: 'user_owner' },
 }
 
 function envFor(db, extra = {}) {
@@ -460,8 +460,8 @@ test('under the series\' standing approval, plan approval claims no human confir
 for (const [label, series, settings, env, code] of [
   ['the platform does not report a grant', [200, { series: { id: SERIES, status: 'active', medium: 'audio' } }], {}, {}, 'standing_approval_unavailable'],
   ['the grant was revoked (null)', [200, { series: { ...GRANTED_SERIES, standingApproval: null } }], {}, {}, 'standing_approval_missing'],
-  ['the grant is bound to another key', [200, { series: { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, apiKeyId: 'key_other' } } }], {}, {}, 'standing_approval_other_key'],
-  ['only the built-in runner holds the grant', [200, { series: { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, apiKeyId: null } } }], {}, {}, 'standing_approval_other_key'],
+  ['the grant is bound to another key', [200, { series: { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, keyId: 'key_other' } } }], {}, {}, 'standing_approval_other_key'],
+  ['only the built-in runner holds the grant', [200, { series: { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, keyId: null } } }], {}, {}, 'standing_approval_other_key'],
   ['the series is paused', [200, { series: { ...GRANTED_SERIES, status: 'paused' } }], {}, {}, 'standing_approval_inactive'],
   ['the series read is refused', refusal(403, 'insufficient_scope', 'Missing publishing:read'), {}, {}, 'standing_approval_unreadable'],
   ['the series cannot be read at all', [503, { error: { message: 'Service Unavailable' } }], {}, {}, 'standing_approval_unreadable'],

@@ -120,7 +120,7 @@ the nightly run window because they can restart live Worker/Workflow state.
 producer, so it approves plans and publishes only under the publishing series'
 standing approval, bound to HNR's own API key, and never claims
 `userConfirmed`. It reads `GET /publishing-series/{id}` and requires
-`series.standingApproval.apiKeyId` to equal `SLEEPERHIT_API_KEY_ID` (a required
+`series.standingApproval.keyId` to equal `SLEEPERHIT_API_KEY_ID` (a required
 var: the id of HNR's key, as the Publishing tab shows it) on an active or draft
 audio series. A grant that is absent, revoked (`null`), bound to another key or
 only to the built-in runner, on a paused series, or unreadable stops
