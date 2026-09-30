@@ -2001,7 +2001,7 @@ const GRANTED_SERIES = {
   id: SERIES_ID,
   status: 'active',
   medium: 'audio',
-  standingApproval: { apiKeyId: HNR_KEY_ID, apiKeyName: 'HNR', apiKeyStart: 'sh_hn', grantedAt: '2026-07-01T00:00:00.000Z', grantedBy: 'owner' },
+  standingApproval: { keyId: HNR_KEY_ID, keyName: 'HNR', keyStart: 'sh_hn', grantedAt: '2026-07-01T00:00:00.000Z', grantedBy: 'owner' },
 }
 
 /** A live, mutable platform: flip its fields between ticks. */
@@ -2038,7 +2038,7 @@ const hour = (h, n = 1) => { h.clock.now = new Date(h.clock.now.getTime() + n * 
 // MUST FIX 1: the grant gates SPENDING, not just publishing.
 for (const [label, series, seriesError, code] of [
   ['revoked (the platform reports null)', { ...GRANTED_SERIES, standingApproval: null }, null, 'standing_approval_missing'],
-  ['bound to another key', { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, apiKeyId: 'key_other' } }, null, 'standing_approval_other_key'],
+  ['bound to another key', { ...GRANTED_SERIES, standingApproval: { ...GRANTED_SERIES.standingApproval, keyId: 'key_other' } }, null, 'standing_approval_other_key'],
   ['not reported by the platform', { id: SERIES_ID, status: 'active', medium: 'audio' }, null, 'standing_approval_unavailable'],
   ['unreadable (403)', null, new SleeperHitError('Missing publishing:read', { status: 403, code: 'insufficient_scope' }), 'standing_approval_unreadable'],
 ]) {

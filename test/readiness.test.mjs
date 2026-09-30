@@ -14,7 +14,7 @@ import { PLAN_APPROVAL_BODY, needsPublishOnly, PUBLISHED_PROGRESS_MESSAGE } from
 
 const READY_GATE = { ready: true, stage: 'ready', reason: null, missingFields: [], canPlan: true, canStartEpisode: true }
 const KEY = 'key_hnr'
-const GRANT = { apiKeyId: KEY, apiKeyName: 'HNR', apiKeyStart: 'sh_hn', grantedAt: '2026-09-29T00:00:00.000Z', grantedBy: 'user_1' }
+const GRANT = { keyId: KEY, keyName: 'HNR', keyStart: 'sh_hn', grantedAt: '2026-09-29T00:00:00.000Z', grantedBy: 'user_1' }
 const SERIES = { id: 's', status: 'active', medium: 'audio', standingApproval: GRANT }
 const GRANTED = publishingReadiness({ seriesId: 's', series: SERIES, keyId: KEY })
 
@@ -112,14 +112,19 @@ test('the standing approval covers HNR only when bound to HNR\'s own key on an a
   const code = (series, keyId = KEY) => publishingReadiness({ seriesId: 's', series, keyId }).code
   assert.equal(code({ id: 's' }), 'standing_approval_unavailable', 'a platform that does not report the grant')
   assert.equal(code({ ...SERIES, standingApproval: null }), 'standing_approval_missing', 'never granted, or revoked')
-  assert.equal(code({ ...SERIES, standingApproval: { ...GRANT, apiKeyId: 'key_other' } }), 'standing_approval_other_key')
-  assert.equal(code({ ...SERIES, standingApproval: { ...GRANT, apiKeyId: null } }), 'standing_approval_other_key',
+  assert.equal(code({ ...SERIES, standingApproval: { ...GRANT, keyId: 'key_other' } }), 'standing_approval_other_key')
+  assert.equal(code({ ...SERIES, standingApproval: { ...GRANT, keyId: null } }), 'standing_approval_other_key',
     'held only by the built-in runner')
   assert.equal(code(SERIES, null), 'standing_approval_unverifiable', 'HNR must know its own key id')
   assert.equal(code({ ...SERIES, status: 'paused' }), 'standing_approval_inactive')
   assert.equal(code({ ...SERIES, medium: 'video' }), 'standing_approval_inactive')
-  assert.equal(code({ ...SERIES, standingApproval: { keyId: KEY, grantedAt: GRANT.grantedAt } }), 'standing_approval_other_key',
-    'one contract: the grant names its key as apiKeyId')
+  // The platform's contract (OpenAPI `PublishingStandingApproval`, server/publishing.ts serializeSeries)
+  // names the key `keyId` / `keyName` / `keyStart`. HNR once read `apiKeyId`, which the platform never
+  // sends, so every tick on 2026-09-30 read a live grant as "held by the built-in runner".
+  assert.equal(code({ ...SERIES, standingApproval: { apiKeyId: KEY, grantedAt: GRANT.grantedAt } }), 'standing_approval_other_key',
+    'one contract: the grant names its key as keyId, never apiKeyId')
+  const platformShape = { keyId: KEY, keyName: 'hackernewsradio', keyStart: 'sh_303', grantedAt: '2026-09-29T21:39:08.618Z', grantedBy: 'user_1' }
+  assert.equal(code({ ...SERIES, standingApproval: platformShape }), null, 'the platform\'s exact serialized grant is a grant')
   assert.equal(code({ id: 's', standingApprovalKeyId: KEY, standingApprovalGrantedAt: GRANT.grantedAt }), 'standing_approval_unavailable',
     'one contract: flat fields are not a grant')
 })

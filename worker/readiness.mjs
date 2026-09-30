@@ -6,7 +6,7 @@
  *   GET /story-projects/{id}     → project.workspaceGate { ready, stage, reason, missingFields, canPlan, canStartEpisode }
  *                                  project.tableReadReadiness { ready, audioOnly, reason, narratorVoice, members }
  *   GET /credits                 → credits.balance
- *   GET /publishing-series/{id}  → series.standingApproval { apiKeyId, apiKeyName, apiKeyStart, grantedAt, grantedBy } | null
+ *   GET /publishing-series/{id}  → series.standingApproval { keyId, keyName, keyStart, grantedAt, grantedBy } | null
  *
  * HNR owns its hosts' voices (D1 `pinnedVoices`). When the project says the
  * cast is not ready, the preflight first pushes those voices into the cast
@@ -134,7 +134,7 @@ export function evaluateReadiness({ project, credits, publishing = null, minCred
 /**
  * Whether HNR may approve plans and publish to the series WITHOUT asserting a
  * human confirmation. The platform (PR 6) reports the grant as
- * `series.standingApproval = { apiKeyId, grantedAt, … }`, or null when there is
+ * `series.standingApproval = { keyId, grantedAt, … }`, or null when there is
  * none (never granted, or revoked). It covers HNR only when it is bound to
  * HNR's own key id, on an audio series that is active or draft.
  *
@@ -173,8 +173,8 @@ export function publishingReadiness({ seriesId, series, readError = null, keyId 
     return blocked('standing_approval_unverifiable',
       'SLEEPERHIT_API_KEY_ID is not set, so HNR cannot confirm the series\' standing approval is bound to its own key.')
   }
-  if (grant.apiKeyId !== keyId) {
-    return blocked('standing_approval_other_key', grant.apiKeyId
+  if (grant.keyId !== keyId) {
+    return blocked('standing_approval_other_key', grant.keyId
       ? 'The HNR series\' standing approval is bound to a different API key; re-grant it to HNR\'s key on the Publishing tab.'
       : 'The HNR series\' standing approval is held by the built-in cadence runner, not an API key; grant it to HNR\'s key on the Publishing tab.')
   }
@@ -190,7 +190,7 @@ export function publishingReadiness({ seriesId, series, readError = null, keyId 
     state: 'granted',
     code: null,
     reason: null,
-    grant: { keyId: grant.apiKeyId, grantedAt: typeof grant.grantedAt === 'string' ? grant.grantedAt : null },
+    grant: { keyId: grant.keyId, grantedAt: typeof grant.grantedAt === 'string' ? grant.grantedAt : null },
   }
 }
 

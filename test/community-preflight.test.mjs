@@ -153,7 +153,7 @@ test('a visitor\'s preflight pushes HNR\'s pinned voices into the cast canon bef
     }
     if (path === '/credits') return respond({ credits: { balance: 500 } })
     if (path === '/publishing-series/series_hnr') {
-      return respond({ series: { id: 'series_hnr', status: 'active', medium: 'audio', standingApproval: { apiKeyId: 'key_hnr', grantedAt: '2026-09-29T00:00:00.000Z' } } })
+      return respond({ series: { id: 'series_hnr', status: 'active', medium: 'audio', standingApproval: { keyId: 'key_hnr', grantedAt: '2026-09-29T00:00:00.000Z' } } })
     }
     if (path === `/story-projects/${PROJECT}/cast-canon` && method === 'GET') return respond({ canon })
     if (path === `/story-projects/${PROJECT}/cast-canon` && method === 'PATCH') {
