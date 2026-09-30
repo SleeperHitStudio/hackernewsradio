@@ -13,14 +13,20 @@
  */
 
 export class SleeperHitError extends Error {
-  constructor(message, { status, code, requestId } = {}) {
+  constructor(message, { status, code, requestId, details } = {}) {
     super(message)
     this.name = 'SleeperHitError'
     this.status = status
     this.code = code
     this.requestId = requestId
+    // The envelope's `error.details`: a 409's `stage`, a 402's `required` /
+    // `available` / `jobId`. Refusals are only actionable with these.
+    this.details = details ?? null
   }
 }
+
+/** Story API page ceiling for GET /artifacts/{id}/script (the platform 400s above it). */
+export const SCRIPT_PAGE_LIMIT = 500
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 export const STORY_JOB_POLL_ATTEMPTS = 900
@@ -122,7 +128,7 @@ export class SleeperHit {
     if (!res.ok) {
       const e = json?.error || {}
       throw new SleeperHitError(e.message || `Story API ${res.status} on ${path}`, {
-        status: res.status, code: e.code, requestId: e.requestId,
+        status: res.status, code: e.code, requestId: e.requestId, details: e.details,
       })
     }
     return json
@@ -137,18 +143,68 @@ export class SleeperHit {
     return res.project.id
   }
 
-  /** Add the verified thread/article pack as a plain-text source. */
-  async addTextSource(projectId, { content, label, metadata, idempotencyKey }) {
+  // ── Readiness (read-only preflight) ─────────────────────────────────────────
+
+  /** The project, with `workspaceGate` (and `tableReadReadiness` once the platform reports it). */
+  async getProject(projectId) {
+    const res = await this.request(`/story-projects/${encodeURIComponent(projectId)}`)
+    return res.project ?? null
+  }
+
+  /** The account's Studio Credit summary ({ balance, … }). */
+  async getCredits() {
+    const res = await this.request('/credits')
+    return res.credits ?? null
+  }
+
+  /** One publishing series ({ standingApproval… , … }). */
+  async getPublishingSeries(seriesId) {
+    const res = await this.request(`/publishing-series/${encodeURIComponent(seriesId)}`)
+    return res.series ?? null
+  }
+
+  /**
+   * Add the verified thread/article pack as a plain-text source.
+   *
+   * `producer` + `externalId` are the item's identity on the platform: one
+   * source per (project, producer, externalId). A repeat submission of the same
+   * thread returns the EXISTING source with `deduplicated: true` instead of a
+   * second copy, so a retried episode reuses what the first attempt captured
+   * rather than paying to digest the same thread again. The platform answers
+   * `{ source, deduplicated }`. Returns plain data (it crosses a Workflow step
+   * boundary): the id, whether it was deduplicated, and what that source was
+   * captured with (its completeness proof and comment count).
+   */
+  async addTextSource(projectId, { content, label, metadata, producer, externalId, idempotencyKey }) {
     const res = await this.request(`/story-projects/${projectId}/sources`, {
       method: 'POST', idempotencyKey: idempotencyKey || true,
       body: {
         type: 'text',
         content,
         ...(label ? { label } : {}),
+        ...(producer ? { producer } : {}),
+        ...(externalId ? { externalId: String(externalId) } : {}),
         ...(metadata ? { metadata } : {}),
       },
     })
-    return res.source.id
+    const source = res.source ?? {}
+    const completeness = source?.metadata?.sourceCompleteness ?? null
+    const fetched = completeness?.comments?.fetched
+    return {
+      id: source.id,
+      deduplicated: res.deduplicated === true,
+      capturedComments: typeof fetched === 'number' && Number.isFinite(fetched) ? fetched : null,
+      sourceCompleteness: completeness,
+      status: source.status ?? null,
+    }
+  }
+
+  /** Soft-delete a source (the platform clears its externalId, freeing the item for a recapture). */
+  async deleteSource(projectId, sourceId, { idempotencyKey } = {}) {
+    await this.request(`/story-projects/${projectId}/sources/${encodeURIComponent(sourceId)}`, {
+      method: 'DELETE',
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    })
   }
 
   async pollSourceReady(projectId, sourceId, { onProgress } = {}) {
@@ -209,10 +265,6 @@ export class SleeperHit {
     throw new SleeperHitError('Plan generation timed out.')
   }
 
-  async approvePlan(planId) {
-    await this.request(`/story-plans/${planId}/approve`, { method: 'POST', idempotencyKey: true, body: { userConfirmed: true } })
-  }
-
   async resumePlan(planId, idempotencyKey) {
     const res = await this.request(`/story-plans/${planId}/resume`, {
       method: 'POST',
@@ -263,36 +315,20 @@ export class SleeperHit {
     throw new SleeperHitError('Table read generation timed out.')
   }
 
-  // ── Series Bible (project canon) ────────────────────────────────────────────
-  // The bible holds the show's canon (cast, world rules, jazz theme) and the
-  // episode map; the planner auto-loads it for every plan.
-
-  /** The project's Series Bible document ({ content: { episodes, characters, … } }). */
-  async getSeriesBible(projectId) {
-    const res = await this.request(`/story-projects/${projectId}/series-bible`)
-    return res.document ?? null
-  }
-
-  /** Merge-patch the bible (e.g. { content: { episodes } } replaces just that field). */
-  async patchSeriesBible(projectId, patch) {
-    await this.request(`/story-projects/${projectId}/series-bible`, {
-      method: 'PATCH', idempotencyKey: true, body: patch,
-    })
-  }
-
-  // ── Cast canon (project-level pinned portraits + portrait style) ────────────
+  // ── Cast canon (project-level pinned portraits + voices) ────────────────────
   // Every new episode inherits these at creation: the platform seeds each
   // matching character's avatarUrl before generation (so canonical portraits
-  // are never re-rendered) and installs avatarStyle as the episode's
-  // portrait-style override.
+  // are never re-rendered), and a table read may start once the canon voices
+  // every character in the roster. HNR does NOT write the Series Bible: show
+  // memory lives on the releases (decided 2026-08-08).
 
-  /** { content: { avatarStyle, characters: [{ name, avatarUrl, avatarPrompt }] } } */
+  /** { content: { characters: [{ name, avatarUrl, voiceId, voiceProvider, … }] } } */
   async getCastCanon(projectId) {
     const res = await this.request(`/story-projects/${projectId}/cast-canon`)
     return res.canon ?? null
   }
 
-  /** Merge-patch the canon (characters merge by name). */
+  /** Merge-patch the canon: `content.characters` merge field-by-field onto the person of the same name. */
   async patchCastCanon(projectId, content) {
     await this.request(`/story-projects/${projectId}/cast-canon`, {
       method: 'PATCH', body: { content },
@@ -301,25 +337,53 @@ export class SleeperHit {
 
   // ── Podcast publishing ──────────────────────────────────────────────────────
 
-  /** Promote a finalized artifact into the series and queue immediate publish.
-   *  The series' public RSS feed picks it up (podcast apps poll the feed). */
+  /**
+   * Put a finalized artifact on the series' feed: ONE release per artifact.
+   *
+   * A release already published for the artifact is the answer (a lost
+   * progress note must not publish it twice). An open release created after
+   * the standing approval's `grantedAt` is reused. One created BEFORE the grant
+   * is not covered by it and could never publish unattended, so it is canceled
+   * rather than left stuck next to its replacement (how 160 releases sat
+   * 'ready' for weeks). Returns `{ releaseId, alreadyPublished }`.
+   */
   async publishEpisode(seriesId, {
     title,
     descriptionDirection,
     artifactId,
     seasonNumber = 1,
     idempotencyKeyPrefix,
+    grantedAt = null,
   }) {
-    const res = await this.request(`/publishing-series/${seriesId}/releases`, {
-      method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-release` : true,
-      body: {
-        title: title.slice(0, 200),
-        sourceArtifactId: artifactId,
-        type: 'episode',
-        seasonNumber,
-      },
-    })
-    const releaseId = (res.release ?? res).id
+    const grantedMs = Date.parse(grantedAt ?? '')
+    const existing = await this.listReleasesForArtifact(seriesId, artifactId)
+    const statusOf = (release) => String(release?.status || '').toLowerCase()
+    const published = existing.find((release) => statusOf(release) === 'published')
+    if (published) return { releaseId: published.id, alreadyPublished: true }
+    const open = existing.filter((release) => !['published', 'canceled'].includes(statusOf(release)))
+    const coveredByGrant = (release) => !Number.isFinite(grantedMs) || Date.parse(release?.createdAt ?? '') >= grantedMs
+    let release = open.find(coveredByGrant) ?? null
+    for (const stale of open) {
+      if (stale === release) continue
+      await this.request(`/publishing-releases/${encodeURIComponent(stale.id)}/cancel`, {
+        method: 'POST',
+        idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-cancel-${stale.id}` : true,
+        body: {},
+      })
+    }
+    if (!release) {
+      const res = await this.request(`/publishing-series/${seriesId}/releases`, {
+        method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-release` : true,
+        body: {
+          title: title.slice(0, 200),
+          sourceArtifactId: artifactId,
+          type: 'episode',
+          seasonNumber,
+        },
+      })
+      release = res.release ?? res
+    }
+    const releaseId = release.id
     await this.request(`/publishing-releases/${releaseId}/description/generate`, {
       method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-description` : true,
       body: { direction: descriptionDirection?.slice(0, 2_000) },
@@ -327,7 +391,19 @@ export class SleeperHit {
     await this.request(`/publishing-releases/${releaseId}/publish`, {
       method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-publish` : true, body: {},
     })
-    return releaseId
+    return { releaseId, alreadyPublished: false }
+  }
+
+  /** Every release of one artifact in the series, in any status. */
+  async listReleasesForArtifact(seriesId, artifactId) {
+    const releases = []
+    let cursor
+    do {
+      const page = await this.listPublishingReleases(seriesId, { limit: 100, cursor })
+      releases.push(...page.releases.filter((release) => release?.sourceArtifactId === artifactId))
+      cursor = page.nextCursor
+    } while (cursor)
+    return releases
   }
 
   async listPublishingReleases(seriesId, { status, limit = 100, cursor } = {}) {
@@ -446,10 +522,30 @@ export class SleeperHit {
     })
   }
 
-  /** Every dialogue entry in the read, in order — the whole spoken script. */
-  async getScriptEntries(artifactId, { limit = 2000 } = {}) {
-    const res = await this.request(`/artifacts/${artifactId}/script?limit=${limit}`)
-    return res.script?.selection?.entries ?? []
+  /**
+   * Every dialogue entry in the read, in order — the whole spoken script.
+   *
+   * Paged, because the platform caps one read at 500 entries and 400s anything
+   * larger: asking for 2000 in one call failed 887 times from 08-09 on, and
+   * the show memory built from this read was never recorded once.
+   */
+  async getScriptEntries(artifactId, { pageSize = SCRIPT_PAGE_LIMIT } = {}) {
+    const size = Math.max(1, Math.min(SCRIPT_PAGE_LIMIT, Number(pageSize) || SCRIPT_PAGE_LIMIT))
+    const first = await this.request(`/artifacts/${artifactId}/script?limit=${size}`)
+    const entries = [...(first.script?.selection?.entries ?? [])]
+    const total = Number(first.script?.totalEntries)
+    if (!Number.isInteger(total)) return entries
+    while (entries.length < total) {
+      const start = entries.length
+      const end = Math.min(total - 1, start + size - 1)
+      const page = await this.request(
+        `/artifacts/${artifactId}/script?scope=range&startEntry=${start}&endEntry=${end}&limit=${size}`,
+      )
+      const next = page.script?.selection?.entries ?? []
+      if (next.length === 0) break
+      entries.push(...next)
+    }
+    return entries
   }
 
   /** One character's dialogue entries ({ entryIndex, character, text }), via the script's character scope. */

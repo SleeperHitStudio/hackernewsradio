@@ -104,6 +104,22 @@ export async function getSetting(db, key) {
   return row ? JSON.parse(row.value) : null
 }
 
+/**
+ * Set `key` only if it is unset (absent or null), atomically. Resolves true
+ * when this caller claimed it. A latch that two Workers race for is won once.
+ */
+export async function claimSetting(db, key, value) {
+  const res = await db
+    .prepare(
+      `INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+       WHERE settings.value IS NULL OR settings.value = 'null'`,
+    )
+    .bind(key, JSON.stringify(value))
+    .run()
+  return Number(res?.meta?.changes ?? 0) > 0
+}
+
 export async function setSetting(db, key, value) {
   await db
     .prepare(
@@ -112,4 +128,14 @@ export async function setSetting(db, key, value) {
     )
     .bind(key, JSON.stringify(value))
     .run()
+}
+
+/** Other episodes of a thread that are still in flight (queued or running). */
+export async function listLiveEpisodesOfThread(db, hnId, mode, exceptId) {
+  const { results } = await db
+    .prepare(`SELECT data FROM episodes WHERE hn_id = ?1 AND mode = ?2 AND id <> ?3
+              AND status IN ('queued', 'running')`)
+    .bind(String(hnId), mode, exceptId)
+    .all()
+  return results.map(rowToData)
 }

@@ -13,27 +13,28 @@ test('Sleeper client StoryJob polling budget is at least 60 minutes', () => {
   assert.ok(STORY_JOB_POLL_ATTEMPTS * STORY_JOB_POLL_INTERVAL_MS >= 60 * 60 * 1000)
 })
 
-test('text source uploads preserve the full-context policy and completeness proof', async () => {
+test('text source uploads carry the item identity top-level and the full-context policy in metadata', async () => {
   const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
   const calls = []
   client.request = async (path, options) => {
     calls.push({ path, options })
-    return { source: { id: 'source_1' } }
+    return { source: { id: 'source_1', status: 'PENDING' } }
   }
   const metadata = {
-    sourceProducer: 'hackernewsradio',
     sourceContextMode: 'full',
     sourceCompleteness: { comments: { complete: true, expected: 2, fetched: 2 } },
   }
 
-  const sourceId = await client.addTextSource('project_1', {
+  const captured = await client.addTextSource('project_1', {
     content: 'ARTICLE-END\nCOMMENT-END',
     label: 'HN thread 42',
     metadata,
+    producer: 'hackernewsradio',
+    externalId: '42',
     idempotencyKey: 'episode-source',
   })
 
-  assert.equal(sourceId, 'source_1')
+  assert.deepEqual(captured, { id: 'source_1', deduplicated: false, capturedComments: null, sourceCompleteness: null, status: 'PENDING' })
   assert.deepEqual(calls, [{
     path: '/story-projects/project_1/sources',
     options: {
@@ -43,10 +44,42 @@ test('text source uploads preserve the full-context policy and completeness proo
         type: 'text',
         content: 'ARTICLE-END\nCOMMENT-END',
         label: 'HN thread 42',
+        producer: 'hackernewsradio',
+        externalId: '42',
         metadata,
       },
     },
   }])
+  assert.equal('sourceProducer' in calls[0].options.body.metadata, false)
+})
+
+test('a repeat submission of the same thread reports the existing source and what it captured', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  client.request = async () => ({
+    deduplicated: true,
+    source: {
+      id: 'source_first',
+      status: 'READY',
+      metadata: { sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } } },
+    },
+  })
+  const captured = await client.addTextSource('project_1', {
+    content: 'x', producer: 'hackernewsradio', externalId: '42', idempotencyKey: 'retry-source',
+  })
+  assert.deepEqual(captured, {
+    id: 'source_first',
+    deduplicated: true,
+    capturedComments: 57,
+    sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } },
+    status: 'READY',
+  })
+})
+
+test('deduplicated is read from the platform\'s { source, deduplicated } envelope only', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  client.request = async () => ({ source: { id: 'source_1', status: 'READY', deduplicated: true } })
+  const captured = await client.addTextSource('project_1', { content: 'x', producer: 'hackernewsradio', externalId: '42' })
+  assert.equal(captured.deduplicated, false)
 })
 
 test('plan and job recovery call the same-resource resume endpoints with stable keys', async () => {
@@ -157,19 +190,95 @@ test('normal publish uses deterministic keys across release, description, and pu
   const calls = []
   client.request = async (path, options = {}) => {
     calls.push({ path, options })
+    if (path.includes('/releases?')) return { releases: [], nextCursor: null }
     return path.includes('/publishing-series/') ? { release: { id: 'release_1' } } : {}
   }
-  await client.publishEpisode('series_1', {
+  const result = await client.publishEpisode('series_1', {
     title: 'Episode',
     descriptionDirection: 'Describe it',
     artifactId: 'artifact_1',
     idempotencyKeyPrefix: 'episode-publish',
   })
-  assert.deepEqual(calls.map((call) => call.options.idempotencyKey), [
+  assert.deepEqual(result, { releaseId: 'release_1', alreadyPublished: false })
+  assert.deepEqual(calls.slice(1).map((call) => call.options.idempotencyKey), [
     'episode-publish-release',
     'episode-publish-description',
     'episode-publish-publish',
   ])
+})
+
+function releaseListing(releases) {
+  return (path) => (path.includes('/releases?') ? { releases, nextCursor: null } : null)
+}
+
+test('an artifact already on the feed is never released twice', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const calls = []
+  const list = releaseListing([
+    { id: 'release_other', sourceArtifactId: 'artifact_2', status: 'ready', createdAt: '2026-10-01T00:00:00.000Z' },
+    { id: 'release_live', sourceArtifactId: 'artifact_1', status: 'published', createdAt: '2026-09-01T00:00:00.000Z' },
+  ])
+  client.request = async (path, options = {}) => {
+    calls.push({ path, method: options.method || 'GET' })
+    return list(path) ?? {}
+  }
+  const result = await client.publishEpisode('series_1', {
+    title: 'Episode', artifactId: 'artifact_1', idempotencyKeyPrefix: 'p', grantedAt: '2026-09-29T00:00:00.000Z',
+  })
+  assert.deepEqual(result, { releaseId: 'release_live', alreadyPublished: true })
+  assert.deepEqual(calls.map((call) => call.method), ['GET'], 'no create, no publish')
+})
+
+test('a release the grant covers is reused; one made before the grant is canceled, not left stuck', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const calls = []
+  const list = releaseListing([
+    { id: 'release_after', sourceArtifactId: 'artifact_1', status: 'ready', createdAt: '2026-10-02T00:00:00.000Z' },
+    { id: 'release_before', sourceArtifactId: 'artifact_1', status: 'ready', createdAt: '2026-09-20T00:00:00.000Z' },
+    { id: 'release_gone', sourceArtifactId: 'artifact_1', status: 'canceled', createdAt: '2026-09-10T00:00:00.000Z' },
+  ])
+  client.request = async (path, options = {}) => {
+    calls.push({ path, method: options.method || 'GET', key: options.idempotencyKey })
+    return list(path) ?? {}
+  }
+  const result = await client.publishEpisode('series_1', {
+    title: 'Episode', artifactId: 'artifact_1', idempotencyKeyPrefix: 'p', grantedAt: '2026-10-01T00:00:00.000Z',
+  })
+  assert.deepEqual(result, { releaseId: 'release_after', alreadyPublished: false })
+  assert.deepEqual(calls.slice(1).map((call) => `${call.method} ${call.path}`), [
+    'POST /publishing-releases/release_before/cancel',
+    'POST /publishing-releases/release_after/description/generate',
+    'POST /publishing-releases/release_after/publish',
+  ], 'no second release is created')
+  assert.equal(calls[1].key, 'p-cancel-release_before')
+})
+
+test('a re-grant cancels the pre-grant release and creates exactly one new one', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const calls = []
+  const list = releaseListing([
+    { id: 'release_before', sourceArtifactId: 'artifact_1', status: 'failed', createdAt: '2026-09-20T00:00:00.000Z' },
+  ])
+  client.request = async (path, options = {}) => {
+    calls.push({ path, method: options.method || 'GET' })
+    if (path === '/publishing-series/series_1/releases') return { release: { id: 'release_new' } }
+    return list(path) ?? {}
+  }
+  const result = await client.publishEpisode('series_1', {
+    title: 'Episode', artifactId: 'artifact_1', idempotencyKeyPrefix: 'p', grantedAt: '2026-10-01T00:00:00.000Z',
+  })
+  assert.equal(result.releaseId, 'release_new')
+  assert.deepEqual(calls.slice(1).map((call) => `${call.method} ${call.path}`), [
+    'POST /publishing-releases/release_before/cancel',
+    'POST /publishing-series/series_1/releases',
+    'POST /publishing-releases/release_new/description/generate',
+    'POST /publishing-releases/release_new/publish',
+  ])
+})
+
+test('plan approval is never a client call that claims a human confirmation', () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  assert.equal(typeof client.approvePlan, 'undefined')
 })
 
 test('SFX add forwards exact duration and returns the generated cue', async () => {
@@ -287,11 +396,13 @@ test('a failure the platform left blank does not invent a reason', () => {
   assert.deepEqual(summary.failureReasons, [])
 })
 
-test('a surfaced credit-balance reason classifies as a quota cliff', () => {
+test('a surfaced provider credit-balance reason classifies as a provider quota cliff', () => {
   // This is the payoff: naming the reason is what lets the nightly reconciler
-  // CLASSIFY it. A quota-class failure opens the generation circuit and emails
-  // the operator, instead of spending attempts on a provider that is out of
-  // money. An unnamed timeout classifies as nothing at all.
+  // CLASSIFY it. A provider quota failure opens the generation circuit and
+  // emails the operator, instead of spending attempts on a provider that is out
+  // of money. It is Hume's balance, not Studio Credits, so the free credit read
+  // cannot see it: the class is provider_quota, probed by one episode. An
+  // unnamed timeout classifies as nothing at all.
   const summary = summarizeVoiceModifications([
     {
       startEntryIndex: 4,
@@ -303,7 +414,17 @@ test('a surfaced credit-balance reason classifies as a quota cliff', () => {
   ], [{ start: 4, end: 6 }])
 
   const surfaced = `autotune render a2 timed out. Last render failure: ${summary.lastError}`
-  assert.equal(classifySystemicFailure(surfaced), 'quota')
+  assert.equal(classifySystemicFailure(surfaced), 'provider_quota')
   assert.equal(classifySystemicFailure('autotune render a2 timed out.'), null,
     'the bare timeout HNR used to report classifies as nothing')
+})
+
+test('the legacy local server approves plans without a fabricated confirmation too', async () => {
+  const { SleeperHit: LegacySleeperHit } = await import('../server/sleeperhit.mjs')
+  const client = new LegacySleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const calls = []
+  client.request = async (path, options = {}) => { calls.push({ path, options }) }
+  await client.approvePlan('plan_1')
+  assert.equal(calls[0].path, '/story-plans/plan_1/approve')
+  assert.deepEqual(calls[0].options.body, {}, 'no userConfirmed: nobody was asked')
 })

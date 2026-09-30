@@ -855,9 +855,44 @@ export function threadToTranscript(thread, {
 }
 
 /**
+ * The item's identity on the platform, sent as top-level `producer` +
+ * `externalId` on POST /sources. One source per (project, producer,
+ * externalId): a retried episode of the same thread gets the source its first
+ * attempt captured back (`deduplicated: true`) instead of uploading — and
+ * paying to digest — the same thread again. The platform reads the HN id from
+ * `externalId`, so it is the bare numeric item id.
+ */
+export const SOURCE_PRODUCER = 'hackernewsradio'
+
+export function sourceIdentity(thread) {
+  const externalId = String(thread?.id ?? '').trim()
+  if (!/^\d+$/.test(externalId)) {
+    throw new HNError('A Hacker News source needs a numeric item id as its identity.', { code: 'hn_source_identity' })
+  }
+  return { producer: SOURCE_PRODUCER, externalId }
+}
+
+/** A capture is worth replacing only when the thread has grown materially since. */
+export const THREAD_RECAPTURE_MIN_NEW_COMMENTS = 10
+export const THREAD_RECAPTURE_GROWTH_RATIO = 0.2
+
+export function threadGrewMaterially(previousComments, currentComments) {
+  // An unknown earlier capture is kept: replacing it is not free, and "grew"
+  // cannot be shown against nothing.
+  if (previousComments === null || previousComments === undefined || previousComments === '') return false
+  const before = Number(previousComments)
+  const now = Number(currentComments)
+  if (!Number.isFinite(before) || !Number.isFinite(now) || before < 0) return false
+  const grown = now - before
+  return grown >= Math.max(THREAD_RECAPTURE_MIN_NEW_COMMENTS, Math.ceil(before * THREAD_RECAPTURE_GROWTH_RATIO))
+}
+
+/**
  * Metadata sent beside the text source. `sourceContextMode: full` is the
  * cross-service contract: Sleeper Hit must hash-check and pass this exact text
  * to both the planner and final table-read writer, never a digest or preview.
+ * Which thread it is travels as the source's identity (`sourceIdentity`), not
+ * in here.
  */
 export function buildSourceMetadata(thread, transcript) {
   assertCompleteThread(thread)
@@ -877,9 +912,7 @@ export function buildSourceMetadata(thread, transcript) {
 
   const commentProof = thread.completeness.comments
   return {
-    sourceProducer: 'hackernewsradio',
     sourceContextMode: 'full',
-    hnStoryId: String(thread.id),
     sourceCompleteness: {
       comments: {
         // Reported, not asserted. The platform stores this alongside the source

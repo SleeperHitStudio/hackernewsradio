@@ -97,17 +97,54 @@ export function buildStoryJobArtifactRequests({
 /** Canonical portrait for a host (the cropped hero-art headshots we serve). */
 export const hostAvatarUrl = (name) => `https://hnradio.net/avatars/${String(name).toLowerCase()}.png`
 
-/** The show's canonical portrait style — lives in the project cast canon so
- *  guest characters render in the same look as the pinned hosts. */
-export const AVATAR_STYLE =
-  'Portrait-only head-and-shoulders character image in a grounded, contemporary '
-  + 'tech-culture comedy style, like a cinematic editorial portrait with subtle '
-  + 'satirical edge. Muted office-neon palette — cool grey-blue glow, sickly green '
-  + 'reflections, occasional warm skin tones — with lighting that feels like a '
-  + 'late-night podcast booth or a startup conference room under fluorescent spill '
-  + 'and screen light. Realistic skin texture, tired eyes, believable faces; no '
-  + 'glamour retouching. No names, letters, captions, logos, watermarks, signage, '
-  + 'or any text inside the image.'
+/**
+ * The hosts as the project CAST CANON should hold them: the portrait HNR serves
+ * and, once the show has pinned one (`pinnedVoices`), the voice.
+ *
+ * The canon is where the platform looks for a character's voice before it lets
+ * a table read start, so a host with a pinned voice that the canon does not
+ * carry is a read the platform cannot voice. Only fields the canon schema
+ * accepts are sent — it is strict, and the portrait-style key HNR used to send
+ * beside `characters` 400'd every PATCH from 07-15 on (897 times), silently,
+ * which is why the canon has faces for the hosts and no voices.
+ */
+export function castCanonCharacters(pinnedVoices) {
+  const byName = new Map(
+    Object.entries(pinnedVoices && typeof pinnedVoices === 'object' ? pinnedVoices : {})
+      .map(([name, value]) => [String(name).trim().toUpperCase(), value]),
+  )
+  return HOSTS.map((host) => {
+    const pinned = byName.get(host.name)
+    const voiceId = typeof pinned?.voiceId === 'string' ? pinned.voiceId.trim() : ''
+    const voiceProvider = typeof pinned?.provider === 'string' ? pinned.provider.trim() : ''
+    return {
+      name: host.name,
+      avatarUrl: hostAvatarUrl(host.name),
+      ...(voiceId ? { voiceId } : {}),
+      ...(voiceId && voiceProvider ? { voiceProvider } : {}),
+    }
+  })
+}
+
+/**
+ * The desired hosts the stored canon does not already match, compared on the
+ * CHARACTERS only (a person is found by name or any alias, case-insensitive).
+ * An empty result means the canon is current and nothing is written.
+ */
+export function staleCastCanonCharacters(canon, desired) {
+  const stored = new Map()
+  for (const character of Array.isArray(canon?.content?.characters) ? canon.content.characters : []) {
+    const names = [character?.name, ...(Array.isArray(character?.aliases) ? character.aliases : [])]
+    for (const name of names) {
+      if (typeof name === 'string' && name.trim()) stored.set(name.trim().toUpperCase(), character)
+    }
+  }
+  return desired.filter((want) => {
+    const have = stored.get(String(want.name).toUpperCase())
+    if (!have) return true
+    return Object.entries(want).some(([field, value]) => field !== 'name' && have[field] !== value)
+  })
+}
 
 /** Match a script/cast character label ("GARY", "Gary (host)") back to a host. */
 export function hostForCharacter(character) {

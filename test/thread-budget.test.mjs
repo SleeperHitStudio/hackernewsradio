@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildSourceMetadata, HNError, threadToTranscript } from '../worker/hn.mjs'
+import { buildSourceMetadata, HNError, sourceIdentity, threadToTranscript } from '../worker/hn.mjs'
 
 const makeComments = (count, { length = 180 } = {}) =>
   Array.from({ length: count }, (_, index) => ({
@@ -54,9 +54,11 @@ test('source metadata opts Sleeper Hit into exact full-text grounding', () => {
   const transcript = threadToTranscript(thread)
   const metadata = buildSourceMetadata(thread, transcript)
 
-  assert.equal(metadata.sourceProducer, 'hackernewsradio')
   assert.equal(metadata.sourceContextMode, 'full')
-  assert.equal(metadata.hnStoryId, '42')
+  // Which thread it is travels as the source's identity, not in its metadata.
+  assert.equal('sourceProducer' in metadata, false)
+  assert.equal('hnStoryId' in metadata, false)
+  assert.deepEqual(sourceIdentity(thread), { producer: 'hackernewsradio', externalId: '42' })
   assert.deepEqual(metadata.sourceCompleteness.comments, {
     complete: true,
     expected: 3,
