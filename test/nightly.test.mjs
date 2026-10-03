@@ -25,6 +25,7 @@ import {
   workflowDeployRetryAfterSeconds,
 } from '../worker/deploy-gate.mjs'
 import { readReadiness } from '../worker/readiness.mjs'
+import { isModelOutputMissFailure } from '../worker/failure-classification.mjs'
 import { SleeperHitError } from '../worker/sleeperhit.mjs'
 
 function harness({
@@ -1012,6 +1013,80 @@ test('a contract-class failure alerts immediately, opens the circuit, and preser
   assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY).failureClass, 'contract')
   assert.equal(emails.length, 1, 'contract failures alert on FIRST occurrence')
   assert.match(emails[0].subject, /contract\/validation error/)
+})
+
+// 2026-10-03, the first comedy-canary episode: the platform's planner produced a whole plan and returned
+// its last field as a JSON string. A model's schema miss, once in 14 days of plans, not the platform
+// refusing what HNR sent. It used to classify as contract: open the generation circuit, email the
+// operator "deterministic", and stop the show. It is an ordinary item failure the next attempt retries.
+const NEWGROUNDS_PLAN_MISS = 'Planning failed after the first completed generation. Schema validation failed — artifacts: Invalid input: expected array, received string'
+
+test('a planner answer that missed its schema is retryable, never contract; a refused request still is', () => {
+  assert.equal(classifySystemicFailure(NEWGROUNDS_PLAN_MISS), null)
+  assert.equal(classifySystemicFailure({ failureCode: 'story_plan_failed', failureMessage: NEWGROUNDS_PLAN_MISS }), null)
+  assert.equal(isModelOutputMissFailure(NEWGROUNDS_PLAN_MISS), true)
+  assert.equal(classifySystemicFailure('No object generated: response did not match schema.'), null)
+  // A model output that is also "Too big:" is still the model's miss.
+  assert.equal(classifySystemicFailure('Planning failed after the first completed generation. Schema validation failed — title: Too big: expected string to have <=240 characters'), null)
+  // What HNR SENT, refused by the platform's request validation, stays contract.
+  assert.equal(classifySystemicFailure('SleeperHitError: `artifactRequests[0]` is invalid: notes - Too big: expected string to have <=5000 characters'), 'contract')
+  assert.equal(classifySystemicFailure('SleeperHitError: `creativeBrief` is invalid: mustKnowBeforeWriting - Too big: expected array to have <=12 items'), 'contract')
+  assert.equal(isModelOutputMissFailure('`creativeBrief` is invalid: Too big'), false)
+})
+
+test('a planner schema miss stored as contract opens no circuit, sends no alert, and resumes its plan', async (t) => {
+  const h = harness({ topIds: [], randomIds: ['resume_newgrounds'] })
+  h.env.RESEND_API_KEY = 'test_resend_key'
+  h.env.ALERT_EMAIL = 'ops@example.com'
+  const emails = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (_url, options) => {
+    emails.push(JSON.parse(options.body))
+    return { ok: true, json: async () => ({ id: 'email_1' }) }
+  }
+  t.after(() => { globalThis.fetch = realFetch })
+
+  const date = '2026-10-02'
+  // As prod stored it: the pipeline classified it at failure time, under the old rule.
+  h.dramas.set('episode_newgrounds', {
+    id: 'episode_newgrounds',
+    hnId: '49940394',
+    status: 'failed',
+    failureClass: 'contract',
+    failureCode: 'story_plan_failed',
+    failureMessage: NEWGROUNDS_PLAN_MISS,
+    error: NEWGROUNDS_PLAN_MISS,
+    planId: 'cmus3r91e001xi8073wt3td1y',
+    url: 'https://news.ycombinator.com/item?id=49940394',
+    progress: [],
+  })
+  h.settings.set(nightlyBatchKey(date), {
+    date,
+    status: 'running',
+    target: 5,
+    items: [{
+      hnId: '49940394',
+      url: 'https://news.ycombinator.com/item?id=49940394',
+      title: 'Newgrounds.com – A community of games, music, and art',
+      episodeId: 'episode_newgrounds',
+      workflowId: 'episode_newgrounds',
+      attempt: 1,
+      recoveryAttempts: 0,
+      status: 'failed',
+    }],
+    errors: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+  assert.equal(item.contractBlockedAt, undefined)
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)?.state === 'open', false, 'no generation circuit')
+  assert.equal(emails.length, 0, 'no distress alert for a model miss')
+  // The normal retry: the same plan, re-run by the platform.
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.resumePlanId, 'cmus3r91e001xi8073wt3td1y')
+  assert.equal(h.creates[0].params.dramaId, 'episode_newgrounds')
+  assert.notEqual(item.status, 'blocked')
 })
 
 test('provider policy throttles use the stable failure code and get their own alert class', async (t) => {

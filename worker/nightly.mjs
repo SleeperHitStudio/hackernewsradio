@@ -1014,7 +1014,10 @@ async function recoverItem(
   const failureMessage = drama
     ? (drama.failureMessage || drama.error || null)
     : item.lastError
-  const failureClass = isSystemicClass(drama?.failureClass)
+  // A stored 'contract' is re-read from the message it was derived from: the class is purely
+  // message-based, and a model's schema miss was once filed under it (2026-10-03). Trusting the stale
+  // verdict would open the circuit and page the operator for a failure the classifier now retries.
+  const failureClass = isSystemicClass(drama?.failureClass) && drama.failureClass !== 'contract'
     ? drama.failureClass
     : classifySystemicFailure({
       failureCode: drama?.failureCode,

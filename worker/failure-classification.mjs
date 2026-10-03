@@ -23,7 +23,20 @@ export const PROVIDER_QUOTA_RE =
   /usage limits|quota (?:exceeded|reached)|exceeded your current|insufficient credits|credit balance|requires more credits|can only afford|add more credits|payment required|billing|incorrect api key|rate limit/i
 
 export const CONTRACT_CLASS_RE =
-  /is invalid:|Too big:|Invalid key in record|Supply every speaking character|Table-read outline page budgets total|scriptBlueprint\.pageTarget|Schema validation failed|response did not match schema/i
+  /is invalid:|Too big:|Invalid key in record|Supply every speaking character|Table-read outline page budgets total|scriptBlueprint\.pageTarget/i
+
+/**
+ * A MODEL'S ANSWER missed its schema: the platform's planner produced a plan and one field came back the
+ * wrong shape ("Planning failed after the first completed generation. Schema validation failed —
+ * artifacts: Invalid input: expected array, received string", 2026-10-03, the first in 14 days of
+ * plans). That is the model, once, not the platform refusing what HNR sent, so it is an ordinary item
+ * failure the next attempt retries. It never opens the generation circuit or pages the operator.
+ * Checked BEFORE the contract class, so an output that also says "Too big:" (a field the model made too
+ * long) stays an item failure; a REQUEST HNR sent that the platform refuses ("`notes` is invalid: Too
+ * big: …") has no such prefix and is still contract.
+ */
+export const MODEL_OUTPUT_MISS_RE =
+  /Planning failed after the first completed generation|response did not match schema/i
 
 /**
  * THE PROJECT IS NOT READY. The platform refuses a plan or a job with a typed
@@ -151,8 +164,14 @@ export function classifySystemicFailure(value) {
   if (APPROVAL_MISSING_CODES.includes(code) || APPROVAL_MISSING_RE.test(message)) return 'approval_missing'
   if (code === 'insufficient_credits' || status === 402 || PLATFORM_CREDITS_RE.test(message)) return 'quota'
   if (PROVIDER_QUOTA_RE.test(message)) return 'provider_quota'
+  if (MODEL_OUTPUT_MISS_RE.test(message)) return null
   if (CONTRACT_CLASS_RE.test(message)) return 'contract'
   return null
+}
+
+/** A model's answer missed its schema (MODEL_OUTPUT_MISS_RE): retried as an item, never systemic. */
+export function isModelOutputMissFailure(value) {
+  return MODEL_OUTPUT_MISS_RE.test(failureSignals(value).message)
 }
 
 export function isProviderBlockedFailure(value) {
