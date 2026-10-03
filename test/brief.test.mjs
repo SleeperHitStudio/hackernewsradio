@@ -2,11 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  EPISODE_PAGE_TARGET,
+  SHOW_NEVER_SAY,
   buildBrief,
   buildStoryJobArtifactRequests,
   canonicalPinnedVoiceMap,
   castCanonCharacters,
   hostForCharacter,
+  pageTargetFor,
   staleCastCanonCharacters,
 } from '../worker/brief.mjs'
 
@@ -110,6 +113,8 @@ test('complete pinned cast is sent canonically with voiceId only', () => {
   }), [{
     type: 'table_read',
     narrationPolicy: 'suppress',
+    punchUp: true,
+    neverSay: ['goddamn', 'Jesus', 'Christ'],
     deferMusic: true,
     deferAudioRender: true,
     notes: 'Keep it fast.',
@@ -134,6 +139,8 @@ test('missing or incomplete pinned cast preserves the existing assignment reques
     }), [{
       type: 'table_read',
       narrationPolicy: 'suppress',
+      punchUp: true,
+      neverSay: ['goddamn', 'Jesus', 'Christ'],
       deferMusic: true,
       deferAudioRender: true,
       notes: 'Keep it fast.',
@@ -147,6 +154,54 @@ test('resume and repair of an existing artifact never creates a cast-bearing job
     pinnedVoices: completePinnedVoices,
     notes: 'This must not be sent.',
   }), null)
+})
+
+test('every new episode asks for the guarded punch-up, with the show\'s hard lines', () => {
+  // The comedy rewrite (owner, 2026-10-02: "much funnier but still on brand, and a bit more
+  // swearing"). The platform's scene-by-scene writer drowns notes in ~55K tokens of context, so the
+  // swearing only arrives in a punch-up pass that edits each written scene. Its guard reverts a scene
+  // that adds a neverSay term, so the hard lines ride on every request, not in a prompt alone.
+  for (const pinnedVoices of [null, completePinnedVoices]) {
+    const [request] = buildStoryJobArtifactRequests({ pinnedVoices, notes: 'x' })
+    assert.equal(request.punchUp, true)
+    assert.deepEqual(request.neverSay, ['goddamn', 'Jesus', 'Christ'])
+  }
+  // A request gets its own copy: nothing downstream can edit the show's list.
+  assert.throws(() => { SHOW_NEVER_SAY.push('heck') })
+  const [a] = buildStoryJobArtifactRequests({ notes: 'x' })
+  a.neverSay.push('heck')
+  assert.deepEqual(buildStoryJobArtifactRequests({ notes: 'x' })[0].neverSay, ['goddamn', 'Jesus', 'Christ'])
+  // The platform caps the list at 20 terms of at most 40 characters.
+  assert.ok(SHOW_NEVER_SAY.length <= 20 && SHOW_NEVER_SAY.every((term) => term.length <= 40))
+})
+
+test('every episode is about 12 pages, whatever the thread\'s engagement', () => {
+  // Owner, 2026-10-02: "flat ~12 pages for every HNR episode". The coverage gate measures each draft
+  // against this one number.
+  assert.equal(EPISODE_PAGE_TARGET, 12)
+  for (const thread of [{ total: 5, points: 0 }, { total: 300, points: 400 }, { total: 5000, points: 9000 }]) {
+    assert.equal(pageTargetFor(thread), 12)
+  }
+  const notes = buildBrief({ title: 't', total: 5, points: 0 }, pageTargetFor({ total: 5, points: 0 })).performanceNotes
+  assert.match(notes, /LENGTH: about 12 pages, roughly 2,200 spoken words\./)
+})
+
+test('the brief asks for a very funny, sweary show and never rations the swearing', () => {
+  // The old brief and Bible called the swearing "a SPICE" and stopped every bit after one line; the
+  // shows averaged 2 swears and ~10 "that's not X, that's Y" reframes. The brief now leads with the joke.
+  const brief = buildBrief({ title: 't', total: 500, points: 100 }, 12)
+  const everything = JSON.stringify(brief)
+  assert.doesNotMatch(everything, /\bspice\b/i)
+  assert.match(brief.performanceNotes, /^THIS IS A COMEDY\./)
+  assert.match(brief.performanceNotes, /at least ten swears, about one a page, every host at least twice/)
+  assert.match(brief.performanceNotes, /Never "goddamn", "Jesus" or "Christ"\. Never at a private commenter as a person/)
+  assert.match(brief.creativeBrief.writingStyle, /^COMEDY FIRST/)
+  const mustKnow = brief.creativeBrief.mustKnowBeforeWriting.join('\n')
+  assert.match(mustKnow, /THE LADDER, 3\+ per episode/)
+  assert.match(mustKnow, /never "goddamn", "Jesus" or "Christ"; never at a private commenter as a person/)
+  // Each host has one joke engine, and none is shared.
+  for (const host of ['GARY', 'MAEVE', 'OBI', 'GRUNER']) assert.ok(brief.creativeBrief.castNotes.includes(host))
+  assert.match(brief.creativeBrief.castNotes, /FOUR JOKE MACHINES, NEVER SHARED/)
 })
 
 test('every generated job defers the soundtrack — the jazz theme is banked, not rendered', () => {
