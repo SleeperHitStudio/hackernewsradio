@@ -4,7 +4,8 @@
  * OG tags. Generation runs as a durable Workflow (see pipeline.mjs); the daily
  * 7pm America/Chicago sweep fires from an hourly cron trigger (DST-proof).
  */
-import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread, getSetting } from './store.mjs'
+import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread, getSetting, isDroppedEpisode } from './store.mjs'
+import { deathThreadMatch } from './death-thread.mjs'
 import {
   buildSourceMetadata,
   fetchThread,
@@ -101,15 +102,33 @@ export async function communityGenerationRefusal(env, { readReadiness = readShow
   }
 }
 
+/** A visitor's thread the show will not make. Same refusal whether the title or the article gave it away. */
+function notCoveredError(code) {
+  const err = new Error(code === 'episode_dropped'
+    ? 'HN Radio does not make an episode of this thread.'
+    : 'HN Radio does not cover threads about someone\'s death.')
+  err.code = code
+  err.status = 422
+  return err
+}
+
 export async function startGeneration(request, env, url, {
   force = false,
   requireEntitlement = true,
   deps = {},
 } = {}) {
-  const { fetchThread: readThread = fetchThread, readReadiness = readShowReadiness } = deps
+  const {
+    fetchThread: readThread = fetchThread,
+    readReadiness = readShowReadiness,
+    hydrateArticle = hydrateThreadArticle,
+  } = deps
   const thread = await readThread(url)
+  // Owner rule (2026-10-04): the show never covers a thread about a real person's death, nightly or requested.
+  if (deathThreadMatch({ title: thread.title, storyText: thread.storyText })) throw notCoveredError('death_thread')
+  const existing = await findByHnIdAndMode(env.DB, thread.id, 'podcast')
+  // A dropped episode's thread is never made again, `force` or not.
+  if (isDroppedEpisode(existing)) throw notCoveredError('episode_dropped')
   if (!force) {
-    const existing = await findByHnIdAndMode(env.DB, thread.id, 'podcast')
     if (existing && ['queued', 'running', 'ready'].includes(existing.status)) return { drama: existing, reused: true }
   }
   // Nothing new is claimed, uploaded, planned or approved while the show
@@ -122,7 +141,10 @@ export async function startGeneration(request, env, url, {
     err.reason = refusal.reason ?? null
     throw err
   }
-  await hydrateThreadArticle(thread)
+  await hydrateArticle(thread)
+  if (deathThreadMatch({ articleTitle: thread.article?.title, articleText: thread.article?.text })) {
+    throw notCoveredError('death_thread')
+  }
   const sourceTranscript = threadToTranscript(thread)
   const sourceMetadata = buildSourceMetadata(thread, sourceTranscript)
   let entitlementClaimed = false
@@ -201,7 +223,8 @@ async function handleApi(request, env, url) {
   const one = pathname.match(/^\/api\/dramas\/([0-9a-f-]{36})$/)
   if (one && request.method === 'GET') {
     const drama = await getDrama(env.DB, one[1])
-    return drama ? json({ drama }) : json({ error: 'Not found' }, 404)
+    // A dropped episode is not on the site.
+    return drama && !isDroppedEpisode(drama) ? json({ drama }) : json({ error: 'Not found' }, 404)
   }
   // Resume a failed run whose performance already exists (e.g. the Workflow
   // died in post-production): reuse the artifact, rerun mandatory autotune and
@@ -242,6 +265,7 @@ async function handleApi(request, env, url) {
     if (deployGate) return deployGate
     const drama = await getDrama(env.DB, repair[1])
     if (!drama?.artifactId) return json({ error: 'Repair needs an existing performance (artifactId).' }, 400)
+    if (isDroppedEpisode(drama)) return json({ error: 'This episode was dropped; it is never repaired or published.' }, 409)
     let body
     try { body = await request.json() } catch { body = {} }
     const repairRunId = crypto.randomUUID()
@@ -271,6 +295,9 @@ async function handleApi(request, env, url) {
       if (String(err?.code || '').startsWith('community_')) {
         return json({ error: err.code, code: err.code, generatedHnId: err.generatedHnId || null }, 403)
       }
+      if (err?.code === 'death_thread' || err?.code === 'episode_dropped') {
+        return json({ error: err.message, code: err.code }, 422)
+      }
       if (err?.code === 'show_not_ready' || err?.code === 'show_readiness_unavailable') {
         return json({ error: err.message, code: err.code, reason: err.reason ?? null }, 503, { 'Retry-After': '3600' })
       }
@@ -292,6 +319,7 @@ async function handleEpisodePage(request, env, url) {
     const byGuid = await getDrama(env.DB, raw)
     if (byGuid?.hnId) return Response.redirect(`https://hnradio.net/e/${byGuid.hnId}`, 301)
   }
+  if (isDroppedEpisode(drama)) drama = null
   const shell = await env.ASSETS.fetch(new Request(new URL('/index.html', url).toString()))
   if (!drama) return withHeaders(new Response(await shell.text(), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }))
   const title = `HNR — ${drama.title}`

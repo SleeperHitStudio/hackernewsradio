@@ -52,6 +52,7 @@ import {
   deleteOtherEpisodesOfThread,
   getDrama,
   getSetting,
+  isDroppedEpisode,
   listLiveEpisodesOfThread,
   patchDrama,
   setSetting,
@@ -156,6 +157,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
       : null
 
     try {
+      // A dropped episode never airs (store.mjs DROPPED_STATUS): whatever started this run, it makes, finalizes
+      // and publishes nothing. Read outside any step, so it is re-checked on every wake of a long run.
+      if (await this.episodeDropped(db, dramaId)) return 'dropped'
+
       if (isPublishOnly) {
         if (!recoveryOriginal?.artifactId || !recoveryOriginal?.audioUrl) {
           throw new Error(`Cannot publish ${dramaId}: the episode has no finished MP3.`)
@@ -767,6 +772,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await this.shapeMusic(step, db, sh, dramaId, artifactId, note, postProductionScope)
 
       // ── Finalize ───────────────────────────────────────────────────────────
+      if (await this.episodeDropped(db, dramaId)) return 'dropped'
       await note('Mixing the durable MP3 (voices + music + SFX)…')
       await step.sleep('pre-finalize break', '2 seconds')
       const first = await this.hardStep(step, 'finalize', () =>
@@ -788,6 +794,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
         })
       }
 
+      // Never make a dropped episode playable on the site, even if its MP3 rendered.
+      if (await this.episodeDropped(db, dramaId)) return 'dropped'
       await patchDrama(db, dramaId, {
         status: 'ready',
         audioUrl,
@@ -840,6 +848,10 @@ export class HnrPipeline extends WorkflowEntrypoint {
       await note(`Failed: ${err?.message || err}`)
       throw err
     }
+  }
+
+  async episodeDropped(db, dramaId) {
+    return isDroppedEpisode(await getDrama(db, dramaId))
   }
 
   /** Retry transient Workflow/DO failures only when the caller marks the work
@@ -1221,6 +1233,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
    */
   async publishToFeed(step, { env, db, sh, dramaId, note, artifactId, title, payload }) {
     if (payload.skipPublish) return 'skipped'
+    // The last gate before the feed: a drop during the pre-publish break still keeps it off.
+    if (await this.episodeDropped(db, dramaId)) return 'dropped'
     const repairRun = payload.repairArtifactId || payload.repairRunId
     const repairPublicationRequired = Boolean(payload.repairArtifactId)
     let outcome

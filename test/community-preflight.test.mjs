@@ -10,7 +10,7 @@ register('data:text/javascript,' + encodeURIComponent(`export async function res
   if (specifier === 'cloudflare:workers') return { url: ${JSON.stringify(workersStub)}, shortCircuit: true }
   return next(specifier, context)
 }`))
-const { communityGenerationRefusal, startGeneration } = await import('../worker/index.mjs')
+const { default: worker, communityGenerationRefusal, startGeneration } = await import('../worker/index.mjs')
 
 function fakeDb({ episodes = [], settings = {} } = {}) {
   const rows = [...episodes]
@@ -27,6 +27,10 @@ function fakeDb({ episodes = [], settings = {} } = {}) {
               }
               if (q.startsWith('SELECT data FROM episodes WHERE hn_id')) {
                 const row = rows.find((episode) => String(episode.hnId) === values[0])
+                return row ? { data: JSON.stringify(row) } : null
+              }
+              if (q.startsWith('SELECT data FROM episodes WHERE id')) {
+                const row = rows.find((episode) => episode.id === values[0])
                 return row ? { data: JSON.stringify(row) } : null
               }
               throw new Error(`Unexpected D1 read: ${q}`)
@@ -176,4 +180,76 @@ test('a visitor\'s preflight pushes HNR\'s pinned voices into the cast canon bef
   assert.equal(patches.length, 1)
   assert.deepEqual(patches[0].body.content.characters.map((c) => [c.name, c.voiceId]), HOSTS.map((name) => [name, `v_${name.toLowerCase()}`]))
   assert.equal(requests.filter((request) => request.path === `/story-projects/${PROJECT}`).length, 2, 'the project is re-read after the push')
+})
+
+// ── Death threads and dropped episodes (owner, 2026-10-04) ───────────────────────────────────────────
+
+const DROPPED_ID = '61d7b65b-9002-4883-9140-96a008139b15'
+const droppedRow = () => ({
+  id: DROPPED_ID, hnId: '49949438', mode: 'podcast', status: 'dropped', title: 'Bob Cringely Has Died',
+  url: 'https://news.ycombinator.com/item?id=49949438', commentCount: 36, artifactId: 'artifact_4', audioUrl: null,
+  progress: [], dropped: { by: 'owner', reason: 'A death thread: never covered.' },
+})
+
+test('a visitor cannot request a death thread: refused before any read, claim, row or Workflow', async () => {
+  const { env, creates } = envWith(fakeDb({ settings: { publishingSeriesId: 'series_hnr' } }))
+  let reads = 0
+  await assert.rejects(
+    startGeneration({}, env, 'https://news.ycombinator.com/item?id=49953288', {
+      requireEntitlement: false,
+      deps: {
+        fetchThread: async () => ({ ...completeThread('49953288'), title: 'Bill Draper has died' }),
+        readReadiness: async () => { reads++; return READY },
+      },
+    }),
+    (error) => error.code === 'death_thread' && error.status === 422,
+  )
+  assert.equal(reads, 0)
+  assert.equal(creates.length, 0)
+  assert.equal(env.DB.rows.length, 0)
+})
+
+test('a visitor\'s thread whose linked article announces a death is refused before anything is claimed or queued', async () => {
+  const { env, creates } = envWith(fakeDb({ settings: { publishingSeriesId: 'series_hnr' } }))
+  await assert.rejects(
+    startGeneration({}, env, 'https://news.ycombinator.com/item?id=80', {
+      requireEntitlement: false,
+      deps: {
+        fetchThread: async () => ({ ...completeThread('80'), title: 'Bill Draper', articleUrl: 'https://news.example/draper' }),
+        readReadiness: async () => READY,
+        hydrateArticle: async (thread) => { thread.article = { title: 'William Draper, Venture Capitalist, Dies at 98', text: 'Obituary.' } },
+      },
+    }),
+    (error) => error.code === 'death_thread',
+  )
+  assert.equal(creates.length, 0)
+  assert.equal(env.DB.rows.length, 0)
+})
+
+test('a dropped episode\'s thread is never made again, not even with force', async () => {
+  for (const force of [false, true]) {
+    const { env, creates } = envWith(fakeDb({ episodes: [{ ...droppedRow(), title: 'Story 49949438' }] }))
+    await assert.rejects(
+      startGeneration({}, env, 'https://news.ycombinator.com/item?id=49949438', {
+        force,
+        requireEntitlement: false,
+        deps: { fetchThread: async () => completeThread('49949438'), readReadiness: async () => READY },
+      }),
+      (error) => error.code === 'episode_dropped' && error.status === 422,
+    )
+    assert.equal(creates.length, 0)
+    assert.equal(env.DB.rows.length, 1)
+  }
+})
+
+test('the site does not serve a dropped episode: no episode read, no landing page', async () => {
+  const env = {
+    DB: fakeDb({ episodes: [droppedRow()] }),
+    ASSETS: { async fetch() { return new Response('<html><head><title>HNR</title></head><body></body></html>') } },
+  }
+  const one = await worker.fetch(new Request(`https://hnradio.net/api/dramas/${DROPPED_ID}`), env)
+  assert.equal(one.status, 404)
+  const page = await worker.fetch(new Request('https://hnradio.net/e/49949438'), env)
+  assert.equal(page.status, 404)
+  assert.doesNotMatch(await page.text(), /Cringely/)
 })

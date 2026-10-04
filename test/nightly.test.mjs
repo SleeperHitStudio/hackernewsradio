@@ -2716,3 +2716,152 @@ test('a canon that already carries every pinned voice is read, never written', a
   assert.deepEqual(circuit.readiness.details.missing, ['CALLER (voice)'])
   assert.equal(h.creates.length, 0)
 })
+
+// ── Death threads and dropped episodes (owner, 2026-10-04, Option B) ─────────────────────────────────
+
+test('a death thread is passed over before anything is adopted, fetched or spent; it is logged once and the next thread is picked', async () => {
+  const h = harness({ topIds: [77, 78] })
+  const itemReads = []
+  const baseFetchJson = h.dependencies.fetchJson
+  h.dependencies.fetchJson = async (url) => {
+    if (url.includes('/item/')) itemReads.push(url.match(/item\/(\d+)/)[1])
+    return url.endsWith('/item/77.json')
+      ? { id: 77, type: 'story', descendants: 156, title: 'Tell HN: Bob Cringely has died' }
+      : baseFetchJson(url)
+  }
+  const threadReads = []
+  const baseFetchThread = h.dependencies.fetchThread
+  h.dependencies.fetchThread = async (url) => { threadReads.push(url); return baseFetchThread(url) }
+
+  const batch = await reconcileNightlyBatch(h.env, '2026-07-15', { dependencies: h.dependencies })
+
+  assert.deepEqual(batch.items.map((item) => item.hnId), ['78'])
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.url, 'https://news.ycombinator.com/item?id=78')
+  assert.ok(threadReads.every((url) => !url.includes('id=77')), 'the death thread is never fetched')
+  assert.equal(batch.passedOver.length, 1)
+  assert.equal(batch.passedOver[0].hnId, '77')
+  assert.equal(batch.passedOver[0].title, 'Tell HN: Bob Cringely has died')
+  assert.match(batch.passedOver[0].reason, /^death thread .*"has died" in the title/)
+  assert.deepEqual(batch.errors, [], 'a pass-over is not an error')
+
+  // The next tick does not read it again or log it twice.
+  const readsBefore = itemReads.filter((id) => id === '77').length
+  const again = await reconcileNightlyBatch(h.env, '2026-07-15', { dependencies: h.dependencies })
+  assert.equal(itemReads.filter((id) => id === '77').length, readsBefore)
+  assert.equal(again.passedOver.length, 1)
+})
+
+test('a death thread the linked article reveals is passed over before the generation slot is taken', async () => {
+  const h = harness({ topIds: [80, 81] })
+  const baseFetchThread = h.dependencies.fetchThread
+  h.dependencies.fetchThread = async (url) => {
+    const thread = await baseFetchThread(url)
+    return String(thread.id) === '80'
+      ? { ...thread, title: 'Bill Draper', articleUrl: 'https://news.example/draper' }
+      : thread
+  }
+  const text = `William H. Draper III, a pioneer of venture capital, ${'built firms across three continents. '.repeat(30)}`
+  h.dependencies.fetchArticle = async (url) => ({
+    url, requestedUrl: url, contentType: 'text/html', rawByteSize: 4_000,
+    title: 'William Draper, Venture Capitalist, Dies at 98', byline: null, publishedTime: null,
+    text, charCount: text.length, complete: true, truncated: false, fetchedAt: '2026-07-16T06:00:00.000Z',
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, '2026-07-15', { dependencies: h.dependencies })
+
+  assert.deepEqual(batch.items.map((item) => item.hnId), ['81'])
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.dramas.size, 1, 'no episode row for the death thread')
+  assert.equal(batch.passedOver[0].hnId, '80')
+  assert.match(batch.passedOver[0].reason, /"Dies at 98" in the article headline/)
+})
+
+test('a dropped episode\'s thread is never adopted (adopting publishes it) nor made again', async () => {
+  const dropped = {
+    id: 'episode_dropped', hnId: '90', mode: 'podcast', status: 'dropped', title: 'Story 90',
+    url: 'https://news.ycombinator.com/item?id=90', artifactId: 'artifact_dropped', jobId: 'job_dropped',
+    audioUrl: null, progress: [], dropped: { at: '2026-07-16T05:00:00.000Z', by: 'owner', reason: 'Dropped by the owner.' },
+  }
+  const h = harness({ topIds: [90, 91], dramas: new Map([[dropped.id, dropped]]) })
+
+  const batch = await reconcileNightlyBatch(h.env, '2026-07-15', { dependencies: h.dependencies })
+
+  assert.deepEqual(batch.items.map((item) => item.hnId), ['91'])
+  assert.equal(h.creates.length, 1)
+  assert.equal(h.creates[0].params.url, 'https://news.ycombinator.com/item?id=91')
+  assert.equal(h.dramas.get('episode_dropped').status, 'dropped')
+  assert.match(batch.passedOver[0].reason, /^dropped episode episode_dropped: Dropped by the owner\./)
+})
+
+test('an item whose episode was dropped is never resumed or published, even with a performance and a terminated Workflow', async () => {
+  // Episode 4 (2026-10-04): a finished performance, its Workflow terminated. Before the drop, the next tick
+  // would have resumed post-production on the artifact and published it.
+  const date = '2026-07-15'
+  const drama = {
+    id: 'episode_4', hnId: '49949438', mode: 'podcast', status: 'dropped', title: 'Bob Cringely Has Died',
+    url: 'https://news.ycombinator.com/item?id=49949438', artifactId: 'artifact_4', jobId: 'job_4', planId: 'plan_4',
+    audioUrl: null, progress: [], dropped: { at: '2026-07-16T05:00:00.000Z', by: 'owner', reason: 'Never covered: a death thread.' },
+  }
+  const item = {
+    hnId: drama.hnId, url: drama.url, title: drama.title, episodeId: drama.id, workflowId: drama.id,
+    attempt: 1, recoveryAttempts: 0, status: 'paused',
+  }
+  const h = harness({
+    settings: new Map([[nightlyBatchKey(date), { date, status: 'running', target: 5, items: [item], errors: [] }]]),
+    dramas: new Map([[drama.id, drama]]),
+    topIds: [55],
+  })
+  h.workflowStatuses.set(drama.id, 'terminated')
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  const ep4 = batch.items.find((entry) => entry.hnId === '49949438')
+  assert.equal(ep4.status, 'dropped')
+  assert.equal(ep4.lastError, 'Never covered: a death thread.')
+  assert.deepEqual(h.restarts, [])
+  assert.deepEqual(h.terminations, [])
+  assert.ok(h.creates.every((create) => create.params.dramaId !== 'episode_4' && !create.params.resumeArtifactId),
+    'no resume, repair or publish Workflow for the dropped episode')
+  assert.equal(h.dramas.get('episode_4').status, 'dropped')
+  // It frees its slot like an exhausted item: the next thread is picked.
+  assert.deepEqual(batch.items.map((entry) => entry.hnId), ['49949438', '55'])
+  assert.equal(h.creates.length, 1)
+
+  // And it stays inert on every later tick.
+  h.creates.length = 0
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.ok(h.creates.every((create) => create.params.dramaId !== 'episode_4'))
+})
+
+test('the operator stopgap holds without the drop state: an exhausted item keeps a running episode inert, and a later batch holding it never adopts the thread', async () => {
+  // What was deployed when episode 4 was ended (2026-10-04 19:51Z): the batch item marked exhausted, the next
+  // night's batch seeded with the same exhausted item, the episode row still `running`, its Workflow terminated.
+  const running = {
+    id: 'episode_4', hnId: '49949438', mode: 'podcast', status: 'running', title: 'Story 49949438',
+    url: 'https://news.ycombinator.com/item?id=49949438', artifactId: 'artifact_4', jobId: 'job_4',
+    audioUrl: null, progress: [],
+  }
+  const held = (extra = {}) => ({
+    hnId: '49949438', url: running.url, title: running.title, attempt: 1, recoveryAttempts: 0,
+    status: 'exhausted', lastWorkflowStatus: 'dropped', ...extra,
+  })
+  const h = harness({
+    settings: new Map([
+      [nightlyBatchKey('2026-07-15'), { date: '2026-07-15', status: 'running', target: 5, errors: [],
+        items: [held({ episodeId: running.id, workflowId: running.id })] }],
+      [nightlyBatchKey('2026-07-16'), { date: '2026-07-16', status: 'running', target: 5, errors: [],
+        items: [held({ episodeId: null, workflowId: null, attempt: 0 })] }],
+    ]),
+    dramas: new Map([[running.id, running]]),
+    topIds: [49949438, 60],
+  })
+  h.workflowStatuses.set(running.id, 'terminated')
+
+  await reconcileNightlyBatch(h.env, '2026-07-15', { dependencies: h.dependencies, allowGeneration: false })
+  const tonight = await reconcileNightlyBatch(h.env, '2026-07-16', { dependencies: h.dependencies })
+
+  assert.ok(h.creates.every((create) => create.params.dramaId !== 'episode_4' && !create.params.resumeArtifactId))
+  assert.deepEqual(tonight.items.map((item) => [item.hnId, item.status]), [['49949438', 'exhausted'], ['60', 'queued']])
+  assert.equal(h.dramas.get('episode_4').status, 'running', 'untouched')
+})

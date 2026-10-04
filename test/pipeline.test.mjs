@@ -57,6 +57,10 @@ function fakeD1({ episodes = [], settings = {} } = {}) {
             },
             async run() {
               if (q.startsWith('INSERT INTO episodes')) {
+                // The real upsert never rewrites a dropped row (store.mjs DROPPED_STATUS).
+                if (q.includes("WHERE episodes.status <> 'dropped'") && rows.get(values[0])?.status === 'dropped') {
+                  return { meta: { changes: 0 } }
+                }
                 rows.set(values[0], JSON.parse(values[6]))
                 return { meta: { changes: 1 } }
               }
@@ -735,4 +739,52 @@ test('a lost "published" note never publishes twice: the release already on the 
   assert.equal(drama.publishState, 'published')
   assert.equal(drama.releaseId, 'release_live')
   assert.ok(drama.progress.some((p) => p.message === PUBLISHED_PROGRESS_MESSAGE))
+})
+
+// ── A dropped episode never airs (owner, 2026-10-04) ─────────────────────────────────────────────────
+
+function droppedEpisode() {
+  return {
+    ...newEpisode('drama_dropped'),
+    status: 'dropped',
+    artifactId: 'artifact_dropped',
+    jobId: 'job_dropped',
+    audioUrl: 'https://files.example/rendered-before-the-drop.mp3',
+    dropped: { at: '2026-10-04T19:51:08.895Z', by: 'owner', reason: 'A death thread: never covered.' },
+  }
+}
+
+test('no Workflow makes, finalizes or publishes anything for a dropped episode, whatever started it', async (t) => {
+  const net = fakeNetwork(t, () => { throw new Error('a dropped episode must make no Story API call') })
+  const payloads = [
+    { dramaId: 'drama_dropped', url: 'https://news.ycombinator.com/item?id=42' },
+    { dramaId: 'drama_dropped', url: 'https://news.ycombinator.com/item?id=42', resumeArtifactId: 'artifact_dropped', resumeRunId: 'resume_1', skipPublish: false },
+    { dramaId: 'drama_dropped', url: 'https://news.ycombinator.com/item?id=42', repairArtifactId: 'artifact_dropped', repairRunId: 'repair_1' },
+    { dramaId: 'drama_dropped', url: 'https://news.ycombinator.com/item?id=42', publishOnly: true, publishRunId: 'publish_1' },
+    { dramaId: 'drama_dropped', url: 'https://news.ycombinator.com/item?id=42', resumeJobId: 'job_dropped', recoveryRunId: 'recovery_1' },
+  ]
+  for (const payload of payloads) {
+    const db = fakeD1({ episodes: [droppedEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+    const step = cloudflareStep()
+    const outcome = await new HnrPipeline({}, envFor(db)).run({ payload, instanceId: 'run_dropped' }, step)
+    assert.equal(outcome, 'dropped', JSON.stringify(payload))
+    assert.deepEqual(step.labels, [], 'no step ran')
+    assert.deepEqual(db.rows.get('drama_dropped'), droppedEpisode(), 'the row is untouched')
+  }
+  assert.deepEqual(net.requests, [])
+})
+
+test('an episode dropped during the pre-publish break never reaches the feed', async (t) => {
+  const net = fakeNetwork(t, underGrant(() => { throw new Error('nothing may be published') }))
+  const db = fakeD1({ episodes: [droppedEpisode()], settings: { publishingSeriesId: SERIES } })
+  const pipeline = new HnrPipeline({}, envFor(db))
+  const step = cloudflareStep()
+  const outcome = await pipeline.publishToFeed(step, {
+    env: envFor(db), db, sh: null, dramaId: 'drama_dropped', note: async () => {},
+    artifactId: 'artifact_dropped', title: 'Story 42', payload: {},
+  })
+  assert.equal(outcome, 'dropped')
+  assert.deepEqual(net.requests, [])
+  assert.equal(db.rows.get('drama_dropped').publishState, undefined)
+  assert.equal(db.rows.get('drama_dropped').releaseId, undefined)
 })
