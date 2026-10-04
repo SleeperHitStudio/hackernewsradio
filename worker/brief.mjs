@@ -267,8 +267,8 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
         'subject beat. No narrator, no CTA. Every scene, and the episode, ends on its biggest laugh.',
         'OBI GOES FOR GARY: cutting, personal, technically precise; clean until the insult lands. Gary defends himself ' +
         'with worse evidence and hands Obi the better insult. 3-5 exchanges. Maeve and Gruner never intervene.',
-        'SWEARS, ~12, SPREAD: Gary 4 in spirals, Gruner 3 in Russian, Obi 3 at most, Maeve 2 dead flat; on the stressed ' +
-        'beat; never the first line; never "goddamn", "Jesus" or "Christ"; never at a private commenter as a person.',
+        'SWEARS, 12+, SPREAD: Gary 4+ in spirals, Gruner 3+ in Russian, Maeve 2-3 flat, Obi 2-3 max; on the ' +
+        'stressed beat; never the first line; never "goddamn", "Jesus" or "Christ"; never at a private commenter as a person.',
         'THE OPERATOR (max once, NOT every episode): they sense someone writes them, float vague delicious "justice", ' +
         'nearly name a method — then it STOPS and goes WEIRD. Never resolved, never named, never revisited.',
       ],
@@ -288,7 +288,7 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       'OBI gets more specific, never louder: the exact version, the exact pager time, the exact config flag. He goes for Gary, and when Gary defends himself Obi keeps climbing.',
       'GRUNER: under ten words, wrong idiom, right conclusion. He reads a field note aloud at most twice an episode; otherwise he just talks.',
       '',
-      'SWEARING: about twelve an episode, about one a page, SPREAD across all four: no host carries it. Each host swears their own way and their own amount. GARY, about four: in panicked spirals, two stacked when he is losing. GRUNER, about three: in Russian (blyat, chyort, suka) or one wrong English word, as the button. OBI, three at most: one precise compound insult at the top of a ladder, aimed at Gary; otherwise clinically clean, which is why his land. MAEVE, about two: rare, in dead monotone, the hardest-landing words of the episode. Swearing is rhythm: put the swear on the stressed beat, so it IS the punchline word or the brake right before it. Words that land: fuck, fucking, shit, bullshit, prick, bastard, arse, dickhead. Never in the first line. Never "goddamn", "Jesus" or "Christ". Never at a private commenter as a person: go after their argument, the company, the founder, or each other.',
+      'SWEARING: at least twelve an episode, more than one a page, SPREAD across all four: no host carries it, and every host swears at least twice. Each host swears their own way and their own amount. GARY, four or more: in panicked spirals, two stacked when he is losing. GRUNER, three or more: in Russian (blyat, chyort, suka) or one wrong English word, as the button. MAEVE, two or three: in dead monotone, the hardest-landing words of the episode. OBI, two or three and never more: one precise compound insult at the top of a ladder, aimed at Gary; otherwise clinically clean, which is why his land. Swearing is rhythm: put the swear on the stressed beat, so it IS the punchline word or the brake right before it. Words that land: fuck, fucking, shit, bullshit, prick, bastard, arse, dickhead. Never in the first line. Never "goddamn", "Jesus" or "Christ". Never at a private commenter as a person: go after their argument, the company, the founder, or each other.',
       '',
       'CROSSTALK: every scene after the cold open has one (OVERLAPPING) line, a long scene two: four to six an episode. A host cuts in at the top of a ladder, or throws a short reaction ("Oh, fuck off.") under someone mid-rant. The line being cut is a host\'s own spoken line ending in an em dash, never a quote, a handle, a number or the punchline word, and the (OVERLAPPING) line comes DIRECTLY after it: no action line or sound cue between them.',
       '',

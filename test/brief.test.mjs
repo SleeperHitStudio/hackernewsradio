@@ -201,13 +201,13 @@ test('the brief asks for a very funny, sweary show and never rations the swearin
   const everything = JSON.stringify(brief)
   assert.doesNotMatch(everything, /\bspice\b/i)
   assert.match(brief.performanceNotes, /^THIS IS A COMEDY\./)
-  assert.match(brief.performanceNotes, /about twelve an episode, about one a page, SPREAD across all four/)
+  assert.match(brief.performanceNotes, /at least twelve an episode, more than one a page, SPREAD across all four/)
   assert.match(brief.performanceNotes, /Never "goddamn", "Jesus" or "Christ"\. Never at a private commenter as a person/)
   assert.match(brief.creativeBrief.writingStyle, /^COMEDY FIRST/)
   const mustKnow = brief.creativeBrief.mustKnowBeforeWriting.join('\n')
   assert.match(mustKnow, /THE LADDER, 3\+ per episode/)
   assert.match(mustKnow, /never "goddamn", "Jesus" or "Christ"; never at a private commenter as a person/)
-  assert.match(mustKnow, /SWEARS, ~12, SPREAD/)
+  assert.match(mustKnow, /SWEARS, 12\+, SPREAD/)
   // Each host has one joke engine, and none is shared.
   for (const host of ['GARY', 'MAEVE', 'OBI', 'GRUNER']) assert.ok(brief.creativeBrief.castNotes.includes(host))
   assert.match(brief.creativeBrief.castNotes, /FOUR JOKE MACHINES, NEVER SHARED/)
@@ -301,18 +301,22 @@ test('a host stored under a full name with the cue name as an alias is the same 
 })
 
 test('the swearing is spread across all four hosts, each with an amount and a way of their own', () => {
-  // Owner, 2026-10-04: "spread the swearing across hosts". On the canary Obi said about half of every
-  // episode's swears (4/13, 7/13, 10/22, 6/9) and Maeve 1-3, because the brief and the Bible made Obi
-  // the profane one with no amount for anyone. Each host now has a share; the total stays about twelve.
+  // Owner, 2026-10-04: "spread the swearing across hosts", keeping the total. On the canary Obi said about
+  // half of every episode's swears (4/13, 7/13, 10/22, 6/9) and Maeve 1-3, because the brief and the Bible
+  // made Obi the profane one with no amount for anyone. Shares written as "about N" and "Obi at most 3"
+  // spread it but read as ceilings: the first episode swore 8 times (Gruner 4, Gary 2, Obi 1, Maeve 1)
+  // against a median of 13. So each host has a FLOOR, only Obi a ceiling, and the total a floor of twelve.
   const brief = buildBrief({ title: 't', total: 500, points: 100 }, 9)
   const swearing = brief.performanceNotes.split('\n').find((line) => line.startsWith('SWEARING:'))
   assert.ok(swearing, 'the notes have a SWEARING paragraph')
-  const shares = { GARY: /GARY, about four: in panicked spirals/, GRUNER: /GRUNER, about three: in Russian/, OBI: /OBI, three at most: one precise compound insult/, MAEVE: /MAEVE, about two: rare, in dead monotone/ }
+  const shares = { GARY: /GARY, four or more: in panicked spirals/, GRUNER: /GRUNER, three or more: in Russian/, OBI: /OBI, two or three and never more: one precise compound insult/, MAEVE: /MAEVE, two or three: in dead monotone/ }
   for (const [host, share] of Object.entries(shares)) assert.match(swearing, share, `${host} has an amount and a way`)
-  assert.match(swearing, /no host carries it/)
+  assert.match(swearing, /no host carries it, and every host swears at least twice/)
+  // Floors, not targets: nothing but Obi's share reads as a ceiling.
+  assert.doesNotMatch(swearing, /\babout (two|three|four|twelve)\b/)
   // The planner's bullet says the same split, and Obi's feud with Gary no longer asks for profanity.
   const mustKnow = brief.creativeBrief.mustKnowBeforeWriting
-  assert.ok(mustKnow.some((line) => /Gary 4 in spirals, Gruner 3 in Russian, Obi 3 at most, Maeve 2 dead flat/.test(line)))
+  assert.ok(mustKnow.some((line) => /Gary 4\+ in spirals, Gruner 3\+ in Russian, Maeve 2-3 flat, Obi 2-3 max/.test(line)))
   const feud = mustKnow.find((line) => line.startsWith('OBI GOES FOR GARY'))
   assert.doesNotMatch(feud, /profane/)
   assert.match(brief.creativeBrief.writingStyle, /swearing about once a page, from all four/)
