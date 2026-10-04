@@ -2,6 +2,7 @@ import {
   buildSourceMetadata,
   fetchArticle,
   fetchThread,
+  htmlToText,
   threadToTranscript,
   verifiedSourceProgress,
 } from './hn.mjs'
@@ -12,10 +13,12 @@ import {
   findByHnIdAndMode,
   getDrama,
   getSetting,
+  isDroppedEpisode,
   patchDrama,
   setSetting,
   upsertDrama,
 } from './store.mjs'
+import { deathThreadMatch, deathThreadReason } from './death-thread.mjs'
 import {
   classifySystemicFailure,
   isAccessFailure,
@@ -86,6 +89,16 @@ const MUSIC_WATCHDOG_RESUME_MESSAGE =
   'Watchdog: the music wake stalled again; restarting post-production on the existing performance.'
 
 const ACTIVE_WORKFLOW_STATUSES = new Set(['queued', 'running', 'waiting', 'waitingforpause', 'paused'])
+// An operator's pause (a review hold before publish) is still active work, but
+// it is not a stall: the watchdog must never restart, terminate or replace it.
+const OPERATOR_PAUSED_WORKFLOW_STATUSES = new Set(['waitingforpause', 'paused'])
+
+// Batch items the reconciler never touches again. An exhausted or superseded item ran out of chances; a
+// dropped one is an episode the owner ruled must never air (see store.mjs DROPPED_STATUS). None holds a slot.
+export const INERT_ITEM_STATUSES = Object.freeze(['exhausted', 'superseded', 'dropped'])
+export const isInertItem = (item) => INERT_ITEM_STATUSES.includes(item?.status)
+// How many passed-over threads a batch remembers (the picker skips them without re-fetching).
+const PASSED_OVER_LOG_MAX = 50
 
 // One full first-wave wipeout (five stories, zero published) is alertable.
 export const ALERT_MIN_FAILURES = 5
@@ -243,10 +256,8 @@ export function isPublishedEpisode(drama) {
 
 export function activeBatchItems(batch) {
   // Published items still occupy one of the five promised slots; only an
-  // exhausted/superseded item is replaced by a lower-ranked candidate.
-  return (batch?.items ?? []).filter(
-    (item) => !['exhausted', 'superseded'].includes(item.status),
-  )
+  // exhausted/superseded/dropped item is replaced by a lower-ranked candidate.
+  return (batch?.items ?? []).filter((item) => !isInertItem(item))
 }
 
 const nowIso = () => new Date().toISOString()
@@ -610,6 +621,19 @@ function isMissingWorkflowCheckpoint(error) {
     .test(error?.message || String(error))
 }
 
+function isOperatorPausedWorkflowStatus(status) {
+  return OPERATOR_PAUSED_WORKFLOW_STATUSES.has(String(status || '').toLowerCase())
+}
+
+// While paused, the stall clock stands still: the latest paused sighting counts
+// as progress, so a resumed episode gets a full window before any recovery.
+function notePausedForMusicWatchdog(item, drama, deps) {
+  if (!drama?.artifactId) return
+  const watchdog = watchdogStateFor(item, drama.artifactId)
+  watchdog.lastPausedAt = dependencyNow(deps).toISOString()
+  item.musicWatchdog = watchdog
+}
+
 function watchdogStateFor(item, artifactId) {
   const current = item.musicWatchdog
   if (!current || current.artifactId !== artifactId) {
@@ -650,7 +674,11 @@ async function recoverStalledMusicWake(env, batch, item, drama, instance, deps) 
   const watchdog = watchdogStateFor(item, drama.artifactId)
   item.musicWatchdog = watchdog
   watchdog.artifactObservedAt ??= now.toISOString()
-  const lastProgressMs = latestEpisodeProgressMs(drama) ?? Date.parse(watchdog.artifactObservedAt)
+  const pausedMs = Date.parse(watchdog.lastPausedAt)
+  const lastProgressMs = Math.max(
+    latestEpisodeProgressMs(drama) ?? Date.parse(watchdog.artifactObservedAt),
+    Number.isFinite(pausedMs) ? pausedMs : -Infinity,
+  )
   if (!Number.isFinite(lastProgressMs) || nowMs - lastProgressMs < NIGHTLY_MUSIC_STALL_TIMEOUT_MS) return false
 
   const lastAttemptMs = Date.parse(watchdog.lastAttemptAt)
@@ -1191,8 +1219,16 @@ async function reconcileItem(
   generationController,
   { allowGeneration = true } = {},
 ) {
-  if (['exhausted', 'superseded'].includes(item.status)) return
+  if (isInertItem(item)) return
   const drama = item.episodeId ? await deps.getDrama(env.DB, item.episodeId) : null
+  // A dropped episode never airs: nothing resumes, recovers, restarts or publishes it, and it frees its slot.
+  if (isDroppedEpisode(drama)) {
+    item.status = 'dropped'
+    item.lastWorkflowStatus = 'dropped'
+    item.lastError = drama.dropped?.reason || 'Dropped by the owner: this episode never airs.'
+    item.updatedAt = nowIso()
+    return
+  }
   if (drama?.artifactId || isPublishedEpisode(drama)) {
     await closeGenerationCircuitForProbe(env, generationController, deps, item, drama)
   }
@@ -1248,6 +1284,10 @@ async function reconcileItem(
   item.updatedAt = nowIso()
   if (isActiveWorkflowStatus(status)) {
     item.status = status
+    if (isOperatorPausedWorkflowStatus(status)) {
+      notePausedForMusicWatchdog(item, drama, deps)
+      return
+    }
     // The music watchdog guards post-production; once an MP3 exists the only
     // work left is the publish step, which has no music checkpoint to restart.
     if (!drama?.audioUrl) await recoverStalledMusicWake(env, batch, item, drama, instance, deps)
@@ -1277,12 +1317,23 @@ async function topStories(deps) {
   return ids.slice(0, 100)
 }
 
+/**
+ * A thread the show will not cover, logged once per batch with its reason. The picker skips it without
+ * re-fetching it, and the next thread is picked.
+ */
+function passOver(batch, { hnId, title, reason }) {
+  const passedOver = batch.passedOver ?? []
+  if (passedOver.some((entry) => String(entry.hnId) === String(hnId))) return
+  batch.passedOver = [...passedOver, { at: nowIso(), hnId: String(hnId), title: title ?? null, reason }]
+    .slice(-PASSED_OVER_LOG_MAX)
+}
+
 async function fillBatch(env, batch, deps, generationController, { allowGeneration = true } = {}) {
   if (!allowGeneration) return
   if (activeBatchItems(batch).length >= NIGHTLY_TARGET) return
   if (generationSelectionBlocked(generationController)) return
   if (readinessCircuitHolds(generationController)) return
-  const attempted = new Set((batch.items ?? []).map((item) => String(item.hnId)))
+  const attempted = new Set([...(batch.items ?? []), ...(batch.passedOver ?? [])].map((item) => String(item.hnId)))
   const seenThisPass = new Set()
   for (const id of await topStories(deps)) {
     if (generationSelectionBlocked(generationController)) break
@@ -1294,8 +1345,28 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
     try {
       const story = await deps.fetchJson(`https://hacker-news.firebaseio.com/v0/item/${hnId}.json`)
       if (story?.type !== 'story' || Number(story?.descendants || 0) < 10) continue
+      // Owner rule (2026-10-04, Option B): the show never covers a thread about a real person's death. Checked
+      // before anything is adopted, fetched or spent.
+      const death = deathThreadMatch({ title: story.title, storyText: story.text ? htmlToText(story.text) : null })
+      if (death) {
+        passOver(batch, { hnId, title: story.title, reason: deathThreadReason(death) })
+        attempted.add(hnId)
+        await persistBatch(env.DB, batch, deps)
+        continue
+      }
       const existing = await deps.findByHnIdAndMode(env.DB, hnId, 'podcast')
       if (isPublishedEpisode(existing)) continue
+      // A dropped episode's thread is never adopted (adopting resumes and publishes it) nor produced afresh.
+      if (isDroppedEpisode(existing)) {
+        passOver(batch, {
+          hnId,
+          title: story.title,
+          reason: `dropped episode ${existing.id}: ${existing.dropped?.reason || 'the owner ruled it never airs'}`,
+        })
+        attempted.add(hnId)
+        await persistBatch(env.DB, batch, deps)
+        continue
+      }
 
       let item
       if (existing && ['queued', 'running', 'ready', 'failed'].includes(existing.status)) {
@@ -1318,6 +1389,19 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
         // pass from selecting the next story whose entire source is usable.
         const thread = await deps.fetchThread(`https://news.ycombinator.com/item?id=${hnId}`)
         const preparedSource = await prepareEpisodeSource(thread, deps)
+        // The linked article can say what the title does not ("Bill Draper" -> "... dies at 98").
+        const sourceDeath = deathThreadMatch({
+          title: thread.title,
+          storyText: thread.storyText,
+          articleTitle: thread.article?.title,
+          articleText: thread.article?.text,
+        })
+        if (sourceDeath) {
+          passOver(batch, { hnId, title: thread.title, reason: deathThreadReason(sourceDeath) })
+          attempted.add(hnId)
+          await persistBatch(env.DB, batch, deps)
+          continue
+        }
         const generationSlot = await acquireGenerationSlot(
           env,
           generationController,
@@ -1502,7 +1586,7 @@ export async function runNightlyReconciliation(env, {
     const batch = await deps.getSetting(env.DB, nightlyBatchKey(batchDate))
     pendingBatches.set(batchDate, batch)
     for (const item of batch?.items ?? []) {
-      if (['exhausted', 'superseded'].includes(item.status)) continue
+      if (isInertItem(item)) continue
       if (item.episodeId) itemOwnerDateByKey.set(`episode:${item.episodeId}`, batchDate)
       if (item.hnId) itemOwnerDateByKey.set(`hn:${item.hnId}`, batchDate)
     }

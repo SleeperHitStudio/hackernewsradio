@@ -8,10 +8,25 @@ function rowToData(row) {
   return JSON.parse(row.data)
 }
 
+/**
+ * A DROPPED episode is one the owner ruled must never air (episode 4, "Bob Cringely Has Died", 2026-10-04: a
+ * death thread, which the show never covers). It is terminal and frozen: no writer can change the row again
+ * (`upsertDrama` skips it), so no Workflow, recovery or retry can flip it to running, ready or failed; the nightly
+ * passes its thread over; the pipeline publishes nothing for it; the site does not show it. The row stays as the
+ * thread's tombstone. An operator drops an episode with a compare-and-set on its D1 row that sets
+ * `status = 'dropped'` in the column AND in `data`, plus `data.dropped = { at, by, reason }`.
+ */
+export const DROPPED_STATUS = 'dropped'
+
+export function isDroppedEpisode(drama) {
+  return drama?.status === DROPPED_STATUS
+}
+
 export async function listDramas(db, { q = '', includeFailed = false } = {}) {
   const where = []
   const binds = []
-  if (!includeFailed) where.push(`status <> 'failed'`)
+  // A dropped episode is never shown on the site; the operator's includeFailed view still lists it.
+  if (!includeFailed) where.push(`status NOT IN ('failed', '${DROPPED_STATUS}')`)
   if (q.trim()) { binds.push(`%${q.trim()}%`); where.push(`title LIKE ?${binds.length}`) }
   const sql = `SELECT data FROM episodes ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY created_at DESC`
   const { results } = await db.prepare(sql).bind(...binds).all()
@@ -41,7 +56,8 @@ export async function upsertDrama(db, drama) {
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
        ON CONFLICT (id) DO UPDATE SET
          hn_id = excluded.hn_id, mode = excluded.mode, status = excluded.status,
-         title = excluded.title, data = excluded.data`,
+         title = excluded.title, data = excluded.data
+       WHERE episodes.status <> '${DROPPED_STATUS}'`,
     )
     .bind(drama.id, String(drama.hnId), drama.mode || 'podcast', drama.status, drama.title ?? null,
       drama.createdAt || new Date().toISOString(), JSON.stringify(drama))
@@ -87,6 +103,7 @@ export async function deleteOtherEpisodesOfThread(db, hnId, mode, keepId) {
   // comparison, and if the keeper's own row is gone the subquery is NULL.
   const res = await db
     .prepare(`DELETE FROM episodes WHERE hn_id = ?1 AND mode = ?2 AND id <> ?3
+              AND status <> '${DROPPED_STATUS}'
               AND created_at < (SELECT created_at FROM episodes WHERE id = ?3)`)
     .bind(String(hnId), mode, keepId)
     .run()

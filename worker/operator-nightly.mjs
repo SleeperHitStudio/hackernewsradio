@@ -1,5 +1,5 @@
 import { operatorAuthorization } from './operator-auth.mjs'
-import { runNightlyReconciliation } from './nightly.mjs'
+import { isInertItem, runNightlyReconciliation } from './nightly.mjs'
 import {
   getActiveWorkflowDeployGate,
   workflowDeployRetryAfterSeconds,
@@ -44,9 +44,7 @@ export async function operatorNightlyReconcile(request, env, {
         date: batch.date,
         status: batch.status,
         published: Number(batch.published || 0),
-        active: (batch.items || []).filter(
-          (item) => !['exhausted', 'superseded'].includes(item.status),
-        ).length,
+        active: (batch.items || []).filter((item) => !isInertItem(item)).length,
       })),
     },
   }
