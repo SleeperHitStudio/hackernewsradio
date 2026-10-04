@@ -179,15 +179,19 @@ test('every new episode asks for the guarded punch-up, with the show\'s hard lin
   assert.ok(SHOW_NEVER_SAY.length <= 20 && SHOW_NEVER_SAY.every((term) => term.length <= 40))
 })
 
-test('every episode is about 12 pages, whatever the thread\'s engagement', () => {
-  // Owner, 2026-10-02: "flat ~12 pages for every HNR episode". The coverage gate measures each draft
-  // against this one number.
-  assert.equal(EPISODE_PAGE_TARGET, 12)
+test('every episode is about 9 pages (about 12 minutes on air), whatever the thread\'s engagement', () => {
+  // Owner, 2026-10-04: "~12 minutes", which the cast plays from about 9 pages (12-page episodes ran
+  // 14.5-17 minutes). The plan's pageTarget is the one length number: the platform derives the writer's
+  // length line and the coverage gate's band from it, so the brief's own length line must agree.
+  assert.equal(EPISODE_PAGE_TARGET, 9)
   for (const thread of [{ total: 5, points: 0 }, { total: 300, points: 400 }, { total: 5000, points: 9000 }]) {
-    assert.equal(pageTargetFor(thread), 12)
+    assert.equal(pageTargetFor(thread), 9)
   }
-  const notes = buildBrief({ title: 't', total: 5, points: 0 }, pageTargetFor({ total: 5, points: 0 })).performanceNotes
-  assert.match(notes, /LENGTH: about 12 pages, roughly 2,200 spoken words\./)
+  const brief = buildBrief({ title: 't', total: 5, points: 0 }, pageTargetFor({ total: 5, points: 0 }))
+  assert.equal(brief.creativeBrief.pageTarget, 9)
+  assert.match(brief.performanceNotes, /LENGTH: about 9 pages, roughly 1,650 spoken words\./)
+  // Pages and words only: a runtime here would contradict the platform's page-a-minute length line.
+  assert.doesNotMatch(brief.performanceNotes, /\bminutes?\b/i)
 })
 
 test('the brief asks for a very funny, sweary show and never rations the swearing', () => {
@@ -197,12 +201,13 @@ test('the brief asks for a very funny, sweary show and never rations the swearin
   const everything = JSON.stringify(brief)
   assert.doesNotMatch(everything, /\bspice\b/i)
   assert.match(brief.performanceNotes, /^THIS IS A COMEDY\./)
-  assert.match(brief.performanceNotes, /at least ten swears, about one a page, every host at least twice/)
+  assert.match(brief.performanceNotes, /about twelve an episode, about one a page, SPREAD across all four/)
   assert.match(brief.performanceNotes, /Never "goddamn", "Jesus" or "Christ"\. Never at a private commenter as a person/)
   assert.match(brief.creativeBrief.writingStyle, /^COMEDY FIRST/)
   const mustKnow = brief.creativeBrief.mustKnowBeforeWriting.join('\n')
   assert.match(mustKnow, /THE LADDER, 3\+ per episode/)
   assert.match(mustKnow, /never "goddamn", "Jesus" or "Christ"; never at a private commenter as a person/)
+  assert.match(mustKnow, /SWEARS, ~12, SPREAD/)
   // Each host has one joke engine, and none is shared.
   for (const host of ['GARY', 'MAEVE', 'OBI', 'GRUNER']) assert.ok(brief.creativeBrief.castNotes.includes(host))
   assert.match(brief.creativeBrief.castNotes, /FOUR JOKE MACHINES, NEVER SHARED/)
@@ -293,4 +298,47 @@ test('a host stored under a full name with the cue name as an alias is the same 
   }
   assert.deepEqual(staleCastCanonCharacters(stored, desired), [])
   assert.deepEqual(staleCastCanonCharacters(null, desired).map((c) => c.name), ['GARY'], 'an empty canon needs every host')
+})
+
+test('the swearing is spread across all four hosts, each with an amount and a way of their own', () => {
+  // Owner, 2026-10-04: "spread the swearing across hosts". On the canary Obi said about half of every
+  // episode's swears (4/13, 7/13, 10/22, 6/9) and Maeve 1-3, because the brief and the Bible made Obi
+  // the profane one with no amount for anyone. Each host now has a share; the total stays about twelve.
+  const brief = buildBrief({ title: 't', total: 500, points: 100 }, 9)
+  const swearing = brief.performanceNotes.split('\n').find((line) => line.startsWith('SWEARING:'))
+  assert.ok(swearing, 'the notes have a SWEARING paragraph')
+  const shares = { GARY: /GARY, about four: in panicked spirals/, GRUNER: /GRUNER, about three: in Russian/, OBI: /OBI, three at most: one precise compound insult/, MAEVE: /MAEVE, about two: rare, in dead monotone/ }
+  for (const [host, share] of Object.entries(shares)) assert.match(swearing, share, `${host} has an amount and a way`)
+  assert.match(swearing, /no host carries it/)
+  // The planner's bullet says the same split, and Obi's feud with Gary no longer asks for profanity.
+  const mustKnow = brief.creativeBrief.mustKnowBeforeWriting
+  assert.ok(mustKnow.some((line) => /Gary 4 in spirals, Gruner 3 in Russian, Obi 3 at most, Maeve 2 dead flat/.test(line)))
+  const feud = mustKnow.find((line) => line.startsWith('OBI GOES FOR GARY'))
+  assert.doesNotMatch(feud, /profane/)
+  assert.match(brief.creativeBrief.writingStyle, /swearing about once a page, from all four/)
+})
+
+test('the brief asks for four to six overlaps an episode, written so the platform keeps them', () => {
+  // Owner, 2026-10-04: more crosstalk, 4-6 overlaps an episode within the 30%-per-scene cap (episodes
+  // ran 1-3). The notes are repeated after every scene's rules, so the ask is per scene, which a
+  // scene writer can act on; an episode-wide count only ever produced one or two. The platform drops
+  // a marker whose previous line is not spoken (an action line or a cue between them), so the brief
+  // says the cut-in comes directly after the line it cuts.
+  const brief = buildBrief({ title: 't', total: 500, points: 100 }, 9)
+  const crosstalk = brief.performanceNotes.split('\n').find((line) => line.startsWith('CROSSTALK:'))
+  assert.ok(crosstalk, 'the notes have a CROSSTALK paragraph')
+  assert.match(crosstalk, /every scene after the cold open has one \(OVERLAPPING\) line, a long scene two: four to six an episode/)
+  assert.match(crosstalk, /comes DIRECTLY after it: no action line or sound cue between them/)
+  assert.match(crosstalk, /never a quote, a handle, a number or the punchline word/)
+  // One or two in a scene of 15-25 lines is well inside the platform's 30%-per-scene warning.
+  assert.doesNotMatch(crosstalk, /three|every line/i)
+  assert.ok(brief.creativeBrief.mustKnowBeforeWriting.some((line) => /the top rung CUTS IN \(OVERLAPPING\)/.test(line)))
+})
+
+test('the planner is told the hosts speak on Cartesia, never Hume', () => {
+  // Hume's TTS ends 2026-11-13 and the hosts moved to their Cartesia clones on 2026-10-04. The
+  // preference only reaches a character the pins don't cover, and must never steer one onto Hume.
+  const brief = buildBrief({ title: 't', total: 500, points: 100 }, 9)
+  assert.match(brief.styleConstraints.voicePreference, /^Prefer Cartesia voices/)
+  assert.doesNotMatch(JSON.stringify(brief), /\bHume\b/i)
 })

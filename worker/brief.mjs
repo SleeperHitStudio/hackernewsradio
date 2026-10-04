@@ -3,12 +3,18 @@
  * extracted verbatim from server/generate.mjs (no node/pg dependencies).
  */
 /**
- * Every episode is about 12 pages, about 12 minutes on air (owner, 2026-10-02: "flat ~12 pages for
- * every HNR episode"). Length used to scale with engagement (7-12 pages), and the platform's coverage
- * gate measures the draft against this one number, so a varying target only varied how far a draft
- * missed it. runPipeline still downshifts and re-plans if a draft blows the output budget.
+ * Every episode is about 9 pages, which plays about 12 minutes on air (owner, 2026-10-04: "~12 minutes",
+ * chosen over 12 pages). The cast performs slower than a page a minute: 12-page episodes ran 14.5-17
+ * minutes, about 1.5 minutes of jazz bookends plus a minute per ~170 spoken words, and drafts land ~14%
+ * over the spoken words they are asked for. At 9 pages that is about 12-13 minutes.
+ *
+ * This is the ONE length number. It becomes the plan's pageTarget, and the platform derives both the
+ * writer's length line and its coverage gate's tolerance band (65-120% of it) from that, so nothing
+ * else here or on the platform states a length. Length used to scale with engagement (7-12 pages);
+ * a varying target only varied how far a draft missed it. runPipeline still downshifts and re-plans
+ * if a draft blows the output budget. Never raise it to fit a long draft.
  */
-export const EPISODE_PAGE_TARGET = 12
+export const EPISODE_PAGE_TARGET = 9
 
 export function pageTargetFor(_thread) {
   return EPISODE_PAGE_TARGET
@@ -192,16 +198,15 @@ const SHARED_AUDIO = {
 }
 
 // Soft constraints the planner sees. musicPolicy enforces intro/outro-only music;
-// voicePreference matches the pinned recurring cast, which is Hume on every
-// voice. Telling the planner to prefer a different provider only ever applied
-// to guest characters, and read as though the show had a Cartesia fallback it
-// has never had.
+// voicePreference matches the pinned recurring cast, which is Cartesia on every
+// voice since the Hume shutdown switch (2026-10-04; Hume's TTS ends 2026-11-13).
+// It only ever reaches a character the pins don't cover.
 const SHARED_STYLE_CONSTRAINTS = {
   musicPolicy:
     'Music is bookend-only and sparse: the show\'s recurring late-night JAZZ THEME (~30–40s) under the intro and ' +
     'outro, plus AT MOST one or two ~10s jazz stings mid-show. The vast majority of runtime is voices-only with NO ' +
     'music. SFX stay plentiful throughout; music does not.',
-  voicePreference: 'Prefer Hume voices for the cast, matching the show\'s pinned recurring voices.',
+  voicePreference: 'Prefer Cartesia voices for the cast, matching the show\'s pinned recurring voices.',
 }
 
 /** The podcast: an off-center panel show with a fixed recurring cast. */
@@ -228,7 +233,7 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       audience: 'Fans of Hacker News and tech culture',
       // Kept under the Story API's 600-char writingStyle cap.
       writingStyle:
-        'COMEDY FIRST, fixed four-host cast (see castNotes), dead straight, swearing about once a page. A laugh every 3-4 ' +
+        'COMEDY FIRST, fixed four-host cast (see castNotes), dead straight, swearing about once a page, from all four. A laugh every 3-4 ' +
         'lines. QUOTE, PUNCHLINE, LADDER: shortest verbatim quote by handle; the next line is a joke about it; the others ' +
         'TOP it on the same comment, 4-8 lines, nobody conceding, ending on a hard detail from the thread. Specific beats ' +
         'general. No speeches, no sincere confessions, no explaining a joke, no aphorism endings. Every scene ends on its ' +
@@ -249,7 +254,7 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       mustKnowBeforeWriting: [
         ...SHARED_MUST_KNOW,
         'THE LADDER, 3+ per episode: when a line lands, DO NOT MOVE ON — 4-8 lines on the same comment, each topping the ' +
-        'last, nobody conceding. ACT ONE OUT: a host BECOMES the commenter, in voice, inside their own line.',
+        'last, nobody conceding; the top rung CUTS IN (OVERLAPPING). ACT ONE OUT: a host BECOMES the commenter.',
         'PLANT 2 RUNNERS in the first third (a quoted phrase, a number, an analogy) and bring BOTH back CHANGED in the last ' +
         'third; the episode\'s last line is a runner payoff. Never flag a callback on air.',
         'THE CHORUS (when the thread has one): 3+ handles who made the same objection independently. Name them all, then a ' +
@@ -260,10 +265,10 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
         'line, then straight back to a joke. Never maudlin, no confessions, no speech over 30 words.',
         'COLD OPEN: GARY STUMBLES INTO IT, flustered and slightly wrong; each host names themselves in order; then the ' +
         'subject beat. No narrator, no CTA. Every scene, and the episode, ends on its biggest laugh.',
-        'OBI GOES FOR GARY: cutting, personal, technically precise, profane. Gary defends himself with worse evidence and ' +
-        'hands Obi the better insult. 3-5 exchanges. Maeve and Gruner never intervene.',
-        'SWEAR LIKE THE ADULTS THEY ARE: 10+ per episode, every host at least twice, on the stressed beat of the joke; ' +
-        'never in the first line; never "goddamn", "Jesus" or "Christ"; never at a private commenter as a person.',
+        'OBI GOES FOR GARY: cutting, personal, technically precise; clean until the insult lands. Gary defends himself ' +
+        'with worse evidence and hands Obi the better insult. 3-5 exchanges. Maeve and Gruner never intervene.',
+        'SWEARS, ~12, SPREAD: Gary 4 in spirals, Gruner 3 in Russian, Obi 3 at most, Maeve 2 dead flat; on the stressed ' +
+        'beat; never the first line; never "goddamn", "Jesus" or "Christ"; never at a private commenter as a person.',
         'THE OPERATOR (max once, NOT every episode): they sense someone writes them, float vague delicious "justice", ' +
         'nearly name a method — then it STOPS and goes WEIRD. Never resolved, never named, never revisited.',
       ],
@@ -283,7 +288,9 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       'OBI gets more specific, never louder: the exact version, the exact pager time, the exact config flag. He goes for Gary, and when Gary defends himself Obi keeps climbing.',
       'GRUNER: under ten words, wrong idiom, right conclusion. He reads a field note aloud at most twice an episode; otherwise he just talks.',
       '',
-      'SWEARING: at least ten swears, about one a page, every host at least twice. Swearing is rhythm: put the swear on the stressed beat, so it IS the punchline word or the brake right before it. Let an ugly exchange run three in a row. Each host swears their own way. Maeve: rarely and in dead monotone, so hers land hardest. Gary: in spirals. Obi: precise compound insults aimed at Gary. Gruner: in Russian (blyat, chyort, suka) or in broken English. Words that land: fuck, fucking, shit, bullshit, prick, bastard, arse, dickhead. Never in the first line. Never "goddamn", "Jesus" or "Christ". Never at a private commenter as a person: go after their argument, the company, the founder, or each other.',
+      'SWEARING: about twelve an episode, about one a page, SPREAD across all four: no host carries it. Each host swears their own way and their own amount. GARY, about four: in panicked spirals, two stacked when he is losing. GRUNER, about three: in Russian (blyat, chyort, suka) or one wrong English word, as the button. OBI, three at most: one precise compound insult at the top of a ladder, aimed at Gary; otherwise clinically clean, which is why his land. MAEVE, about two: rare, in dead monotone, the hardest-landing words of the episode. Swearing is rhythm: put the swear on the stressed beat, so it IS the punchline word or the brake right before it. Words that land: fuck, fucking, shit, bullshit, prick, bastard, arse, dickhead. Never in the first line. Never "goddamn", "Jesus" or "Christ". Never at a private commenter as a person: go after their argument, the company, the founder, or each other.',
+      '',
+      'CROSSTALK: every scene after the cold open has one (OVERLAPPING) line, a long scene two: four to six an episode. A host cuts in at the top of a ladder, or throws a short reaction ("Oh, fuck off.") under someone mid-rant. The line being cut is a host\'s own spoken line ending in an em dash, never a quote, a handle, a number or the punchline word, and the (OVERLAPPING) line comes DIRECTLY after it: no action line or sound cue between them.',
       '',
       'CUT ON SIGHT:',
       '- speeches over 30 words;',
@@ -293,7 +300,7 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       '- the reframe "that\'s not X, that\'s Y" (once an episode, total);',
       '- ending a scene on an aphorism or a moral;',
       '- "What?", "Moving on", "Back to the thread" and "Anyway" as exits;',
-      '- stage directions like "Silence." or "Nobody moves". On air that is dead air, so interrupt instead: (OVERLAPPING) five or six times an episode, at the top of a ladder.',
+      '- stage directions like "Silence." or "Nobody moves". On air that is dead air: cut in instead (see CROSSTALK).',
       '',
       'BUTTONS. Every scene ends on its biggest laugh. Plant two runners in the first third; the last line of the episode pays one off, changed.',
       '',

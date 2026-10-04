@@ -71,6 +71,16 @@ Hit looks for a voice before it lets a table read start. A canon refusal fails
 the episode; it is never swallowed. To re-roll the cast, delete that row and
 the next episode adopts fresh voices.
 
+**Changing a host's voice** (as on 2026-10-04, off Hume and onto Cartesia
+clones of the same voices; Hume's TTS ends 2026-11-13): `pinnedVoices` is the
+source of truth, and every episode pushes it into the canon, so a canon change
+made only on the Sleeper side (`sleeperhit voices migrate`, `cast-canon save`)
+is reverted by the next episode. Change both in one quiet window between
+batches, never mid-episode: migrate each host's voice in the canon through the
+product, then compare-and-set `pinnedVoices` to the same ids and provider and
+read it back. A read performs the canon, so a job's `voiceMap` never overrides
+it.
+
 **HNR never writes the Series Bible.** The show's memory lives on its releases
 and in the `showMemory` setting (read from the finished script, in pages of
 500 entries — the platform's cap).
