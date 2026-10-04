@@ -115,6 +115,7 @@ test('complete pinned cast is sent canonically with voiceId only', () => {
     narrationPolicy: 'suppress',
     punchUp: true,
     neverSay: ['goddamn', 'Jesus', 'Christ'],
+    firstLineClean: true,
     deferMusic: true,
     deferAudioRender: true,
     notes: 'Keep it fast.',
@@ -141,6 +142,7 @@ test('missing or incomplete pinned cast preserves the existing assignment reques
       narrationPolicy: 'suppress',
       punchUp: true,
       neverSay: ['goddamn', 'Jesus', 'Christ'],
+      firstLineClean: true,
       deferMusic: true,
       deferAudioRender: true,
       notes: 'Keep it fast.',
@@ -165,6 +167,8 @@ test('every new episode asks for the guarded punch-up, with the show\'s hard lin
     const [request] = buildStoryJobArtifactRequests({ pinnedVoices, notes: 'x' })
     assert.equal(request.punchUp, true)
     assert.deepEqual(request.neverSay, ['goddamn', 'Jesus', 'Christ'])
+    // And it never opens on a swear (episode 3 of the canary did): the guard keeps the first spoken line clean.
+    assert.equal(request.firstLineClean, true)
   }
   // A request gets its own copy: nothing downstream can edit the show's list.
   assert.throws(() => { SHOW_NEVER_SAY.push('heck') })

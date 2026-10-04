@@ -90,6 +90,9 @@ export function buildStoryJobArtifactRequests({
     // and a blind judge preferred it 4 of 4.
     punchUp: true,
     neverSay: [...SHOW_NEVER_SAY],
+    // The show never opens on a swear. The platform's guard (Sleeper #986) keeps a punched opening scene
+    // only if its first spoken line stays clean; the writer's own first line is never changed.
+    firstLineClean: true,
     deferMusic: true,
     // The show ALWAYS runs its own post-production — autotune, then the banked
     // jazz bookends — and finalizes itself afterwards. Without this the whole
