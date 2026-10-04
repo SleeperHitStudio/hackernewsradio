@@ -85,6 +85,19 @@ test('source lag stays a per-item hold, never a readiness class', () => {
   assert.equal(isTransientSourceFailure(lag), true)
 })
 
+test('the platform refusing a source whose comment count moved during capture is source lag, not a spent attempt', () => {
+  // 2026-10-04, the first item of the night: verified 104/104, captured 104/105 (index lag), refused.
+  const flock = {
+    failureCode: 'validation_failed',
+    failureMessage: 'HackerNewsRadio source metadata must prove an equal, complete expected/fetched comment count.',
+  }
+  assert.equal(classifySystemicFailure(flock), null)
+  assert.equal(isTransientSourceFailure(flock), true)
+  assert.equal(isTransientSourceFailure(flock.failureMessage), true)
+  // Other validation refusals are not lag.
+  assert.equal(isTransientSourceFailure({ failureCode: 'validation_failed', failureMessage: '`notes` is invalid: Too big' }), false)
+})
+
 test('readiness classes are the ones a free read can probe', () => {
   assert.deepEqual(
     ['access', 'project_not_ready', 'cast_not_ready', 'approval_missing', 'quota', 'provider', 'provider_quota', 'contract'].map(isReadinessClass),

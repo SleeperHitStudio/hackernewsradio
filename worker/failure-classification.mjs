@@ -135,8 +135,11 @@ export const MUSIC_CLASS_RE =
  * count against its attempt budget, because the thread is expected to settle
  * within minutes and the next hourly tick will find it whole.
  */
+// The platform's own refusal of the same race: HNR verified the thread complete, a comment landed before
+// the capture, and the source upload's expected/fetched counts no longer matched (2026-10-04, "Federal
+// judge calls Flock …": 104/104 verified, 104/105 at capture, refused as validation_failed).
 export const SOURCE_LAG_CLASS_RE =
-  /is not synchronized yet|completeness proof does not match|Could not capture a complete Hacker News thread/i
+  /is not synchronized yet|completeness proof does not match|Could not capture a complete Hacker News thread|source metadata must prove an equal, complete expected\/fetched comment count/i
 
 export function isTransientSourceFailure(value) {
   const { code, message } = failureSignals(value)

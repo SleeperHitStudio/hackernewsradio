@@ -1601,6 +1601,30 @@ test('a thread whose index has not caught up does not spend an attempt', async (
   assert.equal(h.creates.length, 1, 'it still retries immediately')
 })
 
+test('a source the platform refused because its comment count moved is held for free, not spent', async () => {
+  // The Flock item, 2026-10-04: the same index-lag race, refused at upload by the platform's own check.
+  const h = harness({ topIds: [] })
+  const date = '2026-10-03'
+  unsyncedThreadBatch(h, date)
+  h.dramas.set('episode_lag', {
+    id: 'episode_lag',
+    hnId: '77',
+    status: 'failed',
+    failureCode: 'validation_failed',
+    failureMessage: 'HackerNewsRadio source metadata must prove an equal, complete expected/fetched comment count.',
+    error: 'HackerNewsRadio source metadata must prove an equal, complete expected/fetched comment count.',
+    url: 'https://news.ycombinator.com/item?id=77',
+    progress: [],
+  })
+
+  const batch = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  const item = batch.items[0]
+  assert.equal(item.attempt, 1, 'index lag is free')
+  assert.equal(item.sourceLagHolds, 1)
+  assert.equal(h.creates.length, 1, 'it still retries')
+  assert.equal(h.settings.get(NIGHTLY_GENERATION_CIRCUIT_KEY)?.state === 'open', false)
+})
+
 test('a thread that never converges stops being held and exhausts normally', async () => {
   // The hold is capped so one permanently unreadable story cannot occupy a slot
   // for the whole night.
