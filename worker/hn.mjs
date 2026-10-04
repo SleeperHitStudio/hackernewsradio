@@ -949,6 +949,22 @@ export function buildSourceMetadata(thread, transcript) {
 }
 
 /**
+ * INDEX LAG, CONVERGED BEFORE UPLOAD. A capture inside the coverage tolerance can still be a comment
+ * short ("70/71 (index lag)"), and the Story API proves a source by EQUAL expected/fetched counts, so
+ * it refused two of three uploads on the night of 2026-10-03 and each item waited an hour per retry.
+ * The index usually catches up within seconds, so the pipeline re-fetches a lagging thread a few
+ * times with backoff, about a minute in all, and uploads only once the counts match.
+ */
+export const INDEX_LAG_REFETCH_BACKOFF_SECONDS = Object.freeze([10, 20, 30])
+
+/** `{ expected, fetched }` when the capture is short of the official count; null when it is whole. */
+export function commentIndexLag(thread) {
+  const fetched = Number(thread?.total ?? 0)
+  const expected = Number(thread?.completeness?.comments?.expected ?? fetched)
+  return Number.isFinite(expected) && expected > fetched ? { expected, fetched } : null
+}
+
+/**
  * "116/116" when we hold the whole thread, "116/117 (index lag)" when the
  * capture is inside tolerance but short. The writer and the episode's progress
  * trail both read this, so it must never round a partial thread up to a

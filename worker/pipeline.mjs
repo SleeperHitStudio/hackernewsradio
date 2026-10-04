@@ -8,7 +8,10 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers'
 import { SleeperHit, SleeperHitError } from './sleeperhit.mjs'
 import {
+  HNError,
+  INDEX_LAG_REFETCH_BACKOFF_SECONDS,
   buildSourceMetadata,
+  commentIndexLag,
   fetchArticle,
   fetchThread,
   sourceIdentity,
@@ -89,6 +92,35 @@ import {
   PUBLISHED_PROGRESS_MESSAGE,
 } from './publishing.mjs'
 
+/**
+ * The Story API proves a source by EQUAL expected/fetched comment counts, and a capture can be a comment
+ * short while the search index catches up ("70/71 (index lag)"). Re-fetch the thread with backoff
+ * (INDEX_LAG_REFETCH_BACKOFF_SECONDS, about a minute in all, each wait a durable step.sleep and each
+ * fetch the ordinary fetchThread with its own client and timeouts) and return the first whole capture.
+ * One that never converges is not uploaded: it fails as `hn_thread_incomplete`, the source-lag class
+ * the nightly holds for free and retries next tick, instead of a refused upload.
+ */
+async function convergeIndexLag(step, thread, url, note) {
+  let current = thread
+  for (const [index, seconds] of INDEX_LAG_REFETCH_BACKOFF_SECONDS.entries()) {
+    const lag = commentIndexLag(current)
+    if (!lag) return current
+    await note(
+      `HN thread ${current.id} is ${lag.fetched}/${lag.expected} (index lag); re-fetching in ${seconds} s so the source uploads whole…`,
+      `index-lag-refetch-${index + 1}`,
+    )
+    await step.sleep(`index lag wait ${index + 1}`, `${seconds} seconds`)
+    current = await runWorkflowStepOnce(step, `refetch lagging thread ${index + 1}`, () => fetchThread(url))
+  }
+  const lag = commentIndexLag(current)
+  if (!lag) return current
+  throw new HNError(
+    `Hacker News thread ${current.id} is not synchronized yet: ${lag.fetched}/${lag.expected} comments after `
+    + `${INDEX_LAG_REFETCH_BACKOFF_SECONDS.length} re-fetches; the source uploads only once the counts match.`,
+    { code: 'hn_thread_incomplete', details: { storyId: current.id, ...lag } },
+  )
+}
+
 export class HnrPipeline extends WorkflowEntrypoint {
   async run(event, step) {
     const { dramaId, url, staggerSec = 0 } = event.payload
@@ -150,7 +182,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
       if (staggerSec > 0) await step.sleep('stagger', `${staggerSec} seconds`)
 
       const recoversExistingSource = isRepair || isResume || isUpstreamRecovery
-      const thread = recoversExistingSource
+      let thread = recoversExistingSource
         ? {
             id: String(recoveryOriginal?.hnId ?? ''),
             title: recoveryOriginal?.title || 'Recovered Hacker News episode',
@@ -166,6 +198,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
       let sourceTranscript = null
       let sourceMetadata = null
       if (!recoversExistingSource) {
+        thread = await convergeIndexLag(step, thread, url, note)
         thread.article = await runWorkflowStepOnce(step, 'fetch complete source article', async () =>
           thread.articleUrl ? fetchArticle(thread.articleUrl) : null)
         sourceTranscript = threadToTranscript(thread)

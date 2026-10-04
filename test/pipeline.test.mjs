@@ -15,6 +15,7 @@ register('data:text/javascript,' + encodeURIComponent(`export async function res
   return next(specifier, context)
 }`))
 const { HnrPipeline } = await import('../worker/pipeline.mjs')
+const { classifySystemicFailure, isTransientSourceFailure } = await import('../worker/failure-classification.mjs')
 const { PUBLISHED_PROGRESS_MESSAGE } = await import('../worker/publishing.mjs')
 const { PUBLISH_BLOCKED_ALERT_KEY } = await import('../worker/alerts.mjs')
 
@@ -298,6 +299,90 @@ test('a new episode writes the canon voices, sends the thread identity, reuses a
   assert.equal(drama.commentCount, 48)
   assert.ok(Number.isFinite(Date.parse(drama.failedAt)), 'the failure is stamped for the nightly')
   assert.ok(drama.progress.some((p) => /Reusing the source already captured for HN thread 42 \(48 comments\)/.test(p.message)))
+})
+
+// INDEX LAG, CONVERGED BEFORE UPLOAD (2026-10-04): two of three uploads that night were refused because a
+// capture inside tolerance was a comment short ("70/71 (index lag)") and the Story API proves a source by
+// EQUAL counts. The pipeline re-fetches a lagging thread (10 s, 20 s, 30 s) and uploads only a whole one.
+function laggingThread(id = '42', expected = 51, fetched = 50) {
+  const thread = completeThread(id, fetched)
+  thread.completeness.comments = { ...thread.completeness.comments, complete: false, expected, fetched }
+  return thread
+}
+
+function recordingStep(seed) {
+  const step = cloudflareStep(seed)
+  step.sleeps = []
+  step.sleep = async (label, duration) => { step.sleeps.push([label, duration]) }
+  return step
+}
+
+const LAG_RUN_HANDLER = (request) => {
+  if (request.method === 'GET' && request.path === `/story-projects/${PROJECT}/cast-canon`) return [200, FACES_ONLY_CANON]
+  if (request.method === 'PATCH' && request.path === `/story-projects/${PROJECT}/cast-canon`) return [200, { canon: {} }]
+  if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/sources`) {
+    return [200, { deduplicated: false, source: { id: 'source_whole', status: 'READY' } }]
+  }
+  if (request.path === `/story-projects/${PROJECT}/sources/source_whole`) return [200, { source: { id: 'source_whole', status: 'READY' } }]
+  if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/story-plans`) return GATE_REFUSAL
+  throw new Error(`unexpected ${request.method} ${request.path}`)
+}
+
+test('a lagging capture that converges on the second re-fetch uploads once, whole', async (t) => {
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant(LAG_RUN_HANDLER))
+  const step = recordingStep({
+    'fetch complete thread': laggingThread('42', 51, 50),
+    'refetch lagging thread 1': laggingThread('42', 51, 50),
+    'refetch lagging thread 2': completeThread('42', 51),
+  })
+
+  await runPipeline(envFor(db), { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' }, step)
+
+  const uploads = net.requests.filter((r) => r.method === 'POST' && r.path === `/story-projects/${PROJECT}/sources`)
+  assert.equal(uploads.length, 1, 'one upload')
+  assert.deepEqual(
+    [uploads[0].body.metadata.sourceCompleteness.comments.expected, uploads[0].body.metadata.sourceCompleteness.comments.fetched],
+    [51, 51], 'and it is the whole thread')
+  assert.deepEqual(step.sleeps, [['index lag wait 1', '10 seconds'], ['index lag wait 2', '20 seconds']], 'backoff, not a tight loop')
+  assert.equal(step.labels.includes('refetch lagging thread 3'), false)
+  const drama = db.rows.get('drama_1')
+  assert.ok(drama.progress.some((p) => /HN thread 42 is 50\/51 \(index lag\); re-fetching in 10 s/.test(p.message)))
+})
+
+test('a capture that never converges uploads nothing and fails as source lag, the free hold', async (t) => {
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant(LAG_RUN_HANDLER))
+  const step = recordingStep({
+    'fetch complete thread': laggingThread('42', 71, 70),
+    'refetch lagging thread 1': laggingThread('42', 71, 70),
+    'refetch lagging thread 2': laggingThread('42', 71, 70),
+    'refetch lagging thread 3': laggingThread('42', 72, 71),
+  })
+
+  const { error } = await runPipeline(envFor(db), { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' }, step)
+
+  assert.match(error?.message || '', /is not synchronized yet: 71\/72 comments after 3 re-fetches/)
+  assert.equal(net.requests.some((r) => r.method === 'POST' && r.path.endsWith('/sources')), false, 'a capture the platform would refuse is never uploaded')
+  assert.equal(step.sleeps.length, 3, 'about a minute, then it stops')
+  const drama = db.rows.get('drama_1')
+  assert.equal(drama.status, 'failed')
+  assert.equal(drama.failureCode, 'hn_thread_incomplete')
+  // The nightly holds it for free and retries next tick (no attempt spent, no circuit).
+  assert.equal(isTransientSourceFailure(drama), true)
+  assert.equal(classifySystemicFailure(drama), null)
+})
+
+test('a whole capture is uploaded at once, with no re-fetch and no wait', async (t) => {
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant(LAG_RUN_HANDLER))
+  const step = recordingStep({ 'fetch complete thread': completeThread('42', 50) })
+
+  await runPipeline(envFor(db), { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' }, step)
+
+  assert.equal(step.labels.some((label) => label.startsWith('refetch lagging thread')), false)
+  assert.deepEqual(step.sleeps, [])
+  assert.equal(net.requests.filter((r) => r.method === 'POST' && r.path.endsWith('/sources')).length, 1)
 })
 
 test('a cast canon refusal fails the episode instead of being swallowed', async (t) => {
