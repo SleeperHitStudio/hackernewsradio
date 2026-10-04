@@ -86,6 +86,9 @@ const MUSIC_WATCHDOG_RESUME_MESSAGE =
   'Watchdog: the music wake stalled again; restarting post-production on the existing performance.'
 
 const ACTIVE_WORKFLOW_STATUSES = new Set(['queued', 'running', 'waiting', 'waitingforpause', 'paused'])
+// An operator's pause (a review hold before publish) is still active work, but
+// it is not a stall: the watchdog must never restart, terminate or replace it.
+const OPERATOR_PAUSED_WORKFLOW_STATUSES = new Set(['waitingforpause', 'paused'])
 
 // One full first-wave wipeout (five stories, zero published) is alertable.
 export const ALERT_MIN_FAILURES = 5
@@ -610,6 +613,19 @@ function isMissingWorkflowCheckpoint(error) {
     .test(error?.message || String(error))
 }
 
+function isOperatorPausedWorkflowStatus(status) {
+  return OPERATOR_PAUSED_WORKFLOW_STATUSES.has(String(status || '').toLowerCase())
+}
+
+// While paused, the stall clock stands still: the latest paused sighting counts
+// as progress, so a resumed episode gets a full window before any recovery.
+function notePausedForMusicWatchdog(item, drama, deps) {
+  if (!drama?.artifactId) return
+  const watchdog = watchdogStateFor(item, drama.artifactId)
+  watchdog.lastPausedAt = dependencyNow(deps).toISOString()
+  item.musicWatchdog = watchdog
+}
+
 function watchdogStateFor(item, artifactId) {
   const current = item.musicWatchdog
   if (!current || current.artifactId !== artifactId) {
@@ -650,7 +666,11 @@ async function recoverStalledMusicWake(env, batch, item, drama, instance, deps) 
   const watchdog = watchdogStateFor(item, drama.artifactId)
   item.musicWatchdog = watchdog
   watchdog.artifactObservedAt ??= now.toISOString()
-  const lastProgressMs = latestEpisodeProgressMs(drama) ?? Date.parse(watchdog.artifactObservedAt)
+  const pausedMs = Date.parse(watchdog.lastPausedAt)
+  const lastProgressMs = Math.max(
+    latestEpisodeProgressMs(drama) ?? Date.parse(watchdog.artifactObservedAt),
+    Number.isFinite(pausedMs) ? pausedMs : -Infinity,
+  )
   if (!Number.isFinite(lastProgressMs) || nowMs - lastProgressMs < NIGHTLY_MUSIC_STALL_TIMEOUT_MS) return false
 
   const lastAttemptMs = Date.parse(watchdog.lastAttemptAt)
@@ -1248,6 +1268,10 @@ async function reconcileItem(
   item.updatedAt = nowIso()
   if (isActiveWorkflowStatus(status)) {
     item.status = status
+    if (isOperatorPausedWorkflowStatus(status)) {
+      notePausedForMusicWatchdog(item, drama, deps)
+      return
+    }
     // The music watchdog guards post-production; once an MP3 exists the only
     // work left is the publish step, which has no music checkpoint to restart.
     if (!drama?.audioUrl) await recoverStalledMusicWake(env, batch, item, drama, instance, deps)

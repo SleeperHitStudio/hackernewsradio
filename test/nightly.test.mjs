@@ -420,6 +420,67 @@ test('music wake recovery is bounded after the replacement resume Workflow', asy
   assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, NIGHTLY_MUSIC_RECOVERY_MAX_ACTIONS)
 })
 
+for (const pausedStatus of ['paused', 'waitingForPause']) {
+  test(`an operator-${pausedStatus} instance is never restarted, terminated or replaced by the music watchdog`, async () => {
+    const now = '2026-07-16T06:00:00.000Z'
+    const nowMs = Date.parse(now)
+    // The review-hold case: hours without progress, one recovery already spent, cooldown long past.
+    const { date, drama, h, item } = activeArtifactFixture({
+      now,
+      progressAgeMs: NIGHTLY_MUSIC_STALL_TIMEOUT_MS * 4,
+      musicWatchdog: {
+        artifactId: 'artifact_stable',
+        recoveryCount: 1,
+        lastAction: 'checkpoint-restart',
+        lastAttemptAt: new Date(nowMs - NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS * 2).toISOString(),
+        lastRecoveryAt: new Date(nowMs - NIGHTLY_MUSIC_RECOVERY_COOLDOWN_MS * 2).toISOString(),
+      },
+    })
+    h.workflowStatuses.set(item.workflowId, pausedStatus)
+
+    const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+    assert.equal(h.restarts.length, 0)
+    assert.equal(h.terminations.length, 0)
+    assert.equal(h.creates.length, 0)
+    assert.equal(h.dramas.get(drama.id).progress.length, 1)
+    assert.equal(reconciled.items[0].status, pausedStatus)
+    assert.equal(reconciled.items[0].workflowId, 'workflow_stalled')
+    assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 1)
+    assert.equal(reconciled.items[0].musicWatchdog.lastPausedAt, now)
+    assert.equal(reconciled.items[0].lastError ?? null, null)
+  })
+}
+
+test('a paused instance with no recovery spent is not checkpoint-restarted either', async () => {
+  const { date, h, item } = activeArtifactFixture({ progressAgeMs: NIGHTLY_MUSIC_STALL_TIMEOUT_MS * 3 })
+  h.workflowStatuses.set(item.workflowId, 'paused')
+
+  const reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  assert.equal(h.restarts.length, 0)
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 0)
+})
+
+test('a resumed instance gets a full stall window from its last paused sighting', async () => {
+  const { date, h, item } = activeArtifactFixture({ progressAgeMs: NIGHTLY_MUSIC_STALL_TIMEOUT_MS * 3 })
+  h.workflowStatuses.set(item.workflowId, 'paused')
+  await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+
+  // The operator resumes it; an hour less a minute later its old progress is still stale, but the pause was recent.
+  h.workflowStatuses.set(item.workflowId, 'waiting')
+  h.clock.now = new Date(h.clock.now.getTime() + NIGHTLY_MUSIC_STALL_TIMEOUT_MS - 60_000)
+  let reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.restarts.length, 0)
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 0)
+
+  // A full window after the last paused sighting with still no progress is a real stall.
+  h.clock.now = new Date(h.clock.now.getTime() + 60_000)
+  reconciled = await reconcileNightlyBatch(h.env, date, { dependencies: h.dependencies })
+  assert.equal(h.restarts.length, 1)
+  assert.equal(reconciled.items[0].musicWatchdog.recoveryCount, 1)
+})
+
 test('nightly selection adopts active work and starts one globally serialized generator', async () => {
   const published = {
     id: 'published_1', hnId: '1', status: 'ready', audioUrl: 'one.mp3',
