@@ -201,13 +201,13 @@ test('the brief asks for a very funny, sweary show and never rations the swearin
   const everything = JSON.stringify(brief)
   assert.doesNotMatch(everything, /\bspice\b/i)
   assert.match(brief.performanceNotes, /^THIS IS A COMEDY\./)
-  assert.match(brief.performanceNotes, /every scene has two or three swears, from at least two different hosts/)
+  assert.match(brief.performanceNotes, /every scene AFTER THE COLD OPEN has two or three swears, from at least two different hosts/)
   assert.match(brief.performanceNotes, /Never "goddamn", "Jesus" or "Christ"\. Never at a private commenter as a person/)
   assert.match(brief.creativeBrief.writingStyle, /^COMEDY FIRST/)
   const mustKnow = brief.creativeBrief.mustKnowBeforeWriting.join('\n')
   assert.match(mustKnow, /THE LADDER, 3\+ per episode/)
   assert.match(mustKnow, /never "goddamn", "Jesus" or "Christ"; never at a private commenter as a person/)
-  assert.match(mustKnow, /SWEARS IN EVERY SCENE: 2-3, from 2\+ hosts/)
+  assert.match(mustKnow, /SWEARS IN EVERY SCENE AFTER THE COLD OPEN: 2-3, from 2\+ hosts/)
   // Each host has one joke engine, and none is shared.
   for (const host of ['GARY', 'MAEVE', 'OBI', 'GRUNER']) assert.ok(brief.creativeBrief.castNotes.includes(host))
   assert.match(brief.creativeBrief.castNotes, /FOUR JOKE MACHINES, NEVER SHARED/)
@@ -311,13 +311,16 @@ test('the swearing is asked for per scene, spread across the hosts, each in a wa
   const swearing = brief.performanceNotes.split('\n').find((line) => line.startsWith('SWEARING'))
   assert.ok(swearing, 'the notes have a SWEARING paragraph')
   assert.match(swearing, /COUNTED PER SCENE \(you write one scene at a time, so count in the scene you are writing\)/)
-  assert.match(swearing, /every scene has two or three swears, from at least two different hosts, and over the episode every host swears in at least two scenes/)
+  assert.match(swearing, /every scene AFTER THE COLD OPEN has two or three swears, from at least two different hosts, and over the episode every host swears in at least two scenes/)
+  // "Every scene" put a swear in an episode's first line ("Infidel goes wild", 2026-10-05 02:0xZ): the
+  // writer's own first line, which the punch-up guard never touches. The cold open is exempt and clean.
+  assert.match(swearing, /The first three lines of the cold open are clean/)
   const ways = { GARY: /GARY: in panicked spirals, the most often, at most two in a scene/, GRUNER: /GRUNER: in Russian/, MAEVE: /MAEVE: at most one in a scene, in dead monotone/, OBI: /OBI: at most one in a scene, one precise compound insult/ }
   for (const [host, way] of Object.entries(ways)) assert.match(swearing, way, `${host} has a way and a per-scene limit`)
   // No episode-wide counts left for a scene writer to lose track of.
   assert.doesNotMatch(swearing, /\b(an|per|the) episode,? (more|at least|about)|\btwelve\b/)
   const mustKnow = brief.creativeBrief.mustKnowBeforeWriting
-  assert.ok(mustKnow.some((line) => /SWEARS IN EVERY SCENE: 2-3, from 2\+ hosts; Obi and Maeve 1 max a scene; each host in 2\+ scenes/.test(line)))
+  assert.ok(mustKnow.some((line) => /SWEARS IN EVERY SCENE AFTER THE COLD OPEN: 2-3, from 2\+ hosts; Obi, Maeve 1 max a scene; each host in 2\+ scenes; never in the first 3 lines/.test(line)))
   const feud = mustKnow.find((line) => line.startsWith('OBI GOES FOR GARY'))
   assert.doesNotMatch(feud, /profane/)
   assert.match(brief.creativeBrief.writingStyle, /swearing about once a page, from all four/)
