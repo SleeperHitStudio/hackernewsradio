@@ -175,7 +175,7 @@ export class SleeperHit {
    * boundary): the id, whether it was deduplicated, and what that source was
    * captured with (its completeness proof and comment count).
    */
-  async addTextSource(projectId, { content, label, metadata, producer, externalId, idempotencyKey }) {
+  async addTextSource(projectId, { content, label, metadata, producer, externalId, originatedAt, idempotencyKey }) {
     const res = await this.request(`/story-projects/${projectId}/sources`, {
       method: 'POST', idempotencyKey: idempotencyKey || true,
       body: {
@@ -184,6 +184,8 @@ export class SleeperHit {
         ...(label ? { label } : {}),
         ...(producer ? { producer } : {}),
         ...(externalId ? { externalId: String(externalId) } : {}),
+        // When the thread was posted: the platform files the episode by its month.
+        ...(originatedAt ? { originatedAt } : {}),
         ...(metadata ? { metadata } : {}),
       },
     })
@@ -346,12 +348,16 @@ export class SleeperHit {
    * is not covered by it and could never publish unattended, so it is canceled
    * rather than left stuck next to its replacement (how 160 releases sat
    * 'ready' for weeks). Returns `{ releaseId, alreadyPublished }`.
+   *
+   * No `seasonNumber`: the platform files the release in its episode's season
+   * — HNRadio's seasons are the months the threads were posted, chosen when
+   * the episode was written (`originatedAt` on the source). A hard-coded 1 put
+   * every new episode back in Season 1.
    */
   async publishEpisode(seriesId, {
     title,
     descriptionDirection,
     artifactId,
-    seasonNumber = 1,
     idempotencyKeyPrefix,
     grantedAt = null,
   }) {
@@ -378,7 +384,6 @@ export class SleeperHit {
           title: title.slice(0, 200),
           sourceArtifactId: artifactId,
           type: 'episode',
-          seasonNumber,
         },
       })
       release = res.release ?? res

@@ -17,6 +17,7 @@ import { config } from './config.mjs'
 import {
   buildSourceMetadata,
   sourceIdentity,
+  sourceOrigin,
   fetchThread,
   hydrateThreadArticle,
   threadToTranscript,
@@ -283,6 +284,7 @@ async function runPipeline(id, thread, { sourceTranscript, sourceMetadata }) {
     label: `HN thread ${thread.id}`,
     metadata: sourceMetadata,
     ...sourceIdentity(thread),
+    ...sourceOrigin(thread),
   })
   await patchDrama(id, {
     sourceId,
@@ -457,7 +459,6 @@ async function runPipeline(id, thread, { sourceTranscript, sourceMetadata }) {
         title: thread.title,
         descriptionDirection: 'Write one pithy sentence, 20-40 words, that sells this specific episode. Be irreverent, playful, and sharp, but use no profanity. Lead with the transcript’s actual tension, argument, or absurdity. Avoid host roll calls, generic show boilerplate, and phrases like “the hosts discuss” or “this episode explores.”',
         artifactId,
-        seasonNumber: 1,
       })
       await note(id, 'Published to the HNR podcast feed.')
     }

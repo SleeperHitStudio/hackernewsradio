@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildSourceMetadata, HNError, sourceIdentity, threadToTranscript } from '../worker/hn.mjs'
+import { buildSourceMetadata, HNError, sourceIdentity, sourceOrigin, threadToTranscript } from '../worker/hn.mjs'
 
 const makeComments = (count, { length = 180 } = {}) =>
   Array.from({ length: count }, (_, index) => ({
@@ -71,6 +71,13 @@ test('source metadata opts Sleeper Hit into exact full-text grounding', () => {
   assert.equal(metadata.sourceCompleteness.post.required, false)
   assert.equal(metadata.sourceCompleteness.sourcePack.chars, transcript.length)
   assert.equal(metadata.sourceCompleteness.sourcePack.clipped, false)
+})
+
+test('sourceOrigin sends the posting time only when the capture has one', () => {
+  assert.deepEqual(sourceOrigin({ postedAt: '2026-09-30T23:30:00.000Z' }), { originatedAt: '2026-09-30T23:30:00.000Z' })
+  assert.deepEqual(sourceOrigin({ postedAt: null }), {})
+  assert.deepEqual(sourceOrigin({ postedAt: 'not a time' }), {})
+  assert.deepEqual(sourceOrigin({}), {})
 })
 
 test('the formerly sampled 1,057-comment case keeps every comment and long body', () => {

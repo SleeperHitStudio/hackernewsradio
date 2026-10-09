@@ -32,6 +32,7 @@ test('fetchThread paginates every comment and reconstructs reply order', async (
         score: 42,
         descendants: 3,
         url: 'https://example.com/article',
+        time: 1_790_811_000,
       })
     }
     if (url.pathname === '/api/v1/items/100') {
@@ -75,6 +76,8 @@ test('fetchThread paginates every comment and reconstructs reply order', async (
   assert.deepEqual(requestedCursors, [null, 'created_at_i<=20'])
   assert.equal(thread.title, 'A & B')
   assert.equal(thread.total, 3)
+  // When the story was posted, from the official item: the episode's season month.
+  assert.equal(thread.postedAt, new Date(1_790_811_000 * 1000).toISOString())
   assert.deepEqual(thread.comments.map(({ id, parentId, depth }) => ({ id, parentId, depth })), [
     { id: '11', parentId: null, depth: 0 },
     { id: '12', parentId: '11', depth: 1 },
@@ -156,6 +159,7 @@ test('fetchThread resolves a comment URL to the root story first', async () => {
 
   assert.equal(thread.id, '200')
   assert.deepEqual(officialIds, ['201', '200', '200'])
+  assert.equal(thread.postedAt, null, 'no `time` on the item: no posting time is invented')
 })
 
 test('fetchThread retries count disagreement and then fails closed', async () => {
