@@ -20,6 +20,7 @@ function makeThread(comments, overrides = {}) {
     url: 'https://news.ycombinator.com/item?id=42',
     articleUrl: null,
     author: 'op',
+    pseudonymized: true,
     points: 10,
     storyText: '',
     comments,

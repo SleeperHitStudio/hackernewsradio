@@ -41,6 +41,7 @@ function harness({
   const terminations = []
   const workflowStatuses = new Map()
   const missingCheckpoints = new Set()
+  const fetchedWithKeys = []
   const clock = { now: new Date(now) }
   const ids = [...randomIds]
   const dependencies = {
@@ -79,7 +80,10 @@ function harness({
     async fetchArticle() {
       throw new Error('fetchArticle must not run for a story without a linked article')
     },
-    async fetchThread(url) {
+    async fetchThread(url, { pseudonymKey } = {}) {
+      // The real fetch refuses without a pseudonym key; so does this stand-in.
+      if (!pseudonymKey) throw new Error('fetchThread was called without a pseudonym key')
+      fetchedWithKeys.push(pseudonymKey)
       const id = url.match(/id=(\d+)/)?.[1]
       const comments = Array.from({ length: 50 }, (_, index) => ({
         id: `${id}${String(index + 1).padStart(3, '0')}`,
@@ -96,6 +100,7 @@ function harness({
         articleUrl: null,
         storyText: 'Complete self-post body.',
         author: 'submitter',
+        pseudonymized: true,
         comments,
         total: 50,
         points: 100,
@@ -143,6 +148,7 @@ function harness({
     dependencies,
     dramas,
     env,
+    fetchedWithKeys,
     missingCheckpoints,
     restarts,
     settings,
@@ -511,8 +517,8 @@ test('nightly selection adopts active work and starts one globally serialized ge
 test('nightly refuses to create a workflow when the linked article is unavailable', async () => {
   const h = harness({ topIds: [30] })
   const originalFetchThread = h.dependencies.fetchThread
-  h.dependencies.fetchThread = async (url) => ({
-    ...await originalFetchThread(url),
+  h.dependencies.fetchThread = async (url, options) => ({
+    ...await originalFetchThread(url, options),
     articleUrl: 'https://publisher.example/unavailable',
   })
   h.dependencies.fetchArticle = async () => {
@@ -534,8 +540,8 @@ test('nightly refuses to create a workflow when the linked article is unavailabl
 test('nightly rejects an incomplete source before reserving the generation slot and selects the next story', async () => {
   const h = harness({ topIds: [30, 31] })
   const originalFetchThread = h.dependencies.fetchThread
-  h.dependencies.fetchThread = async (url) => {
-    const thread = await originalFetchThread(url)
+  h.dependencies.fetchThread = async (url, options) => {
+    const thread = await originalFetchThread(url, options)
     return String(thread.id) === '30'
       ? { ...thread, articleUrl: 'https://publisher.example/unavailable' }
       : thread
@@ -560,8 +566,8 @@ test('nightly records full article and comment proof before creating a workflow'
   const h = harness({ topIds: [31] })
   const completeArticleText = `ARTICLE-BEGIN ${'complete article. '.repeat(40)} ARTICLE-END`
   const originalFetchThread = h.dependencies.fetchThread
-  h.dependencies.fetchThread = async (url) => ({
-    ...await originalFetchThread(url),
+  h.dependencies.fetchThread = async (url, options) => ({
+    ...await originalFetchThread(url, options),
     articleUrl: 'https://publisher.example/full',
   })
   h.dependencies.fetchArticle = async (url) => ({
@@ -2534,6 +2540,7 @@ function canonStoryApi(t, h, { pinned = PINNED_HOSTS, canon = facesOnlyCanon(), 
     SLEEPERHIT_API_KEY: 'sh_test_key',
     SLEEPERHIT_API_KEY_ID: HNR_KEY_ID,
     HNRADIO_PROJECT_ID: CANON_PROJECT,
+    HNR_PSEUDONYM_KEY: 'hnr-test-pseudonym-key-0123456789',
     RESEND_API_KEY: 'test_resend_key',
     ALERT_EMAIL: 'ops@example.com',
   })
@@ -2731,7 +2738,7 @@ test('a death thread is passed over before anything is adopted, fetched or spent
   }
   const threadReads = []
   const baseFetchThread = h.dependencies.fetchThread
-  h.dependencies.fetchThread = async (url) => { threadReads.push(url); return baseFetchThread(url) }
+  h.dependencies.fetchThread = async (url, options) => { threadReads.push(url); return baseFetchThread(url, options) }
 
   const batch = await reconcileNightlyBatch(h.env, '2026-07-15', { dependencies: h.dependencies })
 
@@ -2755,8 +2762,8 @@ test('a death thread is passed over before anything is adopted, fetched or spent
 test('a death thread the linked article reveals is passed over before the generation slot is taken', async () => {
   const h = harness({ topIds: [80, 81] })
   const baseFetchThread = h.dependencies.fetchThread
-  h.dependencies.fetchThread = async (url) => {
-    const thread = await baseFetchThread(url)
+  h.dependencies.fetchThread = async (url, options) => {
+    const thread = await baseFetchThread(url, options)
     return String(thread.id) === '80'
       ? { ...thread, title: 'Bill Draper', articleUrl: 'https://news.example/draper' }
       : thread
@@ -2864,4 +2871,25 @@ test('the operator stopgap holds without the drop state: an exhausted item keeps
   assert.ok(h.creates.every((create) => create.params.dramaId !== 'episode_4' && !create.params.resumeArtifactId))
   assert.deepEqual(tonight.items.map((item) => [item.hnId, item.status]), [['49949438', 'exhausted'], ['60', 'queued']])
   assert.equal(h.dramas.get('episode_4').status, 'running', 'untouched')
+})
+
+test('the nightly fetches every thread with the pseudonym key, and refuses to fetch where it can publish without one', async () => {
+  const { DEV_PSEUDONYM_KEY } = await import('../worker/pseudonyms.mjs')
+  const dev = harness({ topIds: [30] })
+  await reconcileNightlyBatch(dev.env, '2026-07-15', { dependencies: dev.dependencies })
+  assert.equal(dev.creates.length, 1)
+  assert.deepEqual(dev.fetchedWithKeys, [DEV_PSEUDONYM_KEY], 'a development install with no API key uses the development key')
+
+  const keyed = harness({ topIds: [30] })
+  keyed.env.SLEEPERHIT_API_KEY = 'sh_live_key'
+  keyed.env.HNR_PSEUDONYM_KEY = 'hnr-test-pseudonym-key-0123456789'
+  await reconcileNightlyBatch(keyed.env, '2026-07-15', { dependencies: keyed.dependencies })
+  assert.deepEqual(keyed.fetchedWithKeys, ['hnr-test-pseudonym-key-0123456789'])
+
+  const missing = harness({ topIds: [30] })
+  missing.env.SLEEPERHIT_API_KEY = 'sh_live_key'
+  const batch = await reconcileNightlyBatch(missing.env, '2026-07-15', { dependencies: missing.dependencies })
+  assert.deepEqual(missing.fetchedWithKeys, [], 'nothing is fetched')
+  assert.equal(missing.creates.length, 0, 'nothing is started')
+  assert.match(batch.errors.at(-1).message, /HNR_PSEUDONYM_KEY is not set/)
 })

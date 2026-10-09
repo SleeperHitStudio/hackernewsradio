@@ -1,5 +1,6 @@
 import { Readability } from '@mozilla/readability'
 import { parseHTML } from 'linkedom'
+import { pseudonymizeThread } from './pseudonyms.mjs'
 
 /**
  * HNR's source contract is deliberately fail-closed:
@@ -11,6 +12,10 @@ import { parseHTML } from 'linkedom'
  *
  * A source that cannot be proved complete is not eligible for generation. That
  * is the only honest way to make every *generated* episode fully grounded.
+ *
+ * - No Hacker News username leaves `fetchThread`: authors, the submitter and
+ *   mentions in the text are replaced by stable pseudonyms (pseudonyms.mjs),
+ *   and the transcript refuses a thread that was not pseudonymized.
  */
 
 export const HN_FIREBASE_BASE = 'https://hacker-news.firebaseio.com/v0'
@@ -422,19 +427,29 @@ function hnItemTime(seconds) {
 
 /**
  * Fetch one complete, count-verified HN thread. A comment URL is resolved all
- * the way to its story before the snapshot is taken.
+ * the way to its story before the snapshot is taken. Every username in it is
+ * replaced by its pseudonym before it is returned, so `pseudonymKey` is
+ * required (`pseudonymOptions(env)` in pseudonyms.mjs): a caller that forgets
+ * it is refused instead of receiving real handles.
  */
 export async function fetchThread(input, {
   fetchImpl = fetch,
   timeoutMs = HN_FETCH_TIMEOUT_MS,
   maxAttempts = 3,
   retryDelaysMs = [1_500, 4_000],
+  pseudonymKey,
 } = {}) {
+  if (typeof pseudonymKey !== 'string' || !pseudonymKey) {
+    throw new HNError('Hacker News threads are fetched only with a pseudonym key: commenters are never named by username.', {
+      code: 'pseudonym_key_missing',
+    })
+  }
   const inputId = parseItemId(input)
   const options = { fetchImpl, timeoutMs }
   const initialStory = await resolveStoryItem(inputId, options)
   const storyId = String(initialStory.id)
   let lastError = null
+  let captured = null
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -477,7 +492,7 @@ export async function fetchThread(input, {
       }
 
       const capturedAt = new Date().toISOString()
-      return {
+      captured = {
         id: storyId,
         title: htmlToText(root.title || '') || `Hacker News discussion #${storyId}`,
         url: `https://news.ycombinator.com/item?id=${storyId}`,
@@ -514,6 +529,7 @@ export async function fetchThread(input, {
           },
         },
       }
+      break
     } catch (error) {
       lastError = error
       if (attempt < maxAttempts) {
@@ -522,6 +538,9 @@ export async function fetchThread(input, {
     }
   }
 
+  // Outside the retry loop: a capture is renamed once, and a renaming fault is never mistaken for a
+  // capture that could not be completed.
+  if (captured) return pseudonymizeThread(captured, pseudonymKey)
   if (lastError instanceof HNError) throw lastError
   throw new HNError(`Could not capture a complete Hacker News thread ${storyId}.`, {
     code: 'hn_thread_incomplete',
@@ -801,6 +820,11 @@ export function threadToTranscript(thread, {
   maxBytes = STORY_SOURCE_MAX_BYTES,
 } = {}) {
   assertCompleteThread(thread)
+  if (thread.pseudonymized !== true) {
+    throw new HNError('The thread still carries Hacker News usernames; only a pseudonymized thread is passed to the writer.', {
+      code: 'thread_not_pseudonymized',
+    })
+  }
   const comments = thread.comments
   const lines = []
   lines.push(`# Hacker News thread: ${thread.title}`)
@@ -836,7 +860,7 @@ export function threadToTranscript(thread, {
     lines.push('')
   }
   lines.push(`## COMPLETE COMMENT THREAD (all ${thread.total} comments)`)
-  lines.push('Every visible comment in the verified snapshot follows. Preserve handles, quotes, reply context, minority positions, and late branches.')
+  lines.push('Every visible comment in the verified snapshot follows. Commenters are named by pseudonym, never by their Hacker News username: use each pseudonym exactly as written, and never guess, restore or invent a real username. Preserve pseudonyms, quotes, reply context, minority positions, and late branches.')
   lines.push(`<<<HNR_COMMENTS_BEGIN count=${thread.total}>>>`)
   lines.push('')
   for (const comment of comments) {
@@ -914,10 +938,17 @@ export function threadGrewMaterially(previousComments, currentComments) {
  * cross-service contract: Sleeper Hit must hash-check and pass this exact text
  * to both the planner and final table-read writer, never a digest or preview.
  * Which thread it is travels as the source's identity (`sourceIdentity`), not
- * in here.
+ * in here. `commenterNames: 'pseudonym'` marks a capture whose commenters are
+ * named by pseudonym, so a reused capture taken before pseudonyms (which
+ * still carries usernames) is recognised and retired rather than written from.
  */
+export const COMMENTER_NAMES = 'pseudonym'
+
 export function buildSourceMetadata(thread, transcript) {
   assertCompleteThread(thread)
+  if (thread.pseudonymized !== true) {
+    throw new HNError('Source metadata is built only for a pseudonymized thread.', { code: 'thread_not_pseudonymized' })
+  }
   const content = String(transcript ?? '')
   const byteSize = new TextEncoder().encode(content).byteLength
   if (!content || content.length > STORY_SOURCE_MAX_CHARS || byteSize > STORY_SOURCE_MAX_BYTES) {
@@ -935,6 +966,7 @@ export function buildSourceMetadata(thread, transcript) {
   const commentProof = thread.completeness.comments
   return {
     sourceContextMode: 'full',
+    commenterNames: COMMENTER_NAMES,
     sourceCompleteness: {
       comments: {
         // Reported, not asserted. The platform stores this alongside the source

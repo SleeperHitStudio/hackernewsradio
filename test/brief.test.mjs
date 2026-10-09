@@ -337,7 +337,7 @@ test('the brief asks for four to six overlaps an episode, written so the platfor
   assert.ok(crosstalk, 'the notes have a CROSSTALK paragraph')
   assert.match(crosstalk, /every scene after the cold open has one \(OVERLAPPING\) line, a long scene two: four to six an episode/)
   assert.match(crosstalk, /comes DIRECTLY after it: no action line or sound cue between them/)
-  assert.match(crosstalk, /never a quote, a handle, a number or the punchline word/)
+  assert.match(crosstalk, /never a quote, a pseudonym, a number or the punchline word/)
   // One or two in a scene of 15-25 lines is well inside the platform's 30%-per-scene warning.
   assert.doesNotMatch(crosstalk, /three|every line/i)
   assert.ok(brief.creativeBrief.mustKnowBeforeWriting.some((line) => /the top rung CUTS IN \(OVERLAPPING\)/.test(line)))

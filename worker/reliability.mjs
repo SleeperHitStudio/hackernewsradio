@@ -589,6 +589,7 @@ export function capturedSource(value) {
       ? Number(comments)
       : null,
     sourceCompleteness: value?.sourceCompleteness ?? null,
+    commenterNames: typeof value?.commenterNames === 'string' ? value.commenterNames : null,
   }
 }
 

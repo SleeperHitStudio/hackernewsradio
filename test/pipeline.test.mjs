@@ -161,6 +161,7 @@ function envFor(db, extra = {}) {
     SLEEPERHIT_API_KEY: 'sh_test',
     SLEEPERHIT_API_KEY_ID: KEY_ID,
     HNRADIO_PROJECT_ID: PROJECT,
+    HNR_PSEUDONYM_KEY: 'hnr-test-pseudonym-key-0123456789',
     ...extra,
   }
 }
@@ -192,6 +193,7 @@ function completeThread(id = '42', count = 50) {
     storyText: 'Complete self-post body.',
     author: 'submitter',
     postedAt: '2026-09-30T23:30:00.000Z',
+    pseudonymized: true,
     comments,
     total: count,
     points: 100,
@@ -246,6 +248,20 @@ function newEpisode(id = 'drama_1') {
   return { id, hnId: '42', mode: 'podcast', status: 'queued', title: 'Story 42', url: 'https://news.ycombinator.com/item?id=42', progress: [], createdAt: '2026-09-29T00:00:00.000Z' }
 }
 
+test('an episode that can publish but has no pseudonym key fetches no thread and uploads nothing', async (t) => {
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  const net = fakeNetwork(t, underGrant((request) => {
+    throw new Error(`unexpected ${request.method} ${request.path}`)
+  }))
+  const { error } = await runPipeline(envFor(db, { HNR_PSEUDONYM_KEY: '' }), { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' })
+
+  assert.ok(error, 'the run ends')
+  assert.ok(net.requests.every((r) => r.path === `/publishing-series/${SERIES}`), 'only the grant was read: no source, plan or job')
+  const drama = db.rows.get('drama_1')
+  assert.equal(drama.status, 'failed')
+  assert.match(String(drama.error ?? drama.failureMessage ?? ''), /HNR_PSEUDONYM_KEY is not set/)
+})
+
 test('a new episode writes the canon voices, sends the thread identity, reuses a captured source, and STOPS on a typed 409', async (t) => {
   const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
   const net = fakeNetwork(t, underGrant((request) => {
@@ -254,7 +270,7 @@ test('a new episode writes the canon voices, sends the thread identity, reuses a
     if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/sources`) {
       return [200, {
         deduplicated: true,
-        source: { id: 'source_first', status: 'READY', metadata: { sourceCompleteness: { comments: { fetched: 48 } } } },
+        source: { id: 'source_first', status: 'READY', metadata: { commenterNames: 'pseudonym', sourceCompleteness: { comments: { fetched: 48 } } } },
       }]
     }
     if (request.path === `/story-projects/${PROJECT}/sources/source_first`) return [200, { source: { id: 'source_first', status: 'READY' } }]
@@ -428,7 +444,7 @@ test('a thread that grew after a failed-before-plan attempt is recaptured: DELET
     if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/sources`) {
       posts++
       return posts === 1
-        ? [200, { deduplicated: true, source: { id: 'source_stale', status: 'READY', metadata: { sourceCompleteness: { comments: { fetched: 20 } } } } }]
+        ? [200, { deduplicated: true, source: { id: 'source_stale', status: 'READY', metadata: { commenterNames: 'pseudonym', sourceCompleteness: { comments: { fetched: 20 } } } } }]
         : [200, { source: { id: 'source_fresh', status: 'READY' } }]
     }
     if (request.method === 'DELETE') return [200, { deleted: true }]
@@ -459,7 +475,7 @@ test('a stale capture is never retired while another episode of the thread is in
   const net = fakeNetwork(t, underGrant((request) => {
     if (request.method === 'GET' && request.path.endsWith('/cast-canon')) return CURRENT_CANON
     if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/sources`) {
-      return [200, { deduplicated: true, source: { id: 'source_shared', status: 'READY', metadata: { sourceCompleteness: { comments: { fetched: 20 } } } } }]
+      return [200, { deduplicated: true, source: { id: 'source_shared', status: 'READY', metadata: { commenterNames: 'pseudonym', sourceCompleteness: { comments: { fetched: 20 } } } } }]
     }
     if (request.path.startsWith(`/story-projects/${PROJECT}/sources/`)) return [200, { source: { status: 'READY' } }]
     if (request.path === `/story-projects/${PROJECT}/story-plans`) return GATE_REFUSAL
@@ -476,6 +492,36 @@ test('a stale capture is never retired while another episode of the thread is in
   const drama = db.rows.get('drama_1')
   assert.equal(drama.sourceId, 'source_shared')
   assert.ok(drama.progress.some((p) => /drama_visitor of this thread is in flight/.test(p.message)))
+})
+
+test('a reused capture taken before pseudonyms is retired and the thread captured again, renamed', async (t) => {
+  const db = fakeD1({ episodes: [newEpisode()], settings: { pinnedVoices: PINNED, publishingSeriesId: SERIES } })
+  let posts = 0
+  const net = fakeNetwork(t, underGrant((request) => {
+    if (request.method === 'GET' && request.path.endsWith('/cast-canon')) return CURRENT_CANON
+    if (request.method === 'POST' && request.path === `/story-projects/${PROJECT}/sources`) {
+      posts++
+      // The first answer is the capture an attempt took before pseudonyms: no `commenterNames`.
+      return posts === 1
+        ? [200, { deduplicated: true, source: { id: 'source_usernames', status: 'READY', metadata: { sourceCompleteness: { comments: { fetched: 50 } } } } }]
+        : [200, { source: { id: 'source_pseudonyms', status: 'READY', metadata: request.body.metadata } }]
+    }
+    if (request.method === 'DELETE') return [200, { deleted: true }]
+    if (request.path.startsWith(`/story-projects/${PROJECT}/sources/`)) return [200, { source: { status: 'READY' } }]
+    if (request.path === `/story-projects/${PROJECT}/story-plans`) return GATE_REFUSAL
+    throw new Error(`unexpected ${request.method} ${request.path}`)
+  }))
+
+  await runPipeline(envFor(db), { dramaId: 'drama_1', url: 'https://news.ycombinator.com/item?id=42' },
+    cloudflareStep({ 'fetch complete thread': completeThread('42', 50) }))
+
+  const uploads = net.requests.filter((r) => r.method === 'POST' && r.path === `/story-projects/${PROJECT}/sources`)
+  assert.deepEqual(uploads.map((r) => r.key), ['drama_1-source', 'drama_1-source-pseudonyms'])
+  assert.ok(uploads.every((r) => r.body.metadata.commenterNames === 'pseudonym'), 'every upload declares pseudonymous commenters')
+  assert.deepEqual(net.requests.filter((r) => r.method === 'DELETE').map((r) => r.path), [`/story-projects/${PROJECT}/sources/source_usernames`])
+  const drama = db.rows.get('drama_1')
+  assert.equal(drama.sourceId, 'source_pseudonyms', 'the episode is never written from a username capture')
+  assert.ok(drama.progress.some((p) => /names commenters by username/.test(p.message)))
 })
 
 function recoveredEpisode(extra = {}) {

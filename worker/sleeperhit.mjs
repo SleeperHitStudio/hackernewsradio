@@ -197,6 +197,8 @@ export class SleeperHit {
       deduplicated: res.deduplicated === true,
       capturedComments: typeof fetched === 'number' && Number.isFinite(fetched) ? fetched : null,
       sourceCompleteness: completeness,
+      // How the capture names commenters ('pseudonym'); null for a capture taken before pseudonyms.
+      commenterNames: typeof source?.metadata?.commenterNames === 'string' ? source.metadata.commenterNames : null,
       status: source.status ?? null,
     }
   }

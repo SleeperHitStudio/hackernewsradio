@@ -176,10 +176,12 @@ export function hostForCharacter(character) {
 // bit after one line. It shipped 2 swears and ~10 "that's not X, that's Y" reframes an episode, and
 // coverage scored all of it 8/10. The brief now leads with the joke and keeps only the numbers a writer
 // can use; the Bible (v122) carries the same comedy rules. Capped at 12 x 220 chars (test/brief.test.mjs).
+// COMMENTERS GO BY PSEUDONYM (owner, 2026-10-09): the source names every commenter by a stable pseudonym
+// (pseudonyms.mjs), so the brief says "pseudonym" wherever it used to say "handle".
 const SHARED_MUST_KNOW = [
   'SUBJECT FIRST: open by making the listener understand what was announced or claimed and why this thread exists, BEFORE any comment, and make that setup funny. Never invent it if it could not be retrieved.',
-  'QUOTES ARE SETUPS: the SHORTEST verbatim sentence that carries the joke, handle first; the next line is a punchline, never a summary. Never say a comment was cut off unless it contains [HNR EXCERPT SHORTENED].',
-  'Build on 3-5 THEMES from the comments, not isolated quotes; cite representative handles including minority positions, and explain parent context when it flips the meaning, as a joke.',
+  'QUOTES ARE SETUPS: the SHORTEST verbatim sentence that carries the joke, pseudonym first; the next line is a punchline, never a summary. Never say a comment was cut off unless it contains [HNR EXCERPT SHORTENED].',
+  'Build on 3-5 THEMES from the comments, not isolated quotes; cite representative pseudonyms including minority positions, and explain parent context when it flips the meaning, as a joke.',
 ]
 
 const SHARED_AUDIO = {
@@ -234,7 +236,7 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       // Kept under the Story API's 600-char writingStyle cap.
       writingStyle:
         'COMEDY FIRST, fixed four-host cast (see castNotes), dead straight, swearing about once a page, from all four. A laugh every 3-4 ' +
-        'lines. QUOTE, PUNCHLINE, LADDER: shortest verbatim quote by handle; the next line is a joke about it; the others ' +
+        'lines. QUOTE, PUNCHLINE, LADDER: shortest verbatim quote by pseudonym; the next line is a joke about it; the others ' +
         'TOP it on the same comment, 4-8 lines, nobody conceding, ending on a hard detail from the thread. Specific beats ' +
         'general. No speeches, no sincere confessions, no explaining a joke, no aphorism endings. Every scene ends on its ' +
         'biggest laugh. NO narrator.',
@@ -248,7 +250,8 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
         'FOUR JOKE MACHINES, NEVER SHARED: Gary takes it literally and defends it with worse evidence; Maeve turns horror ' +
         'into flat portfolio math and doubles down; Obi gets more SPECIFIC, never louder, and goes for Gary; Gruner lands ' +
         'it in under ten words, wrong idiom, right conclusion. THESE FOUR ARE THE ONLY SPEAKING CHARACTERS. Commenters are ' +
-        'QUOTED BY a host inside that host\'s own line; a host MAY perform one in voice, never as a new speaker. Obi ' +
+        'QUOTED BY a host inside that host\'s own line; a host MAY perform one in voice, never as a new speaker. ' +
+        'Commenters go ONLY by the pseudonym the source gives them; never guess, restore or invent a real username. Obi ' +
         'Indian-accented; Gruner deep Russian. NO NARRATOR, ANNOUNCER, or GUEST.',
       ...SHARED_AUDIO,
       mustKnowBeforeWriting: [
@@ -257,7 +260,7 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
         'last, nobody conceding; the top rung CUTS IN (OVERLAPPING). ACT ONE OUT: a host BECOMES the commenter.',
         'PLANT 2 RUNNERS in the first third (a quoted phrase, a number, an analogy) and bring BOTH back CHANGED in the last ' +
         'third; the episode\'s last line is a runner payoff. Never flag a callback on air.',
-        'THE CHORUS (when the thread has one): 3+ handles who made the same objection independently. Name them all, then a ' +
+        'THE CHORUS (when the thread has one): 3+ pseudonyms who made the same objection independently. Name them all, then a ' +
         'host makes it again without noticing. Play it; never call it "a chorus" on air.',
         'THE THREAD OUTRANKS THE HOSTS: if someone they mock POSTED HERE (author, OP, vendor), quote their real words and ' +
         'let the four lose to a stranger they cannot shout at. Never invent it; if absent, skip it.',
@@ -280,7 +283,7 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
     performanceNotes: [
       'THIS IS A COMEDY. Every line is a laugh or the setup for the next one: aim for a laugh every three or four lines, start to finish. Four burned-out adults in a booth at 2am, tearing into a real Hacker News thread and swearing the way adults actually swear. Smart, filthy, fast. The listener still learns what the thread was arguing about, because the facts are the setups.',
       '',
-      'HOW A BIT WORKS. A host reads the SHORTEST verbatim sentence that carries the joke, handle first. The very next host line is a PUNCHLINE about it, never a description of it ("that\'s a sad sentence" describes; it doesn\'t land). Then the others TOP it on the SAME comment: each rung more specific, more personal or more wrong, 4 to 8 lines, nobody conceding. It ends when someone loses, or on a hard detail from the thread (a price, a count, a date, a version number). Three ladders an episode at least. Then a new comment.',
+      'HOW A BIT WORKS. A host reads the SHORTEST verbatim sentence that carries the joke, pseudonym first. The very next host line is a PUNCHLINE about it, never a description of it ("that\'s a sad sentence" describes; it doesn\'t land). Then the others TOP it on the SAME comment: each rung more specific, more personal or more wrong, 4 to 8 lines, nobody conceding. It ends when someone loses, or on a hard detail from the thread (a price, a count, a date, a version number). Three ladders an episode at least. Then a new comment.',
       '',
       'FOUR MACHINES; a line only one of them could say:',
       'GARY takes it literally, defends the indefensible with worse evidence, and loses. His dead companies are punchlines with receipts, never confessions.',
@@ -290,7 +293,7 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       '',
       'SWEARING, COUNTED PER SCENE (you write one scene at a time, so count in the scene you are writing): every scene AFTER THE COLD OPEN has two or three swears, from at least two different hosts, and over the episode every host swears in at least two scenes. The first three lines of the cold open are clean: Gary stumbles in flustered, not swearing. Each host swears their own way. GARY: in panicked spirals, the most often, at most two in a scene. GRUNER: in Russian (blyat, chyort, suka) or one wrong English word, as the button. MAEVE: at most one in a scene, in dead monotone, the hardest-landing word of the episode. OBI: at most one in a scene, one precise compound insult at the top of a ladder, aimed at Gary; otherwise clinically clean, which is why his land. Swearing is rhythm: put the swear on the stressed beat, so it IS the punchline word or the brake right before it. Words that land: fuck, fucking, shit, bullshit, prick, bastard, arse, dickhead. Never in the first line. Never "goddamn", "Jesus" or "Christ". Never at a private commenter as a person: go after their argument, the company, the founder, or each other.',
       '',
-      'CROSSTALK: every scene after the cold open has one (OVERLAPPING) line, a long scene two: four to six an episode. A host cuts in at the top of a ladder, or throws a short reaction ("Oh, fuck off.") under someone mid-rant. The line being cut is a host\'s own spoken line ending in an em dash, never a quote, a handle, a number or the punchline word, and the (OVERLAPPING) line comes DIRECTLY after it: no action line or sound cue between them.',
+      'CROSSTALK: every scene after the cold open has one (OVERLAPPING) line, a long scene two: four to six an episode. A host cuts in at the top of a ladder, or throws a short reaction ("Oh, fuck off.") under someone mid-rant. The line being cut is a host\'s own spoken line ending in an em dash, never a quote, a pseudonym, a number or the punchline word, and the (OVERLAPPING) line comes DIRECTLY after it: no action line or sound cue between them.',
       '',
       'CUT ON SIGHT:',
       '- speeches over 30 words;',
@@ -307,7 +310,8 @@ export function podcastBrief(thread, pageTarget, seriesContext = null) {
       'KEEP:',
       '- Gary stumbles into the cold open; the hosts name themselves.',
       '- Subject first: Gary fumbles it, Obi fixes it, and both are funny.',
-      '- Quotes are verbatim by handle. A wrong fact gets corrected by another host, as a joke.',
+      '- Quotes are verbatim by pseudonym. A wrong fact gets corrected by another host, as a joke.',
+      '- Commenters are named only by the pseudonym the source gives them, never by a real username: never guess or restore one.',
       '- The Flicker happens once: a shock, one irreverent line, then straight back to a joke.',
       '- No narrator, no guest.',
       '',

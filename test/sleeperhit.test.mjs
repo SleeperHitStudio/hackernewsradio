@@ -34,7 +34,7 @@ test('text source uploads carry the item identity top-level and the full-context
     idempotencyKey: 'episode-source',
   })
 
-  assert.deepEqual(captured, { id: 'source_1', deduplicated: false, capturedComments: null, sourceCompleteness: null, status: 'PENDING' })
+  assert.deepEqual(captured, { id: 'source_1', deduplicated: false, capturedComments: null, sourceCompleteness: null, commenterNames: null, status: 'PENDING' })
   assert.deepEqual(calls, [{
     path: '/story-projects/project_1/sources',
     options: {
@@ -75,7 +75,7 @@ test('a repeat submission of the same thread reports the existing source and wha
     source: {
       id: 'source_first',
       status: 'READY',
-      metadata: { sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } } },
+      metadata: { commenterNames: 'pseudonym', sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } } },
     },
   })
   const captured = await client.addTextSource('project_1', {
@@ -86,6 +86,7 @@ test('a repeat submission of the same thread reports the existing source and wha
     deduplicated: true,
     capturedComments: 57,
     sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } },
+    commenterNames: 'pseudonym',
     status: 'READY',
   })
 })

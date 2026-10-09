@@ -23,6 +23,7 @@ import {
   threadToTranscript,
   verifiedSourceProgress,
 } from './hn.mjs'
+import { pseudonymOptions } from '../worker/pseudonyms.mjs'
 import { upsertDrama, patchDrama, findByHnIdAndMode, getSetting, setSetting, deleteOtherEpisodesOfThread } from './store.mjs'
 
 const client = () => new SleeperHit({ baseUrl: config.apiBase, apiKey: config.apiKey })
@@ -73,11 +74,12 @@ function hostForCharacter(character) {
 
 const SHARED_MUST_KNOW = [
   'The source is a real Hacker News comment thread; the people arguing in it are your raw material.',
-  'Use REAL QUOTES from the comments and WEAVE them into the bits — react by handle, make recurring commenters ' +
+  'Use REAL QUOTES from the comments and WEAVE them into the bits — react by pseudonym, make recurring commenters ' +
   'the show\'s heroes and villains; the thread IS the material, not a topic the hosts talk near.',
   'Before writing, derive 3-6 themes from the breadth of supplied comments. Structure the episode around those themes, not isolated colorful quotes.',
-  'For each theme, cite representative handles and reply threads, including minority positions. Explain a reply\'s parent context when it changes the meaning.',
+  'For each theme, cite representative pseudonyms and reply threads, including minority positions. Explain a reply\'s parent context when it changes the meaning.',
   'Never claim a comment was cut off unless its source text explicitly contains [HNR EXCERPT SHORTENED].',
+  'Commenters are named only by the pseudonym the source gives them; never guess, restore or invent a real username.',
 ]
 
 const SHARED_AUDIO = {
@@ -133,7 +135,7 @@ function podcastBrief(thread, pageTarget) {
         'swear constantly and casually. The comedy is RAPID-FIRE, absurd, and awkward — overlapping exchanges, ' +
         'interruptions, insane tangents, painful silences — played dead straight. Every episode opens with the ' +
         'same ritual: each host introduces themselves by name in one line, then straight into the thread. They read ' +
-        'and react to the ACTUAL comments — quote them verbatim by handle — and derail into weird arguments. NO ' +
+        'and react to the ACTUAL comments — quote them verbatim by pseudonym — and derail into weird arguments. NO ' +
         'narrator or announcer: Gary opens cold and the hosts sign off themselves.',
       pageTarget,
       castNotes:
@@ -186,12 +188,12 @@ function podcastBrief(thread, pageTarget) {
       'smooth — then the intro ritual assembles around him. RUNNING BITS MUST EARN THEIR WAY IN THROUGH THE THREAD: ' +
       'Gary\'s Bauxlite scars and Obi\'s contempt only surface when a specific comment triggers them — quote the ' +
       'comment, hit the bit in ONE sharp line, move on; never linger, never do backstory for its own sake. THE '
-      + 'COMMENTERS ARE THE CELEBRITIES: satirize them by handle; GARY IS JEALOUS OF THEM (their karma, their '
+      + 'COMMENTERS ARE THE CELEBRITIES: satirize them by pseudonym; GARY IS JEALOUS OF THEM (their karma, their '
       + 'exits, their shipped side projects) — Bauxlite gets AT MOST one line per episode. MAEVE drops a grand '
       + 'unified tech-history theory a few times per episode (Andreessen-scale, one step too far; the table goes '
       + 'silent, someone says "...what?", move on — different reference each episode). NO ' +
       'CATCHPHRASES OR STOCK INTENSIFIERS: "we are so back" and "on a Tuesday" are BANNED; if a phrase appears ' +
-      'twice in one script, cut the second. Quote real commenters by handle and play everything dead straight.',
+      'twice in one script, cut the second. Quote real commenters by pseudonym and play everything dead straight.',
   }
 }
 
@@ -209,7 +211,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
  */
 export async function startGeneration(url, { force = false } = {}) {
   const mode = normalizeMode()
-  const thread = await fetchThread(url)
+  const thread = await fetchThread(url, pseudonymOptions(process.env))
   if (!force) {
     const existing = await findByHnIdAndMode(thread.id, mode)
     if (existing && existing.status === 'ready') return { drama: existing, reused: true }

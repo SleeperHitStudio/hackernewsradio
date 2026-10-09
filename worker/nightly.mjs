@@ -19,6 +19,7 @@ import {
   upsertDrama,
 } from './store.mjs'
 import { deathThreadMatch, deathThreadReason } from './death-thread.mjs'
+import { pseudonymOptions } from './pseudonyms.mjs'
 import {
   classifySystemicFailure,
   isAccessFailure,
@@ -1173,7 +1174,7 @@ async function recoverItem(
       failureMessage: null,
     })
   } else {
-    const thread = await deps.fetchThread(item.url)
+    const thread = await deps.fetchThread(item.url, pseudonymOptions(env))
     // A replacement needs the same prepared source a first attempt gets: the
     // article hydrated onto the thread and the completeness metadata the
     // pipeline sends with the source. Passing the bare thread here left every
@@ -1387,7 +1388,7 @@ async function fillBatch(env, batch, deps, generationController, { allowGenerati
         // Prove the source complete before reserving the single generation
         // slot. An unreadable/paywalled first candidate must not prevent this
         // pass from selecting the next story whose entire source is usable.
-        const thread = await deps.fetchThread(`https://news.ycombinator.com/item?id=${hnId}`)
+        const thread = await deps.fetchThread(`https://news.ycombinator.com/item?id=${hnId}`, pseudonymOptions(env))
         const preparedSource = await prepareEpisodeSource(thread, deps)
         // The linked article can say what the title does not ("Bill Draper" -> "... dies at 98").
         const sourceDeath = deathThreadMatch({
