@@ -803,6 +803,7 @@ async function createEpisodeWorkflow(env, preparedSource, {
       eventKey: 'source-completeness-verified',
     }],
     sourceCompleteness: sourceMetadata.sourceCompleteness,
+    articleUrl: thread.articleUrl ? thread.article?.url ?? thread.articleUrl : null,
     audioUrl: null,
     error: null,
     createdAt: nowIso(),

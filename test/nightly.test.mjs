@@ -595,6 +595,7 @@ test('nightly records full article and comment proof before creating a workflow'
   assert.equal(drama.sourceCompleteness.comments.fetched, 50)
   assert.equal(drama.sourceCompleteness.article.complete, true)
   assert.equal(drama.sourceCompleteness.article.url, 'https://publisher.example/full')
+  assert.equal(drama.articleUrl, 'https://publisher.example/full', 'the episode row carries the article its notes and page link')
   assert.match(drama.progress[0].message, /50\/50 comments and full article/)
 })
 

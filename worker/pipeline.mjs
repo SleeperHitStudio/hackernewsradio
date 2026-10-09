@@ -94,6 +94,7 @@ import {
   EPISODE_DESCRIPTION_DIRECTION,
   PLAN_APPROVAL_BODY,
   PUBLISHED_PROGRESS_MESSAGE,
+  showNotesLinks,
 } from './publishing.mjs'
 
 /**
@@ -218,6 +219,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
           commentCount: thread.total,
           points: thread.points ?? null,
           sourceCompleteness: sourceMetadata.sourceCompleteness,
+          // The episode's notes and page link the article the thread discusses.
+          articleUrl: thread.articleUrl ? thread.article?.url ?? thread.articleUrl : null,
         })
         await note(verifiedSourceProgress(thread), 'source-completeness-verified')
       }
@@ -1301,8 +1304,11 @@ export class HnrPipeline extends WorkflowEntrypoint {
           // grant is not covered by it, and would sit unpublishable forever.
           return { kind: 'blocked', code: publishing.code, reason: publishing.reason }
         }
+        // The notes link the episode's thread and article (from its row), and name nobody by username.
+        const showNotes = showNotesLinks(await getDrama(db, dramaId))
         const { releaseId, alreadyPublished } = await sh.publishEpisode(seriesId, {
           title,
+          showNotes,
           descriptionDirection: EPISODE_DESCRIPTION_DIRECTION,
           artifactId,
           idempotencyKeyPrefix: publishKeyPrefix(dramaId, publishing.grant),

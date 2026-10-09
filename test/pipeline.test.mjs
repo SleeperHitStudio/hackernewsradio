@@ -687,14 +687,15 @@ function finishedEpisode(extra = {}) {
 
 test('publish-only under the standing approval publishes with no confirmation claim and never re-finalizes', async (t) => {
   const db = fakeD1({
-    episodes: [finishedEpisode()],
+    episodes: [finishedEpisode({ articleUrl: 'https://publisher.example/story' })],
     settings: { publishingSeriesId: SERIES, [PUBLISH_BLOCKED_ALERT_KEY]: { sentAt: '2026-09-28T00:00:00.000Z' } },
   })
   const net = fakeNetwork(t, (request) => {
     if (request.path === `/publishing-series/${SERIES}`) return [200, { series: GRANTED_SERIES }]
     if (request.path === `/publishing-series/${SERIES}/releases?limit=100`) return [200, { releases: [], nextCursor: null }]
     if (request.path === `/publishing-series/${SERIES}/releases`) return [200, { release: { id: 'release_1' } }]
-    if (request.path === '/publishing-releases/release_1/description/generate') return [200, {}]
+    if (request.path === '/publishing-releases/release_1/description/generate') return [200, { release: { id: 'release_1', description: 'A thread fights about tabs.' } }]
+    if (request.method === 'PATCH' && request.path === '/publishing-releases/release_1') return [200, { release: { id: 'release_1' } }]
     if (request.path === '/publishing-releases/release_1/publish') return [200, { release: { id: 'release_1', status: 'published' } }]
     throw new Error(`unexpected ${request.method} ${request.path}`)
   })
@@ -709,8 +710,17 @@ test('publish-only under the standing approval publishes with no confirmation cl
     `GET /publishing-series/${SERIES}/releases?limit=100`,
     `POST /publishing-series/${SERIES}/releases`,
     'POST /publishing-releases/release_1/description/generate',
+    'PATCH /publishing-releases/release_1',
     'POST /publishing-releases/release_1/publish',
   ], 'the publish step alone: no post-production, no finalize')
+  const notes = net.requests.find((r) => r.method === 'PATCH').body.description
+  assert.equal(notes, [
+    'A thread fights about tabs.',
+    '',
+    'The Hacker News thread: https://news.ycombinator.com/item?id=42',
+    'The article: https://publisher.example/story',
+    'Commenters are heard under invented names.',
+  ].join('\n'), 'the notes link the thread and the article the episode row records')
   const publish = net.requests.at(-1)
   assert.deepEqual(publish.body, {}, 'no userConfirmed: the grant is the approval')
   const grantScope = `g${Date.parse('2026-09-29T00:00:00.000Z').toString(36)}`
@@ -753,7 +763,8 @@ test('a feed refusal under the grant is recorded with its code, not swallowed', 
     if (request.path === `/publishing-series/${SERIES}`) return [200, { series: GRANTED_SERIES }]
     if (request.path === `/publishing-series/${SERIES}/releases?limit=100`) return [200, { releases: [], nextCursor: null }]
     if (request.path === `/publishing-series/${SERIES}/releases`) return [200, { release: { id: 'release_1' } }]
-    if (request.path === '/publishing-releases/release_1/description/generate') return [200, {}]
+    if (request.path === '/publishing-releases/release_1/description/generate') return [200, { release: { id: 'release_1', description: 'A thread fights about tabs.' } }]
+    if (request.method === 'PATCH' && request.path === '/publishing-releases/release_1') return [200, { release: { id: 'release_1' } }]
     if (request.path === '/publishing-releases/release_1/publish') {
       return refusal(400, 'validation_failed', '`userConfirmed: true` is required after the user explicitly approves publishing this release.')
     }

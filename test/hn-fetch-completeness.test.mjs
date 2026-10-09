@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { fetchThread as fetchPseudonymousThread, HNError, threadToTranscript } from '../worker/hn.mjs'
-import { pseudonymFor } from '../worker/pseudonyms.mjs'
+import { buildPseudonymMap } from '../worker/pseudonyms.mjs'
 
 const TEST_PSEUDONYM_KEY = 'hnr-test-pseudonym-key-0123456789'
 // Every capture names commenters by pseudonym, so every fetch here carries the key.
@@ -438,14 +438,12 @@ test('no Hacker News username leaves fetchThread: authors, the submitter and men
   }
 
   const thread = await fetchThread('1600', { fetchImpl, maxAttempts: 1 })
-  const names = {
-    rustacean42: await pseudonymFor('rustacean42', TEST_PSEUDONYM_KEY),
-    quietDev: await pseudonymFor('quietDev', TEST_PSEUDONYM_KEY),
-    submitter_77: await pseudonymFor('submitter_77', TEST_PSEUDONYM_KEY),
-    outsider_9: await pseudonymFor('outsider_9', TEST_PSEUDONYM_KEY),
-  }
+  const map = await buildPseudonymMap(['rustacean42', 'quietDev', 'submitter_77', 'outsider_9'], TEST_PSEUDONYM_KEY)
+  const names = Object.fromEntries(map)
 
   assert.equal(thread.pseudonymized, true)
+  assert.equal(new Set(Object.values(names)).size, 4, 'four people, four names')
+  for (const name of Object.values(names)) assert.match(name, /^[A-Z][a-z]+( [A-Z][a-z]+)?$/, 'a sayable name, never a handle')
   assert.equal(thread.author, names.submitter_77)
   assert.deepEqual(thread.comments.map((c) => c.author), [names.rustacean42, names.quietDev])
   assert.equal(thread.comments[0].text, `I think ${names.submitter_77} is wrong. cc @${names.outsider_9}`)
@@ -457,6 +455,7 @@ test('no Hacker News username leaves fetchThread: authors, the submitter and men
   for (const handle of Object.keys(names)) {
     assert.ok(!transcript.toLowerCase().includes(handle.toLowerCase()), `${handle} must not reach the writer`)
   }
-  assert.match(transcript, /Commenters are named by pseudonym, never by their Hacker News username/)
+  assert.match(transcript, /Commenters go by INVENTED NAMES, never by their Hacker News username/)
+  assert.match(transcript, /introduce one on air as "a commenter we'll call Marlowe"/)
   assert.match(transcript, new RegExp(`posted by ${names.submitter_77}`))
 })

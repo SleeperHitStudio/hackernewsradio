@@ -53,16 +53,25 @@ episode. HNR marks the upload `sourceContextMode: full`; Sleeper Hit verifies
 the retained-text hash and HNR's article/self-post/comment/size declaration before
 passing the exact source to both planning and final script writing.
 
-**Commenters go by pseudonym.** No Hacker News username leaves the fetch:
-every comment author, the submitter, and usernames mentioned in comments or
-the self-post are replaced by a stable pseudonym (`AmberHeron42`), keyed by the
-`HNR_PSEUDONYM_KEY` secret (`worker/pseudonyms.mjs`). The same username gets the
-same pseudonym in every episode, so a running bit about one commenter still
-works, and the writer, the scripts, the show notes and the feed never carry a
-real handle. The transcript refuses a thread that was not renamed, and a
-deployment that can publish refuses to fetch without the key. The linked
-article is left verbatim. A short plain-word username (`dang`) is renamed only
-in its `@` form inside other people's text, so ordinary words are not rewritten.
+**Commenters go by invented names.** No Hacker News username leaves the
+fetch: every comment author, the submitter, and usernames mentioned in comments
+or the self-post are replaced by a plain given name (`worker/pseudonyms.mjs`),
+which the hosts introduce on air as "a commenter we'll call Marlowe". A name is
+drawn by a keyed hash of the username (the `HNR_PSEUDONYM_KEY` secret), so it
+cannot be traced back without the key and a commenter usually keeps it from
+episode to episode. Within an episode every commenter has exactly one name and
+no two share one (a large thread falls back to given name and surname). The
+writer, the scripts, the show notes and the feed never carry a real handle. The
+transcript refuses a thread that was not renamed, and a deployment that can
+publish refuses to fetch without the key. The linked article is left verbatim.
+Known limit: a short plain-word username (`dang`) is renamed only in its `@` form
+inside other people's text, so ordinary words are not rewritten. Episodes
+published before this change are unchanged (owner decision, 2026-10-09).
+
+**Show notes link the sources.** Every new episode's notes (the RSS
+description and the episode page) link the Hacker News thread and the article
+it discusses, and name nobody by username: the platform writes the one-line
+description from the script, and HNR appends the links before publishing.
 
 **One source per thread.** Each upload carries the thread's identity as
 top-level `producer: "hackernewsradio"` + `externalId: "<HN item id>"`. A retry

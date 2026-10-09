@@ -175,6 +175,7 @@ export async function startGeneration(request, env, url, {
       eventKey: 'source-completeness-verified',
     }],
     sourceCompleteness: sourceMetadata.sourceCompleteness,
+    articleUrl: thread.articleUrl ? thread.article?.url ?? thread.articleUrl : null,
     audioUrl: null,
     error: null,
     createdAt: new Date().toISOString(),

@@ -14,8 +14,8 @@ import { pseudonymizeThread } from './pseudonyms.mjs'
  * is the only honest way to make every *generated* episode fully grounded.
  *
  * - No Hacker News username leaves `fetchThread`: authors, the submitter and
- *   mentions in the text are replaced by stable pseudonyms (pseudonyms.mjs),
- *   and the transcript refuses a thread that was not pseudonymized.
+ *   mentions in the text are replaced by invented names (pseudonyms.mjs),
+ *   and the transcript refuses a thread that was not renamed.
  */
 
 export const HN_FIREBASE_BASE = 'https://hacker-news.firebaseio.com/v0'
@@ -428,7 +428,7 @@ function hnItemTime(seconds) {
 /**
  * Fetch one complete, count-verified HN thread. A comment URL is resolved all
  * the way to its story before the snapshot is taken. Every username in it is
- * replaced by its pseudonym before it is returned, so `pseudonymKey` is
+ * replaced by its invented name before it is returned, so `pseudonymKey` is
  * required (`pseudonymOptions(env)` in pseudonyms.mjs): a caller that forgets
  * it is refused instead of receiving real handles.
  */
@@ -440,7 +440,7 @@ export async function fetchThread(input, {
   pseudonymKey,
 } = {}) {
   if (typeof pseudonymKey !== 'string' || !pseudonymKey) {
-    throw new HNError('Hacker News threads are fetched only with a pseudonym key: commenters are never named by username.', {
+    throw new HNError('Hacker News threads are fetched only with a naming key: commenters are never named by username.', {
       code: 'pseudonym_key_missing',
     })
   }
@@ -821,7 +821,7 @@ export function threadToTranscript(thread, {
 } = {}) {
   assertCompleteThread(thread)
   if (thread.pseudonymized !== true) {
-    throw new HNError('The thread still carries Hacker News usernames; only a pseudonymized thread is passed to the writer.', {
+    throw new HNError('The thread still carries Hacker News usernames; only a renamed thread is passed to the writer.', {
       code: 'thread_not_pseudonymized',
     })
   }
@@ -860,7 +860,7 @@ export function threadToTranscript(thread, {
     lines.push('')
   }
   lines.push(`## COMPLETE COMMENT THREAD (all ${thread.total} comments)`)
-  lines.push('Every visible comment in the verified snapshot follows. Commenters are named by pseudonym, never by their Hacker News username: use each pseudonym exactly as written, and never guess, restore or invent a real username. Preserve pseudonyms, quotes, reply context, minority positions, and late branches.')
+  lines.push('Every visible comment in the verified snapshot follows. Commenters go by INVENTED NAMES, never by their Hacker News username: use each name exactly as written, introduce one on air as "a commenter we\'ll call Marlowe", and never guess, restore or invent a real username. Preserve names, quotes, reply context, minority positions, and late branches.')
   lines.push(`<<<HNR_COMMENTS_BEGIN count=${thread.total}>>>`)
   lines.push('')
   for (const comment of comments) {
@@ -938,8 +938,8 @@ export function threadGrewMaterially(previousComments, currentComments) {
  * cross-service contract: Sleeper Hit must hash-check and pass this exact text
  * to both the planner and final table-read writer, never a digest or preview.
  * Which thread it is travels as the source's identity (`sourceIdentity`), not
- * in here. `commenterNames: 'pseudonym'` marks a capture whose commenters are
- * named by pseudonym, so a reused capture taken before pseudonyms (which
+ * in here. `commenterNames: 'pseudonym'` marks a capture whose commenters go
+ * by invented names, so a reused capture taken before the renaming (which
  * still carries usernames) is recognised and retired rather than written from.
  */
 export const COMMENTER_NAMES = 'pseudonym'
@@ -947,7 +947,7 @@ export const COMMENTER_NAMES = 'pseudonym'
 export function buildSourceMetadata(thread, transcript) {
   assertCompleteThread(thread)
   if (thread.pseudonymized !== true) {
-    throw new HNError('Source metadata is built only for a pseudonymized thread.', { code: 'thread_not_pseudonymized' })
+    throw new HNError('Source metadata is built only for a renamed thread.', { code: 'thread_not_pseudonymized' })
   }
   const content = String(transcript ?? '')
   const byteSize = new TextEncoder().encode(content).byteLength
