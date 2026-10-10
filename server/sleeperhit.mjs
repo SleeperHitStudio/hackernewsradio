@@ -74,7 +74,7 @@ export class SleeperHit {
 
   /** Add the verified thread/article pack as a plain-text source. */
   /** `producer` + `externalId` identify the thread: a repeat returns the existing source. */
-  async addTextSource(projectId, { content, label, metadata, producer, externalId }) {
+  async addTextSource(projectId, { content, label, metadata, producer, externalId, originatedAt }) {
     const res = await this.request(`/story-projects/${projectId}/sources`, {
       method: 'POST', idempotencyKey: true,
       body: {
@@ -83,6 +83,8 @@ export class SleeperHit {
         ...(label ? { label } : {}),
         ...(producer ? { producer } : {}),
         ...(externalId ? { externalId: String(externalId) } : {}),
+        // When the thread was posted: the platform files the episode by its month.
+        ...(originatedAt ? { originatedAt } : {}),
         ...(metadata ? { metadata } : {}),
       },
     })
@@ -182,15 +184,15 @@ export class SleeperHit {
   // ── Podcast publishing ──────────────────────────────────────────────────────
 
   /** Promote a finalized artifact into the series and queue immediate publish.
-   *  The series' public RSS feed picks it up (podcast apps poll the feed). */
-  async publishEpisode(seriesId, { title, descriptionDirection, artifactId, seasonNumber = 1 }) {
+   *  The series' public RSS feed picks it up (podcast apps poll the feed).
+   *  No `seasonNumber`: the platform files the release in its episode's season. */
+  async publishEpisode(seriesId, { title, descriptionDirection, artifactId }) {
     const res = await this.request(`/publishing-series/${seriesId}/releases`, {
       method: 'POST', idempotencyKey: true,
       body: {
         title: title.slice(0, 200),
         sourceArtifactId: artifactId,
         type: 'episode',
-        seasonNumber,
       },
     })
     const releaseId = (res.release ?? res).id

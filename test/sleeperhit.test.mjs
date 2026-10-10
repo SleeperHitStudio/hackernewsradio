@@ -53,6 +53,21 @@ test('text source uploads carry the item identity top-level and the full-context
   assert.equal('sourceProducer' in calls[0].options.body.metadata, false)
 })
 
+test('a text source says when its thread was posted, top-level, and omits it when unknown', async () => {
+  const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
+  const bodies = []
+  client.request = async (_path, options) => {
+    bodies.push(options.body)
+    return { source: { id: 'source_1', status: 'READY' } }
+  }
+  await client.addTextSource('project_1', {
+    content: 'x', producer: 'hackernewsradio', externalId: '42', originatedAt: '2026-09-30T23:30:00.000Z',
+  })
+  await client.addTextSource('project_1', { content: 'x', producer: 'hackernewsradio', externalId: '43' })
+  assert.equal(bodies[0].originatedAt, '2026-09-30T23:30:00.000Z')
+  assert.equal('originatedAt' in bodies[1], false)
+})
+
 test('a repeat submission of the same thread reports the existing source and what it captured', async () => {
   const client = new SleeperHit({ baseUrl: 'https://example.test', apiKey: 'test' })
   client.request = async () => ({
@@ -205,6 +220,8 @@ test('normal publish uses deterministic keys across release, description, and pu
     'episode-publish-description',
     'episode-publish-publish',
   ])
+  // The release names no season: the platform files it in its episode's.
+  assert.deepEqual(calls[1].options.body, { title: 'Episode', sourceArtifactId: 'artifact_1', type: 'episode' })
 })
 
 function releaseListing(releases) {

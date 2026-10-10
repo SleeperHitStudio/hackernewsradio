@@ -191,6 +191,7 @@ function completeThread(id = '42', count = 50) {
     articleUrl: null,
     storyText: 'Complete self-post body.',
     author: 'submitter',
+    postedAt: '2026-09-30T23:30:00.000Z',
     comments,
     total: count,
     points: 100,
@@ -286,6 +287,9 @@ test('a new episode writes the canon voices, sends the thread identity, reuses a
   assert.equal('sourceProducer' in upload.body.metadata, false)
   assert.equal('hnStoryId' in upload.body.metadata, false)
   assert.equal(upload.body.metadata.sourceContextMode, 'full')
+  // When the thread was posted, top-level: the platform files the episode in
+  // that month's season, not the month it was captured or aired.
+  assert.equal(upload.body.originatedAt, '2026-09-30T23:30:00.000Z')
   assert.equal(net.requests.some((r) => r.method === 'DELETE'), false, 'no recapture without a failed-before-plan attempt')
 
   // A 409 project_precondition_failed is STATE: one plan request, no retry.
@@ -665,6 +669,10 @@ test('publish-only under the standing approval publishes with no confirmation cl
   assert.deepEqual(publish.body, {}, 'no userConfirmed: the grant is the approval')
   const grantScope = `g${Date.parse('2026-09-29T00:00:00.000Z').toString(36)}`
   assert.equal(net.requests[2].key, `drama_1-publish-${grantScope}-release`)
+  // No season: the platform files the release in its episode's (the month the
+  // thread was posted). A hard-coded 1 put every new episode in Season 1.
+  assert.equal('seasonNumber' in net.requests[2].body, false)
+  assert.equal(net.requests[2].body.sourceArtifactId, 'artifact_1')
   const drama = db.rows.get('drama_1')
   assert.equal(drama.status, 'ready')
   assert.equal(drama.publishState, 'published')

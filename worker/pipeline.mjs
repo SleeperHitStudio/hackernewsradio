@@ -15,6 +15,7 @@ import {
   fetchArticle,
   fetchThread,
   sourceIdentity,
+  sourceOrigin,
   threadGrewMaterially,
   threadToTranscript,
   verifiedSourceProgress,
@@ -269,6 +270,9 @@ export class HnrPipeline extends WorkflowEntrypoint {
             label: `HN thread ${thread.id}`,
             metadata: sourceMetadata,
             ...identity,
+            // When the thread was posted: the platform files the episode in
+            // that month's season (HNRadio's seasons are calendar months).
+            ...sourceOrigin(thread),
             idempotencyKey,
           }), { replaySafe: true })
         await note('Adding the verified full article and comment thread to HNRadio…')
@@ -1278,7 +1282,6 @@ export class HnrPipeline extends WorkflowEntrypoint {
           title,
           descriptionDirection: EPISODE_DESCRIPTION_DIRECTION,
           artifactId,
-          seasonNumber: 1,
           idempotencyKeyPrefix: publishKeyPrefix(dramaId, publishing.grant),
           grantedAt: publishing.grant?.grantedAt ?? null,
         })

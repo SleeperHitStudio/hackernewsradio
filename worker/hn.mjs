@@ -414,6 +414,12 @@ export function hnCommentCoverageFloor(expected) {
   return Math.ceil(target * (1 - HN_COMMENT_COVERAGE_TOLERANCE))
 }
 
+/** An HN item's `time` (Unix seconds) as ISO 8601, or null when HN did not give one. */
+function hnItemTime(seconds) {
+  const value = Number(seconds)
+  return Number.isFinite(value) && value > 0 ? new Date(value * 1000).toISOString() : null
+}
+
 /**
  * Fetch one complete, count-verified HN thread. A comment URL is resolved all
  * the way to its story before the snapshot is taken.
@@ -479,6 +485,9 @@ export async function fetchThread(input, {
         storyText: htmlToText(root.text || ''),
         author: root.by || 'unknown',
         points: root.score ?? null,
+        // When the story was posted (the official item's `time`). Sleeper Hit
+        // files the episode in the season for this month, not the capture's.
+        postedAt: hnItemTime(root.time),
         comments,
         total: comments.length,
         completeness: {
@@ -870,6 +879,19 @@ export function sourceIdentity(thread) {
     throw new HNError('A Hacker News source needs a numeric item id as its identity.', { code: 'hn_source_identity' })
   }
   return { producer: SOURCE_PRODUCER, externalId }
+}
+
+/**
+ * When the thread was posted, for POST /sources `originatedAt`. HNRadio's
+ * seasons are calendar months (`seasonCadence: "monthly"` on the project), and
+ * the platform files each episode under the month its source originated: a
+ * thread posted at 23:30 UTC on 30 September is a September episode even when
+ * it airs in October. Empty when the capture has no posting time (an older
+ * replayed Workflow step); the platform then uses when the source was added.
+ */
+export function sourceOrigin(thread) {
+  const postedAt = typeof thread?.postedAt === 'string' ? thread.postedAt : ''
+  return postedAt && Number.isFinite(Date.parse(postedAt)) ? { originatedAt: postedAt } : {}
 }
 
 /** A capture is worth replacing only when the thread has grown materially since. */

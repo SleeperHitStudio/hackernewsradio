@@ -61,6 +61,15 @@ Only an attempt that failed *before any plan existed*, on a thread that has
 since grown materially (10+ comments and 20%+), retires the old capture
 (`DELETE`) and takes a fresh one.
 
+**Seasons are months.** HNRadio's seasons are the calendar months its threads
+were posted ("September 2026"), set on the Sleeper Hit side with the project's
+`seasonCadence: "monthly"`. Each upload sends the thread's posting time (the HN
+item's `time`) as the source's `originatedAt`; the platform files the episode
+under that month (UTC), adding the month after the last season when it is new.
+Releases are created with no `seasonNumber`, so each one takes its episode's
+season. A thread posted late on 30 September is a September episode even when
+it airs in October.
+
 **Voice pinning:** the first episode *adopts* whatever voices the planner cast
 for the four hosts (saved in the `settings` table under `pinnedVoices`), and
 every later episode recasts its hosts back to that set — the show sounds the
