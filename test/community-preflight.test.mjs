@@ -55,7 +55,7 @@ function completeThread(id = '42') {
   }))
   return {
     id, title: `Story ${id}`, url: `https://news.ycombinator.com/item?id=${id}`, articleUrl: null,
-    storyText: 'Self post.', author: 'submitter', comments, total: comments.length, points: 10,
+    storyText: 'Self post.', author: 'submitter', pseudonymized: true, comments, total: comments.length, points: 10,
     completeness: { comments: { complete: true, expected: comments.length, fetched: comments.length, capturedAt: '2026-09-29T00:00:00.000Z' } },
   }
 }
@@ -252,4 +252,33 @@ test('the site does not serve a dropped episode: no episode read, no landing pag
   const page = await worker.fetch(new Request('https://hnradio.net/e/49949438'), env)
   assert.equal(page.status, 404)
   assert.doesNotMatch(await page.text(), /Cringely/)
+})
+
+test('a visitor\'s thread is fetched with the pseudonym key, and a publishing env without one fetches nothing', async () => {
+  const { env, creates } = envWith(fakeDb({ settings: { publishingSeriesId: 'series_hnr' } }))
+  const keys = []
+  await startGeneration({}, { ...env, HNR_PSEUDONYM_KEY: 'hnr-test-pseudonym-key-0123456789' }, 'https://news.ycombinator.com/item?id=42', {
+    requireEntitlement: false,
+    deps: {
+      fetchThread: async (_url, options) => { keys.push(options?.pseudonymKey); return completeThread('42') },
+      readReadiness: async () => READY,
+    },
+  })
+  assert.deepEqual(keys, ['hnr-test-pseudonym-key-0123456789'])
+  assert.equal(creates.length, 1)
+
+  const fetched = []
+  const { env: publishing, creates: none } = envWith(fakeDb({ settings: { publishingSeriesId: 'series_hnr' } }))
+  await assert.rejects(
+    startGeneration({}, { ...publishing, SLEEPERHIT_API_KEY: 'sh_live_key' }, 'https://news.ycombinator.com/item?id=43', {
+      requireEntitlement: false,
+      deps: {
+        fetchThread: async (url) => { fetched.push(url); return completeThread('43') },
+        readReadiness: async () => READY,
+      },
+    }),
+    (error) => error.code === 'pseudonym_key_missing',
+  )
+  assert.deepEqual(fetched, [], 'no thread is fetched without the key')
+  assert.equal(none.length, 0, 'no Workflow')
 })

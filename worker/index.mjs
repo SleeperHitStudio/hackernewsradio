@@ -6,6 +6,7 @@
  */
 import { listDramas, getDrama, findByHnIdAndMode, upsertDrama, deleteOtherEpisodesOfThread, getSetting, isDroppedEpisode } from './store.mjs'
 import { deathThreadMatch } from './death-thread.mjs'
+import { pseudonymOptions } from './pseudonyms.mjs'
 import {
   buildSourceMetadata,
   fetchThread,
@@ -122,7 +123,7 @@ export async function startGeneration(request, env, url, {
     readReadiness = readShowReadiness,
     hydrateArticle = hydrateThreadArticle,
   } = deps
-  const thread = await readThread(url)
+  const thread = await readThread(url, pseudonymOptions(env))
   // Owner rule (2026-10-04): the show never covers a thread about a real person's death, nightly or requested.
   if (deathThreadMatch({ title: thread.title, storyText: thread.storyText })) throw notCoveredError('death_thread')
   const existing = await findByHnIdAndMode(env.DB, thread.id, 'podcast')
@@ -174,6 +175,7 @@ export async function startGeneration(request, env, url, {
       eventKey: 'source-completeness-verified',
     }],
     sourceCompleteness: sourceMetadata.sourceCompleteness,
+    articleUrl: thread.articleUrl ? thread.article?.url ?? thread.articleUrl : null,
     audioUrl: null,
     error: null,
     createdAt: new Date().toISOString(),

@@ -1,5 +1,7 @@
 
 
+import { composeShowNotes } from './publishing.mjs'
+
 /**
  * A tiny standalone client for the Sleeper Hit Studio Story API (`/api/v1`) —
  * the same surface the official CLI / MCP / mobile app drive. We don't import
@@ -197,6 +199,8 @@ export class SleeperHit {
       deduplicated: res.deduplicated === true,
       capturedComments: typeof fetched === 'number' && Number.isFinite(fetched) ? fetched : null,
       sourceCompleteness: completeness,
+      // How the capture names commenters ('pseudonym'); null for a capture taken before pseudonyms.
+      commenterNames: typeof source?.metadata?.commenterNames === 'string' ? source.metadata.commenterNames : null,
       status: source.status ?? null,
     }
   }
@@ -360,7 +364,11 @@ export class SleeperHit {
     artifactId,
     idempotencyKeyPrefix,
     grantedAt = null,
+    showNotes,
   }) {
+    // Every new release's notes link the thread (and the article): refuse before anything is created.
+    const notesFor = (description) => composeShowNotes(description, showNotes)
+    notesFor('')
     const grantedMs = Date.parse(grantedAt ?? '')
     const existing = await this.listReleasesForArtifact(seriesId, artifactId)
     const statusOf = (release) => String(release?.status || '').toLowerCase()
@@ -389,9 +397,14 @@ export class SleeperHit {
       release = res.release ?? res
     }
     const releaseId = release.id
-    await this.request(`/publishing-releases/${releaseId}/description/generate`, {
+    const generated = await this.request(`/publishing-releases/${releaseId}/description/generate`, {
       method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-description` : true,
       body: { direction: descriptionDirection?.slice(0, 2_000) },
+    })
+    // The generated sentence, then the links: written onto the release before it is published.
+    await this.request(`/publishing-releases/${releaseId}`, {
+      method: 'PATCH', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-notes` : true,
+      body: { description: notesFor(generated?.release?.description) },
     })
     await this.request(`/publishing-releases/${releaseId}/publish`, {
       method: 'POST', idempotencyKey: idempotencyKeyPrefix ? `${idempotencyKeyPrefix}-publish` : true, body: {},

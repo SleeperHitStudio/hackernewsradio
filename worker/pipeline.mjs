@@ -8,6 +8,7 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers'
 import { SleeperHit, SleeperHitError } from './sleeperhit.mjs'
 import {
+  COMMENTER_NAMES,
   HNError,
   INDEX_LAG_REFETCH_BACKOFF_SECONDS,
   buildSourceMetadata,
@@ -21,6 +22,7 @@ import {
   verifiedSourceProgress,
 } from './hn.mjs'
 import { classifySystemicFailure } from './failure-classification.mjs'
+import { pseudonymOptions } from './pseudonyms.mjs'
 import { enforceSfxCanon } from './sfx-canon.mjs'
 import {
   SHOW_MEMORY_KEY,
@@ -92,6 +94,7 @@ import {
   EPISODE_DESCRIPTION_DIRECTION,
   PLAN_APPROVAL_BODY,
   PUBLISHED_PROGRESS_MESSAGE,
+  showNotesLinks,
 } from './publishing.mjs'
 
 /**
@@ -102,7 +105,7 @@ import {
  * One that never converges is not uploaded: it fails as `hn_thread_incomplete`, the source-lag class
  * the nightly holds for free and retries next tick, instead of a refused upload.
  */
-async function convergeIndexLag(step, thread, url, note) {
+async function convergeIndexLag(step, thread, url, note, fetchOptions) {
   let current = thread
   for (const [index, seconds] of INDEX_LAG_REFETCH_BACKOFF_SECONDS.entries()) {
     const lag = commentIndexLag(current)
@@ -112,7 +115,7 @@ async function convergeIndexLag(step, thread, url, note) {
       `index-lag-refetch-${index + 1}`,
     )
     await step.sleep(`index lag wait ${index + 1}`, `${seconds} seconds`)
-    current = await runWorkflowStepOnce(step, `refetch lagging thread ${index + 1}`, () => fetchThread(url))
+    current = await runWorkflowStepOnce(step, `refetch lagging thread ${index + 1}`, () => fetchThread(url, fetchOptions))
   }
   const lag = commentIndexLag(current)
   if (!lag) return current
@@ -188,6 +191,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
       if (staggerSec > 0) await step.sleep('stagger', `${staggerSec} seconds`)
 
       const recoversExistingSource = isRepair || isResume || isUpstreamRecovery
+      // Commenters are named only by pseudonym: the key is resolved before anything is fetched.
+      const fetchOptions = recoversExistingSource ? null : pseudonymOptions(env)
       let thread = recoversExistingSource
         ? {
             id: String(recoveryOriginal?.hnId ?? ''),
@@ -196,7 +201,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
             total: Number(recoveryOriginal?.commentCount ?? 0),
             points: recoveryOriginal?.points ?? null,
           }
-        : await runWorkflowStepOnce(step, 'fetch complete thread', () => fetchThread(url))
+        : await runWorkflowStepOnce(step, 'fetch complete thread', () => fetchThread(url, fetchOptions))
       if (recoversExistingSource && !thread.id) {
         throw new Error(`Cannot recover ${dramaId}: the episode has no Hacker News source identity.`)
       }
@@ -204,7 +209,7 @@ export class HnrPipeline extends WorkflowEntrypoint {
       let sourceTranscript = null
       let sourceMetadata = null
       if (!recoversExistingSource) {
-        thread = await convergeIndexLag(step, thread, url, note)
+        thread = await convergeIndexLag(step, thread, url, note, fetchOptions)
         thread.article = await runWorkflowStepOnce(step, 'fetch complete source article', async () =>
           thread.articleUrl ? fetchArticle(thread.articleUrl) : null)
         sourceTranscript = threadToTranscript(thread)
@@ -214,6 +219,8 @@ export class HnrPipeline extends WorkflowEntrypoint {
           commentCount: thread.total,
           points: thread.points ?? null,
           sourceCompleteness: sourceMetadata.sourceCompleteness,
+          // The episode's notes and page link the article the thread discusses.
+          articleUrl: thread.articleUrl ? thread.article?.url ?? thread.articleUrl : null,
         })
         await note(verifiedSourceProgress(thread), 'source-completeness-verified')
       }
@@ -287,17 +294,36 @@ export class HnrPipeline extends WorkflowEntrypoint {
           // capture the first attempt paid for.
           const recapture = event.payload.sourceRecapture ?? null
           const previousComments = captured.capturedComments ?? recapture?.previousCommentCount ?? null
-          const otherLiveEpisodes = recapture
+          // A capture taken before commenters went by pseudonym still names them by username, so it is
+          // never written from: it is retired and the thread captured again, renamed.
+          const namesUsernames = captured.commenterNames !== COMMENTER_NAMES
+          const otherLiveEpisodes = recapture && !namesUsernames
             ? await runWorkflowStepOnce(step, 'other live episodes of this thread', async () =>
               (await listLiveEpisodesOfThread(db, thread.id, 'podcast', dramaId)).map((episode) => episode.id))
             : []
-          if (recapture && otherLiveEpisodes.length) {
+          if (namesUsernames) {
+            await note(`The captured source for HN thread ${thread.id} names commenters by username — recapturing it with pseudonyms…`)
+            const staleSourceId = captured.id
+            await this.hardStep(step, 'retire username source', async () => {
+              try {
+                await sh.deleteSource(projectId, staleSourceId, {
+                  idempotencyKey: `${dramaId}-source-retire-usernames-${staleSourceId}`,
+                })
+              } catch (error) {
+                if (Number(error?.status) !== 404) throw error
+              }
+            }, { replaySafe: true })
+            captured = capturedSource(await addSource('recapture source with pseudonyms', `${dramaId}-source-pseudonyms`))
+            recaptured = true
+          } else if (recapture && otherLiveEpisodes.length) {
             await note(
               `Keeping the captured source for HN thread ${thread.id}: episode ${otherLiveEpisodes.join(', ')} of this thread is in flight and may be reading it.`,
               'source-recapture-skipped',
             )
           }
-          if (recapture && !otherLiveEpisodes.length && threadGrewMaterially(previousComments, thread.total)) {
+          if (namesUsernames) {
+            // Recaptured above, renamed; nothing more to decide.
+          } else if (recapture && !otherLiveEpisodes.length && threadGrewMaterially(previousComments, thread.total)) {
             await note(`HN thread ${thread.id} grew from ${previousComments} to ${thread.total} comments since the failed attempt — recapturing it…`)
             const staleSourceId = captured.id
             await this.hardStep(step, 'retire stale source', async () => {
@@ -1278,8 +1304,11 @@ export class HnrPipeline extends WorkflowEntrypoint {
           // grant is not covered by it, and would sit unpublishable forever.
           return { kind: 'blocked', code: publishing.code, reason: publishing.reason }
         }
+        // The notes link the episode's thread and article (from its row), and name nobody by username.
+        const showNotes = showNotesLinks(await getDrama(db, dramaId))
         const { releaseId, alreadyPublished } = await sh.publishEpisode(seriesId, {
           title,
+          showNotes,
           descriptionDirection: EPISODE_DESCRIPTION_DIRECTION,
           artifactId,
           idempotencyKeyPrefix: publishKeyPrefix(dramaId, publishing.grant),

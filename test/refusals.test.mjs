@@ -198,10 +198,10 @@ test('a 402 recovery re-sends the refused key; every other job gets its own', ()
 
 test('an add-source result reads as one shape: the client\'s', () => {
   const completeness = { comments: { fetched: 12 } }
-  assert.deepEqual(capturedSource({ id: 's', deduplicated: true, capturedComments: 12, sourceCompleteness: completeness }),
-    { id: 's', deduplicated: true, capturedComments: 12, sourceCompleteness: completeness })
+  assert.deepEqual(capturedSource({ id: 's', deduplicated: true, capturedComments: 12, sourceCompleteness: completeness, commenterNames: 'pseudonym' }),
+    { id: 's', deduplicated: true, capturedComments: 12, sourceCompleteness: completeness, commenterNames: 'pseudonym' })
   assert.deepEqual(capturedSource({ id: 's', capturedComments: null }),
-    { id: 's', deduplicated: false, capturedComments: null, sourceCompleteness: null })
+    { id: 's', deduplicated: false, capturedComments: null, sourceCompleteness: null, commenterNames: null })
   assert.equal(capturedSource('source_1').id, null, 'a bare id is not a source result')
 })
 
