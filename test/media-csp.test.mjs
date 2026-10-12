@@ -88,10 +88,11 @@ test('player, RSS and other runtime sources have no additional old-media-host pi
       }
     }
   }
-  for (const dir of ['worker/', 'server/', 'web/']) await walk(dir)
-  assert.deepEqual(violations, [])
+  for (const dir of ['worker/', 'server/', 'web/src/', 'web/public/']) await walk(dir)
   const player = await readFile(new URL('../web/src/App.jsx', import.meta.url), 'utf8')
   assert.match(player, /src=\{drama\.audioUrl\}/)
   const shell = await readFile(new URL('../web/index.html', import.meta.url), 'utf8')
+  if (shell.includes('files.sleeperhitlist.com')) violations.push('web/index.html')
+  assert.deepEqual(violations, [])
   assert.match(shell, /type="application\/rss\+xml"[^>]+href="https:\/\/sleeperhit\.studio\/api\/v1\/publishing-feeds\/hnr\.xml"/)
 })
