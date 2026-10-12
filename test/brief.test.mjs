@@ -337,7 +337,7 @@ test('the brief asks for four to six overlaps an episode, written so the platfor
   assert.ok(crosstalk, 'the notes have a CROSSTALK paragraph')
   assert.match(crosstalk, /every scene after the cold open has one \(OVERLAPPING\) line, a long scene two: four to six an episode/)
   assert.match(crosstalk, /comes DIRECTLY after it: no action line or sound cue between them/)
-  assert.match(crosstalk, /never a quote, a handle, a number or the punchline word/)
+  assert.match(crosstalk, /never a quote, a name, a number or the punchline word/)
   // One or two in a scene of 15-25 lines is well inside the platform's 30%-per-scene warning.
   assert.doesNotMatch(crosstalk, /three|every line/i)
   assert.ok(brief.creativeBrief.mustKnowBeforeWriting.some((line) => /the top rung CUTS IN \(OVERLAPPING\)/.test(line)))
@@ -349,4 +349,12 @@ test('the planner is told the hosts speak on Cartesia, never Hume', () => {
   const brief = buildBrief({ title: 't', total: 500, points: 100 }, 9)
   assert.match(brief.styleConstraints.voicePreference, /^Prefer Cartesia voices/)
   assert.doesNotMatch(JSON.stringify(brief), /\bHume\b/i)
+})
+
+test('commenters go by invented names, introduced naturally on air, never by username', () => {
+  const brief = buildBrief({ title: 't', total: 500, points: 100 }, 9)
+  assert.match(brief.creativeBrief.castNotes, /Commenters go ONLY by the invented name the source gives them, introduced as "a commenter we'll call Marlowe"; never a username/)
+  assert.match(brief.performanceNotes, /Introduce one naturally the first time \("a commenter we'll call Marlowe"\), then just the name\. Never a username or handle/)
+  // The writer is never asked to quote or cite anyone "by handle".
+  assert.doesNotMatch(JSON.stringify(brief), /by handle|handle first|handles who|representative handles/i)
 })

@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { fetchThread, HNError } from '../worker/hn.mjs'
+import { fetchThread as fetchPseudonymousThread, HNError, threadToTranscript } from '../worker/hn.mjs'
+import { buildPseudonymMap } from '../worker/pseudonyms.mjs'
+
+const TEST_PSEUDONYM_KEY = 'hnr-test-pseudonym-key-0123456789'
+// Every capture names commenters by pseudonym, so every fetch here carries the key.
+const fetchThread = (input, options = {}) => fetchPseudonymousThread(input, { pseudonymKey: TEST_PSEUDONYM_KEY, ...options })
 
 const json = (value) => new Response(JSON.stringify(value), {
   status: 200,
@@ -399,4 +404,58 @@ test('a short capture still reports the real target, not a flattered one', async
   assert.equal(proof.expected, 117)
   assert.equal(proof.fetched, 116)
   assert.equal(proof.complete, false)
+})
+
+test('fetchThread refuses to run without a pseudonym key, before any request', async () => {
+  let requests = 0
+  await assert.rejects(
+    () => fetchPseudonymousThread('100', { fetchImpl: async () => { requests++; throw new Error('no network') }, maxAttempts: 1 }),
+    (error) => error instanceof HNError && error.code === 'pseudonym_key_missing',
+  )
+  assert.equal(requests, 0, 'nothing is fetched without the key')
+})
+
+test('no Hacker News username leaves fetchThread: authors, the submitter and mentions are pseudonyms', async () => {
+  const fetchImpl = async (input) => {
+    const url = new URL(String(input))
+    if (url.hostname === 'hacker-news.firebaseio.com') {
+      return json({ id: 1600, type: 'story', title: 'Ask HN: naming things', by: 'submitter_77', descendants: 2, text: '<p>Ping @rustacean42 please</p>' })
+    }
+    if (url.pathname === '/api/v1/items/1600') {
+      return json({ id: 1600, children: [{ id: 1601, children: [{ id: 1602, children: [] }] }] })
+    }
+    if (url.pathname === '/api/v1/search_by_date') {
+      return json({
+        nbHits: 2,
+        nbPages: 1,
+        hits: [
+          { ...comment(1601, 1600, '<p>I think submitter_77 is wrong. cc @outsider_9</p>', 1, 1600), author: 'rustacean42' },
+          { ...comment(1602, 1601, '<p>rustacean42: agreed with @Submitter_77</p>', 2, 1600), author: 'quietDev' },
+        ],
+      })
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  }
+
+  const thread = await fetchThread('1600', { fetchImpl, maxAttempts: 1 })
+  const map = await buildPseudonymMap(['rustacean42', 'quietDev', 'submitter_77', 'outsider_9'], TEST_PSEUDONYM_KEY)
+  const names = Object.fromEntries(map)
+
+  assert.equal(thread.pseudonymized, true)
+  assert.equal(new Set(Object.values(names)).size, 4, 'four people, four names')
+  for (const name of Object.values(names)) assert.match(name, /^[A-Z][a-z]+( [A-Z][a-z]+)?$/, 'a sayable name, never a handle')
+  assert.equal(thread.author, names.submitter_77)
+  assert.deepEqual(thread.comments.map((c) => c.author), [names.rustacean42, names.quietDev])
+  assert.equal(thread.comments[0].text, `I think ${names.submitter_77} is wrong. cc @${names.outsider_9}`)
+  assert.equal(thread.comments[1].text, `${names.rustacean42}: agreed with @${names.submitter_77}`)
+  assert.equal(thread.storyText, `Ping @${names.rustacean42} please`)
+
+  thread.article = null
+  const transcript = threadToTranscript(thread)
+  for (const handle of Object.keys(names)) {
+    assert.ok(!transcript.toLowerCase().includes(handle.toLowerCase()), `${handle} must not reach the writer`)
+  }
+  assert.match(transcript, /Commenters go by INVENTED NAMES, never by their Hacker News username/)
+  assert.match(transcript, /introduce one on air as "a commenter we'll call Marlowe"/)
+  assert.match(transcript, new RegExp(`posted by ${names.submitter_77}`))
 })

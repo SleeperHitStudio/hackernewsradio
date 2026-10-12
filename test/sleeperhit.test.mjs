@@ -34,7 +34,7 @@ test('text source uploads carry the item identity top-level and the full-context
     idempotencyKey: 'episode-source',
   })
 
-  assert.deepEqual(captured, { id: 'source_1', deduplicated: false, capturedComments: null, sourceCompleteness: null, status: 'PENDING' })
+  assert.deepEqual(captured, { id: 'source_1', deduplicated: false, capturedComments: null, sourceCompleteness: null, commenterNames: null, status: 'PENDING' })
   assert.deepEqual(calls, [{
     path: '/story-projects/project_1/sources',
     options: {
@@ -75,7 +75,7 @@ test('a repeat submission of the same thread reports the existing source and wha
     source: {
       id: 'source_first',
       status: 'READY',
-      metadata: { sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } } },
+      metadata: { commenterNames: 'pseudonym', sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } } },
     },
   })
   const captured = await client.addTextSource('project_1', {
@@ -86,6 +86,7 @@ test('a repeat submission of the same thread reports the existing source and wha
     deduplicated: true,
     capturedComments: 57,
     sourceCompleteness: { comments: { complete: true, expected: 57, fetched: 57 } },
+    commenterNames: 'pseudonym',
     status: 'READY',
   })
 })
@@ -213,11 +214,13 @@ test('normal publish uses deterministic keys across release, description, and pu
     descriptionDirection: 'Describe it',
     artifactId: 'artifact_1',
     idempotencyKeyPrefix: 'episode-publish',
+    showNotes: { threadUrl: 'https://news.ycombinator.com/item?id=42' },
   })
   assert.deepEqual(result, { releaseId: 'release_1', alreadyPublished: false })
   assert.deepEqual(calls.slice(1).map((call) => call.options.idempotencyKey), [
     'episode-publish-release',
     'episode-publish-description',
+    'episode-publish-notes',
     'episode-publish-publish',
   ])
   // The release names no season: the platform files it in its episode's.
@@ -241,6 +244,7 @@ test('an artifact already on the feed is never released twice', async () => {
   }
   const result = await client.publishEpisode('series_1', {
     title: 'Episode', artifactId: 'artifact_1', idempotencyKeyPrefix: 'p', grantedAt: '2026-09-29T00:00:00.000Z',
+    showNotes: { threadUrl: 'https://news.ycombinator.com/item?id=42' },
   })
   assert.deepEqual(result, { releaseId: 'release_live', alreadyPublished: true })
   assert.deepEqual(calls.map((call) => call.method), ['GET'], 'no create, no publish')
@@ -260,11 +264,13 @@ test('a release the grant covers is reused; one made before the grant is cancele
   }
   const result = await client.publishEpisode('series_1', {
     title: 'Episode', artifactId: 'artifact_1', idempotencyKeyPrefix: 'p', grantedAt: '2026-10-01T00:00:00.000Z',
+    showNotes: { threadUrl: 'https://news.ycombinator.com/item?id=42' },
   })
   assert.deepEqual(result, { releaseId: 'release_after', alreadyPublished: false })
   assert.deepEqual(calls.slice(1).map((call) => `${call.method} ${call.path}`), [
     'POST /publishing-releases/release_before/cancel',
     'POST /publishing-releases/release_after/description/generate',
+    'PATCH /publishing-releases/release_after',
     'POST /publishing-releases/release_after/publish',
   ], 'no second release is created')
   assert.equal(calls[1].key, 'p-cancel-release_before')
@@ -283,12 +289,14 @@ test('a re-grant cancels the pre-grant release and creates exactly one new one',
   }
   const result = await client.publishEpisode('series_1', {
     title: 'Episode', artifactId: 'artifact_1', idempotencyKeyPrefix: 'p', grantedAt: '2026-10-01T00:00:00.000Z',
+    showNotes: { threadUrl: 'https://news.ycombinator.com/item?id=42' },
   })
   assert.equal(result.releaseId, 'release_new')
   assert.deepEqual(calls.slice(1).map((call) => `${call.method} ${call.path}`), [
     'POST /publishing-releases/release_before/cancel',
     'POST /publishing-series/series_1/releases',
     'POST /publishing-releases/release_new/description/generate',
+    'PATCH /publishing-releases/release_new',
     'POST /publishing-releases/release_new/publish',
   ])
 })

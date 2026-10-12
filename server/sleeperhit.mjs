@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { composeShowNotes } from '../worker/publishing.mjs'
 
 /**
  * A tiny standalone client for the Sleeper Hit Studio Story API (`/api/v1`) —
@@ -186,7 +187,9 @@ export class SleeperHit {
   /** Promote a finalized artifact into the series and queue immediate publish.
    *  The series' public RSS feed picks it up (podcast apps poll the feed).
    *  No `seasonNumber`: the platform files the release in its episode's season. */
-  async publishEpisode(seriesId, { title, descriptionDirection, artifactId }) {
+  async publishEpisode(seriesId, { title, descriptionDirection, artifactId, showNotes }) {
+    // The notes link the thread (and the article) and name nobody by username: refuse before creating.
+    composeShowNotes('', showNotes)
     const res = await this.request(`/publishing-series/${seriesId}/releases`, {
       method: 'POST', idempotencyKey: true,
       body: {
@@ -196,9 +199,13 @@ export class SleeperHit {
       },
     })
     const releaseId = (res.release ?? res).id
-    await this.request(`/publishing-releases/${releaseId}/description/generate`, {
+    const generated = await this.request(`/publishing-releases/${releaseId}/description/generate`, {
       method: 'POST', idempotencyKey: true,
       body: { direction: descriptionDirection?.slice(0, 2_000) },
+    })
+    await this.request(`/publishing-releases/${releaseId}`, {
+      method: 'PATCH', idempotencyKey: true,
+      body: { description: composeShowNotes(generated?.release?.description, showNotes) },
     })
     await this.request(`/publishing-releases/${releaseId}/publish`, {
       method: 'POST', idempotencyKey: true, body: {},

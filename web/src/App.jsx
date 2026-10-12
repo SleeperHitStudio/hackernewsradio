@@ -87,6 +87,13 @@ function EpisodeCard({ drama, highlighted }) {
       </header>
       <div className="card__meta">
         <a href={drama.url} target="_blank" rel="noreferrer">thread ↗</a>
+        {/* Episodes made since commenters went by invented names link the article the thread discusses. */}
+        {drama.articleUrl && (
+          <>
+            <span>·</span>
+            <a href={drama.articleUrl} target="_blank" rel="noreferrer">article ↗</a>
+          </>
+        )}
         <span>·</span>
         <span>{drama.commentCount} comments</span>
         <span>·</span>

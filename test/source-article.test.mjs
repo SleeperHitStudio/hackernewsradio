@@ -13,6 +13,7 @@ const baseThread = {
   title: 'Tailscale did not stop the intrusion',
   url: 'https://news.ycombinator.com/item?id=1',
   author: 'bluehatbrit',
+  pseudonymized: true,
   points: 597,
   storyText: '',
   total: 2,
