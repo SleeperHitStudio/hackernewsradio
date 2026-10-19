@@ -4,10 +4,10 @@
   "main": "worker/index.mjs",
   "compatibility_date": "2026-07-12",
   "workers_dev": true,
-  "routes": [
-    { "pattern": "hnradio.net", "custom_domain": true },
-    { "pattern": "www.hnradio.net", "custom_domain": true }
-  ],
+  // No routes: hnradio.net and www.hnradio.net are served by Sleeper Hit Studio's show site
+  // (Worker `sleeper-show-apex`) since 2026-10-19, when HNR moved onto Sleeper. This Worker is
+  // held (D1 `workflowDeployGate` owner hold) and reachable only on workers.dev. Never add the
+  // hnradio.net custom domains back here: a deploy would take the domain off the show site.
   "assets": {
     "directory": "./web/dist",
     "binding": "ASSETS",
